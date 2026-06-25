@@ -40,3 +40,5 @@ src-tauri/target/
 target/
 yarn-debug.log*
 yarn-error.log*
+packs/default-yuukei/motion/*
+packs/default-yuukei/character/*
