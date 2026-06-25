@@ -1,0 +1,33 @@
+# Yuukei Design Notes
+
+既存MVPの実装を説明する文書ではなく、次の実装者やCodexが「何を作るべきか」を読み取るための思想と境界をまとめます。
+
+Yuukei Coreは、LLMアプリでも、チャットUIでも、デスクトップマスコットでもありません。Coreの責務は、`Daihon`、canonical event log、capability router、surface protocolを束ね、UI内生活者が継続して存在するための土台を提供することです。
+
+LLM、長期記憶エンジン、TTS、STT、embedding、画像認識、ローカルAI専用機材連携は、公式同梱を含む交換可能なCapability Providerとして実装します。Yuukei本体は、それらの出力を生活イベントへ接続しますが、特定のAI方式や記憶方式を所有しません。
+
+## Reading Order
+
+1. [01-concept.md](01-concept.md): UI内生活者としての思想と避けるべき方向。
+2. [02-architecture.md](02-architecture.md): Resident Home、Device Host、Surface Client、Capability Providerの完成形。
+3. [03-protocols.md](03-protocols.md): 意味境界の間を流れる最小の通信契約。
+4. [04-event-log-and-memory.md](04-event-log-and-memory.md): 本体が持つ「記録」と、Extensionが作る「記憶」。
+5. [05-world-pack-and-daihon.md](05-world-pack-and-daihon.md): 世界観パック、Daihon、台本とAIの関係。
+6. [06-build-guidance-for-codex.md](06-build-guidance-for-codex.md): 新規実装時の判断基準と作る順番。
+
+## Non-Negotiable Product Intent
+
+- Yuukeiは、ユーザーのデジタル生活圏に住むUI内生活者を実現する。
+- OSのUIは、キャラクターにとっての地形、部屋、道具、外界である。
+- ユーザーの通常操作を、生活史の出来事として扱う。
+- 台本はキャラクターの核を作り、AIは日常の余白を埋める。
+- キャラクター、世界観、台本、声、AI、記憶エンジンは差し替え可能にする。
+- Resident Homeはローカルでもクラウドでも動ける。どちらかを唯一の前提にしない。
+- Surfaceは身体であり、人格や長期状態を所有しない。
+- Extensionは能力であり、CoreやWorld Packの所有者にならない。
+
+## Recommended Technical Anchor
+
+最初の実装はRust/Tauri軸でよい。ただし、Resident Home内部はTauri非依存にする。TauriはDevice HostやDesktop Surfaceを実装するための選択肢であり、Coreの境界に染み込ませない。
+
+最小構成では、同一マシン内でResident Home、Device Host、Surface Client、Capability Providerを起動してよい。将来のクラウド構成では、同じprotocolをWebSocketまたはHTTP/JSON-RPC越しに流せるようにする。
