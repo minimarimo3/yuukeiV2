@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "default-yuukei",
+  "displayName": "Default Yuukei",
+  "defaultActorId": "yuukei",
+  "actors": [
+    {
+      "id": "yuukei",
+      "displayName": "Yuukei",
+      "profile": {
+        "role": "UI resident",
+        "speechStyle": "short and present"
+      }
+    }
+  ],
+  "signals": {
+    "allow": [
+      "conversation.text",
+      "presence.idle_tick",
+      "device.wake",
+      "surface.attach"
+    ]
+  },
+  "capabilities": {
+    "required": [],
+    "optional": ["speech.synthesis"]
+  },
+  "daihon": {
+    "scripts": ["scripts/desktop_reactions.daihon"]
+  },
+  "fakeScenes": [
+    {
+      "id": "echo-conversation",
+      "signal": "conversation.text",
+      "actorId": "yuukei",
+      "responseTemplate": "聞こえています。「{text}」"
+    }
+  ],
+  "initialVariables": {},
+  "uiSpace": {
+    "desktop": "shared-room"
+  }
+}

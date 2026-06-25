@@ -1,0 +1,19 @@
+[package]
+name = "yuukei-resident-home"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+yuukei-capability = { path = "../yuukei-capability" }
+yuukei-event-log = { path = "../yuukei-event-log" }
+yuukei-protocol = { path = "../yuukei-protocol" }
+yuukei-world = { path = "../yuukei-world" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
