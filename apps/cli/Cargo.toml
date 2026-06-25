@@ -1,0 +1,18 @@
+[package]
+name = "yuukei-cli-surface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "yuukei-cli-surface"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+dialoguer = "0.11"
+serde_json.workspace = true
+tokio.workspace = true
+yuukei-device-host = { path = "../../crates/yuukei-device-host" }
+yuukei-protocol = { path = "../../crates/yuukei-protocol" }

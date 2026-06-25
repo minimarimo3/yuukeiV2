@@ -1,10 +1,12 @@
 [workspace]
 members = [
     "crates/yuukei-capability",
+    "crates/yuukei-device-host",
     "crates/yuukei-event-log",
     "crates/yuukei-protocol",
     "crates/yuukei-resident-home",
     "crates/yuukei-world",
+    "apps/cli",
     "apps/desktop/src-tauri",
 ]
 resolver = "2"

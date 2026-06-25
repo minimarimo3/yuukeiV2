@@ -158,6 +158,7 @@ impl RuntimeCommand {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub enum SurfaceKind {
+    Cli,
     Desktop,
     Mobile,
     Widget,
@@ -169,6 +170,7 @@ pub enum SurfaceKind {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub enum SurfaceRenderer {
+    Terminal,
     Vrm,
     Live2d,
     Sprite,

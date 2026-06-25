@@ -21,8 +21,6 @@ serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.2.0", features = [] }
 tokio.workspace = true
-yuukei-event-log = { path = "../../../crates/yuukei-event-log" }
+yuukei-device-host = { path = "../../../crates/yuukei-device-host" }
 yuukei-protocol = { path = "../../../crates/yuukei-protocol" }
 yuukei-resident-home = { path = "../../../crates/yuukei-resident-home" }
-yuukei-world = { path = "../../../crates/yuukei-world" }
-

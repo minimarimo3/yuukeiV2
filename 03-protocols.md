@@ -120,11 +120,11 @@ Surface ClientとResident Homeの接続単位。
 type SurfaceSession = {
   surfaceId: string;
   deviceId: string;
-  kind: "desktop" | "mobile" | "widget" | "overlay" | "effect";
+  kind: "cli" | "desktop" | "mobile" | "widget" | "overlay" | "effect";
   active: boolean;
   capabilities: string[];
   presentation: {
-    renderer?: "vrm" | "live2d" | "sprite" | "html";
+    renderer?: "terminal" | "vrm" | "live2d" | "sprite" | "html";
     transparent?: boolean;
     acceptsInput?: boolean;
   };
@@ -134,6 +134,8 @@ type SurfaceSession = {
 Surfaceは `surface.attach` で接続し、`snapshot.subscribe` と `command.subscribe` を開始する。スマホ移動やPC復帰では、`surface.claim` によりactive surfaceを切り替える。
 
 Surfaceが離脱するときは `surface.release` を送る。Resident Homeは必要なら別Surfaceをactiveにするか、次のattachまで住人をheadless状態として扱う。
+
+CLI Surfaceは開発・検証用の正式なSurfaceである。`terminal` rendererは、`dialogue.say` などの描画命令を端末表示へ変換し、ユーザー入力を `conversation.text` として返す。Surfaceが人格や長期状態を持たないという制約はTauri版と同じである。
 
 ## CapabilityInvocation
 
