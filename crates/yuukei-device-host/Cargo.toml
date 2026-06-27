@@ -16,3 +16,4 @@ yuukei-world = { path = "../yuukei-world" }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true

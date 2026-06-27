@@ -2,7 +2,9 @@ use std::{env, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
-use yuukei_device_host::{cli_surface_session, LocalYuukeiRuntime, RuntimePaths, CLI_SURFACE_ID};
+use yuukei_device_host::{
+    cli_surface_session, LocalYuukeiRuntime, RuntimePaths, WorldPackSelectionState, CLI_SURFACE_ID,
+};
 use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -11,6 +13,8 @@ enum CliMode {
     Say(String),
     Snapshot,
     ExportEvents(PathBuf),
+    SelectWorldPack(PathBuf),
+    ResetWorldPack,
     Help,
 }
 
@@ -22,9 +26,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let runtime = LocalYuukeiRuntime::open_default()
-        .await
-        .context("failed to open Yuukei local runtime")?;
+    let runtime = match &mode {
+        CliMode::SelectWorldPack(path) => LocalYuukeiRuntime::select_world_pack_directory(path)
+            .await
+            .context("failed to select World Pack")?,
+        CliMode::ResetWorldPack => LocalYuukeiRuntime::reset_world_pack_to_default()
+            .await
+            .context("failed to reset World Pack")?,
+        _ => LocalYuukeiRuntime::open_default()
+            .await
+            .context("failed to open Yuukei local runtime")?,
+    };
     let snapshot = runtime
         .attach_surface(cli_surface_session(runtime.device_id()))
         .context("failed to attach CLI surface")?;
@@ -59,6 +71,16 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        CliMode::SelectWorldPack(_) | CliMode::ResetWorldPack => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "snapshot": runtime.snapshot()?,
+                    "worldPackStatus": runtime.world_pack_status()
+                }))?
+            );
+            Ok(())
+        }
         CliMode::Help => unreachable!("handled before runtime startup"),
     }
 }
@@ -83,18 +105,26 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliMode> {
             };
             Ok(CliMode::ExportEvents(PathBuf::from(path)))
         }
+        "--world-pack" => {
+            let Some(path) = args.get(1) else {
+                bail!("missing path after --world-pack");
+            };
+            Ok(CliMode::SelectWorldPack(PathBuf::from(path)))
+        }
+        "--reset-world-pack" => Ok(CliMode::ResetWorldPack),
         "-h" | "--help" => Ok(CliMode::Help),
         other => bail!("unknown argument: {other}"),
     }
 }
 
-async fn run_wizard(runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> Result<()> {
+async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> Result<()> {
     let theme = ColorfulTheme::default();
     let mut command_history: Vec<RuntimeCommand> = Vec::new();
 
     println!("Yuukei CLI Surface");
     println!("Surface: {CLI_SURFACE_ID}");
     print_paths(runtime.paths());
+    print_world_pack_status(&runtime.world_pack_status());
     print_snapshot_summary(&snapshot);
 
     loop {
@@ -130,6 +160,30 @@ async fn run_wizard(runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> 
             }
             WizardAction::Paths => {
                 print_paths(runtime.paths());
+                print_world_pack_status(&runtime.world_pack_status());
+            }
+            WizardAction::SelectWorldPack => {
+                let path = Input::<String>::with_theme(&theme)
+                    .with_prompt("World Pack ディレクトリ")
+                    .allow_empty(false)
+                    .interact_text()?;
+                runtime =
+                    LocalYuukeiRuntime::select_world_pack_directory(PathBuf::from(path.trim()))
+                        .await
+                        .context("failed to select World Pack")?;
+                let snapshot = runtime.attach_surface(cli_surface_session(runtime.device_id()))?;
+                command_history.clear();
+                print_world_pack_status(&runtime.world_pack_status());
+                print_snapshot_summary(&snapshot);
+            }
+            WizardAction::ResetWorldPack => {
+                runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
+                    .await
+                    .context("failed to reset World Pack")?;
+                let snapshot = runtime.attach_surface(cli_surface_session(runtime.device_id()))?;
+                command_history.clear();
+                print_world_pack_status(&runtime.world_pack_status());
+                print_snapshot_summary(&snapshot);
             }
             WizardAction::Quit => {
                 println!("CLI Surface を終了します。");
@@ -146,6 +200,8 @@ enum WizardAction {
     CommandHistory,
     ExportEvents,
     Paths,
+    SelectWorldPack,
+    ResetWorldPack,
     Quit,
 }
 
@@ -156,6 +212,8 @@ fn select_action(theme: &ColorfulTheme) -> Result<WizardAction> {
         ("コマンド履歴を見る", WizardAction::CommandHistory),
         ("イベントログを書き出す", WizardAction::ExportEvents),
         ("ログファイルの場所を見る", WizardAction::Paths),
+        ("World Packを選ぶ", WizardAction::SelectWorldPack),
+        ("Default World Packに戻す", WizardAction::ResetWorldPack),
         ("終了", WizardAction::Quit),
     ];
     let labels = actions.iter().map(|(label, _)| *label).collect::<Vec<_>>();
@@ -192,6 +250,22 @@ fn show_command_history_page(theme: &ColorfulTheme, commands: &[RuntimeCommand])
 fn print_paths(paths: &RuntimePaths) {
     println!("Event log: {}", paths.event_log_path.display());
     println!("App log: {}", paths.app_log_path.display());
+    println!("World root: {}", paths.world_root.display());
+}
+
+fn print_world_pack_status(status: &WorldPackSelectionState) {
+    println!(
+        "World Pack: {} / install: {} / configured: {}",
+        status.active_install.world_pack_id,
+        status.running_install_id,
+        status.configured_install_id
+    );
+    if status.fallback_active {
+        println!(
+            "World Pack fallback: {}",
+            status.last_load_error.as_deref().unwrap_or("unknown error")
+        );
+    }
 }
 
 fn print_snapshot_summary(snapshot: &ResidentSnapshot) {
@@ -251,7 +325,9 @@ fn print_usage() {
   yuukei-cli-surface
   yuukei-cli-surface --say <text>
   yuukei-cli-surface --snapshot
-  yuukei-cli-surface --export-events <path>"
+  yuukei-cli-surface --export-events <path>
+  yuukei-cli-surface --world-pack <dir>
+  yuukei-cli-surface --reset-world-pack"
     );
 }
 
@@ -282,6 +358,24 @@ mod tests {
                 "target/events.jsonl".to_string()
             ])?,
             CliMode::ExportEvents(PathBuf::from("target/events.jsonl"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_mode_captures_directory() -> Result<()> {
+        assert_eq!(
+            parse_args(vec!["--world-pack".to_string(), "packs/custom".to_string()])?,
+            CliMode::SelectWorldPack(PathBuf::from("packs/custom"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reset_world_pack_mode_is_supported() -> Result<()> {
+        assert_eq!(
+            parse_args(vec!["--reset-world-pack".to_string()])?,
+            CliMode::ResetWorldPack
         );
         Ok(())
     }

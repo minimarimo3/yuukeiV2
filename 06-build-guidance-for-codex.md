@@ -60,8 +60,11 @@ Device Hostはローカル端末の感覚器と能力ホストである。
 - Surfaceを登録する。
 - ローカルCapability Providerを登録する。
 - 端末のpresence、idle、起動、終了をRuntimeEventとして送る。
+- ユーザーが選んだWorld Packディレクトリをローカル設定に保存し、選択されたPack installに対応するResident Home起動設定を作る。
 
 OS観測は段階的に増やす。Finder/Explorer、ファイル、通知、スマホセンサーなどは、すべてDevice Host側の拡張として扱う。
+
+World Pack選択UIはDevice Hostに置く。ただし、active World Packの解釈、required capability確認、Packごとのresident/event-log分離はResident Home起動境界の責務として扱う。Surface Clientは `ResidentSnapshot.worldPackId` を表示してよいが、Pack選択や人格継続性を所有しない。
 
 ### 5. Daihon Integration
 

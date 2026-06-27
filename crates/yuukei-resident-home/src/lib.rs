@@ -24,6 +24,8 @@ pub enum ResidentHomeError {
     World(#[from] WorldError),
     #[error("capability error: {0}")]
     Capability(#[from] CapabilityError),
+    #[error("world pack requires unavailable capabilities: {0}")]
+    MissingRequiredCapabilities(String),
     #[error("state lock is poisoned")]
     PoisonedLock,
     #[error("serialization error: {0}")]
@@ -83,6 +85,18 @@ impl ResidentHome {
                 .any(|cap| cap == "speech.synthesis")
         }) {
             capabilities.register(StubSpeechSynthesisProvider)?;
+        }
+        let missing_capabilities = world_pack
+            .capabilities
+            .required
+            .iter()
+            .filter(|capability| !capabilities.has_healthy_provider(capability))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_capabilities.is_empty() {
+            return Err(ResidentHomeError::MissingRequiredCapabilities(
+                missing_capabilities.join(", "),
+            ));
         }
 
         let resident_id = resident_id.into();
@@ -568,6 +582,22 @@ mod tests {
                 .len(),
             1
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_world_pack_with_missing_required_capability() -> Result<()> {
+        let mut world = world_pack();
+        world.capabilities.required = vec!["dialogue.generate".to_string()];
+        let error = match ResidentHome::new("resident-default", world, EventLog::in_memory()?).await
+        {
+            Ok(_) => panic!("missing required capability should reject the world pack"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ResidentHomeError::MissingRequiredCapabilities(_)
+        ));
         Ok(())
     }
 }

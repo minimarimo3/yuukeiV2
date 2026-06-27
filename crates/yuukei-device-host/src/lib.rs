@@ -16,6 +16,13 @@ use yuukei_protocol::{
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{WorldError, WorldPack};
 
+mod world_pack_registry;
+
+pub use world_pack_registry::{
+    LocalRuntimeEnvironment, WorldPackInstall, WorldPackSelectionState, WorldPackSource,
+    WorldPackSwitchResult, DEFAULT_WORLD_PACK_INSTALL_ID,
+};
+
 pub const DEFAULT_RESIDENT_ID: &str = "resident-default";
 pub const DEFAULT_DEVICE_ID: &str = "device-local";
 pub const TAURI_SURFACE_ID: &str = "surface-tauri";
@@ -50,6 +57,7 @@ pub struct RuntimePaths {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalRuntimeConfig {
+    pub install_id: String,
     pub resident_id: String,
     pub device_id: String,
     pub workspace_root: PathBuf,
@@ -65,9 +73,13 @@ impl LocalRuntimeConfig {
         let data_dir = default_data_dir();
         let world_root = workspace_root.join("packs").join("default-yuukei");
         Self {
+            install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
             resident_id: DEFAULT_RESIDENT_ID.to_string(),
             device_id: DEFAULT_DEVICE_ID.to_string(),
-            event_log_path: data_dir.join("events.sqlite3"),
+            event_log_path: data_dir
+                .join("residents")
+                .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+                .join("events.sqlite3"),
             app_log_path: data_dir.join("app-activity.jsonl"),
             workspace_root,
             data_dir,
@@ -90,18 +102,100 @@ impl LocalRuntimeConfig {
 pub struct LocalYuukeiRuntime {
     home: Arc<ResidentHome>,
     logger: AppLogger,
+    install_id: String,
     resident_id: String,
     device_id: String,
     paths: RuntimePaths,
+    world_pack_status: WorldPackSelectionState,
 }
 
 impl LocalYuukeiRuntime {
     pub async fn open_default() -> Result<Self> {
-        Self::open(LocalRuntimeConfig::default_local()).await
+        Self::open_selected().await
+    }
+
+    pub async fn open_selected() -> Result<Self> {
+        Self::open_selected_in(LocalRuntimeEnvironment::default_local()).await
+    }
+
+    pub async fn open_selected_in(env: LocalRuntimeEnvironment) -> Result<Self> {
+        let mut registry = world_pack_registry::WorldPackRegistry::open(env)?;
+        let requested_install = registry.active_install()?;
+        let status = registry.selection_state(&requested_install, false);
+        match Self::open_with_status(registry.config_for_install(&requested_install), status).await
+        {
+            Ok(runtime) => Ok(runtime),
+            Err(error) if requested_install.install_id != DEFAULT_WORLD_PACK_INSTALL_ID => {
+                registry.mark_load_error(&requested_install.install_id, error.to_string())?;
+                let default_install = registry.default_install()?;
+                let status = registry.selection_state(&default_install, true);
+                Self::open_with_status(registry.config_for_install(&default_install), status).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn select_world_pack_directory(path: impl AsRef<Path>) -> Result<Self> {
+        Self::select_world_pack_directory_in(LocalRuntimeEnvironment::default_local(), path).await
+    }
+
+    pub async fn select_world_pack_directory_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let mut registry = world_pack_registry::WorldPackRegistry::open(env)?;
+        let install = registry.install_from_directory(path)?;
+        registry.stage_active_install(install.clone());
+        let status = registry.selection_state(&install, false);
+        let runtime = Self::open_with_status(registry.config_for_install(&install), status).await?;
+        registry.save()?;
+        Ok(runtime)
+    }
+
+    pub async fn reset_world_pack_to_default() -> Result<Self> {
+        Self::reset_world_pack_to_default_in(LocalRuntimeEnvironment::default_local()).await
+    }
+
+    pub async fn reset_world_pack_to_default_in(env: LocalRuntimeEnvironment) -> Result<Self> {
+        let mut registry = world_pack_registry::WorldPackRegistry::open(env)?;
+        let install = registry.default_install()?;
+        registry.stage_active_install(install.clone());
+        let status = registry.selection_state(&install, false);
+        let runtime = Self::open_with_status(registry.config_for_install(&install), status).await?;
+        registry.save()?;
+        Ok(runtime)
     }
 
     pub async fn open(config: LocalRuntimeConfig) -> Result<Self> {
+        let install = WorldPackInstall {
+            install_id: config.install_id.clone(),
+            resident_id: config.resident_id.clone(),
+            world_pack_id: "custom".to_string(),
+            display_name: "Custom World Pack".to_string(),
+            canonical_root: config.world_root.clone(),
+            source: WorldPackSource::ExternalDirectory,
+            last_load_error: None,
+        };
+        let status = WorldPackSelectionState {
+            configured_install_id: install.install_id.clone(),
+            running_install_id: install.install_id.clone(),
+            active_install: install.clone(),
+            installs: vec![install],
+            fallback_active: false,
+            last_load_error: None,
+            settings_path: config.data_dir.join("settings").join("world-packs.json"),
+        };
+        Self::open_with_status(config, status).await
+    }
+
+    async fn open_with_status(
+        config: LocalRuntimeConfig,
+        world_pack_status: WorldPackSelectionState,
+    ) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
+        if let Some(parent) = config.event_log_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let logger = AppLogger::open(&config.app_log_path)?;
         let paths = config.paths();
         logger.record("runtime.open.request", "device-host", paths_payload(&paths))?;
@@ -161,13 +255,17 @@ impl LocalYuukeiRuntime {
             ]),
         )?;
 
-        Ok(Self {
+        let runtime = Self {
             home,
             logger,
+            install_id: config.install_id,
             resident_id: config.resident_id,
             device_id: config.device_id,
             paths,
-        })
+            world_pack_status,
+        };
+        runtime.record_world_pack_activated().await?;
+        Ok(runtime)
     }
 
     pub fn home(&self) -> Arc<ResidentHome> {
@@ -182,6 +280,10 @@ impl LocalYuukeiRuntime {
         &self.paths
     }
 
+    pub fn install_id(&self) -> &str {
+        &self.install_id
+    }
+
     pub fn resident_id(&self) -> &str {
         &self.resident_id
     }
@@ -192,6 +294,10 @@ impl LocalYuukeiRuntime {
 
     pub fn snapshot(&self) -> Result<ResidentSnapshot> {
         self.home.snapshot().map_err(Into::into)
+    }
+
+    pub fn world_pack_status(&self) -> WorldPackSelectionState {
+        self.world_pack_status.clone()
     }
 
     pub fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
@@ -308,6 +414,65 @@ impl LocalYuukeiRuntime {
             ]),
         )?;
         Ok(summary.exported)
+    }
+
+    async fn record_world_pack_activated(&self) -> Result<()> {
+        let source = match &self.world_pack_status.active_install.source {
+            WorldPackSource::BundledDefault => "bundledDefault",
+            WorldPackSource::ExternalDirectory => "externalDirectory",
+        };
+        let event = RuntimeEvent {
+            id: new_id("evt"),
+            kind: "world_pack.activated".to_string(),
+            timestamp: now_timestamp(),
+            source: "device-host".to_string(),
+            resident_id: self.resident_id.clone(),
+            payload: JsonMap::from([
+                ("installId".to_string(), json!(self.install_id.clone())),
+                (
+                    "worldPackId".to_string(),
+                    json!(self.world_pack_status.active_install.world_pack_id.clone()),
+                ),
+                (
+                    "displayName".to_string(),
+                    json!(self.world_pack_status.active_install.display_name.clone()),
+                ),
+                ("source".to_string(), json!(source)),
+                (
+                    "configuredInstallId".to_string(),
+                    json!(self.world_pack_status.configured_install_id.clone()),
+                ),
+                (
+                    "fallbackActive".to_string(),
+                    json!(self.world_pack_status.fallback_active),
+                ),
+            ]),
+            causality: None,
+            device_id: Some(self.device_id.clone()),
+            surface_id: None,
+            actor_id: None,
+        };
+        self.home.ingest_event(event).await?;
+        self.logger.record(
+            "world_pack.activated",
+            "device-host",
+            JsonMap::from([
+                ("installId".to_string(), json!(self.install_id.clone())),
+                (
+                    "worldPackId".to_string(),
+                    json!(self.world_pack_status.active_install.world_pack_id.clone()),
+                ),
+                (
+                    "worldRoot".to_string(),
+                    json!(display_path(&self.paths.world_root)),
+                ),
+                (
+                    "fallbackActive".to_string(),
+                    json!(self.world_pack_status.fallback_active),
+                ),
+            ]),
+        )?;
+        Ok(())
     }
 }
 
@@ -482,6 +647,8 @@ fn display_path(path: impl AsRef<Path>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -529,5 +696,189 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-test"));
         assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn selected_default_uses_per_pack_event_log() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let snapshot = runtime.snapshot()?;
+
+        assert_eq!(snapshot.world_pack_id, "default-yuukei");
+        assert_eq!(runtime.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
+        assert!(runtime
+            .paths()
+            .event_log_path
+            .ends_with("residents/default-yuukei/events.sqlite3"));
+        assert!(runtime.paths().event_log_path.exists());
+        assert!(runtime
+            .world_pack_status()
+            .settings_path
+            .ends_with("settings/world-packs.json"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_world_pack_persists_and_reuses_install() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let external_root = workspace.path().join("external-pack");
+        write_pack(&external_root, "external-yuukei", "External Yuukei", &[])?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime =
+            LocalYuukeiRuntime::select_world_pack_directory_in(env.clone(), &external_root).await?;
+        let install_id = runtime.install_id().to_string();
+        assert_eq!(runtime.snapshot()?.world_pack_id, "external-yuukei");
+        assert!(runtime
+            .paths()
+            .event_log_path
+            .ends_with(format!("residents/{install_id}/events.sqlite3")));
+        assert_ne!(install_id, DEFAULT_WORLD_PACK_INSTALL_ID);
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
+        assert_eq!(reopened.install_id(), install_id);
+        assert_eq!(reopened.resident_id(), runtime.resident_id());
+        assert_eq!(reopened.snapshot()?.world_pack_id, "external-yuukei");
+
+        let selected_again =
+            LocalYuukeiRuntime::select_world_pack_directory_in(env, &external_root).await?;
+        assert_eq!(selected_again.install_id(), install_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_saved_external_pack_falls_back_to_default() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let external_root = workspace.path().join("external-pack");
+        write_pack(&external_root, "external-yuukei", "External Yuukei", &[])?;
+        let env = test_env(workspace.path(), data.path());
+
+        let selected =
+            LocalYuukeiRuntime::select_world_pack_directory_in(env.clone(), &external_root).await?;
+        let external_install_id = selected.install_id().to_string();
+        fs::remove_file(external_root.join("pack.json"))?;
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let status = reopened.world_pack_status();
+        assert_eq!(reopened.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
+        assert_eq!(reopened.snapshot()?.world_pack_id, "default-yuukei");
+        assert!(status.fallback_active);
+        assert_eq!(status.configured_install_id, external_install_id);
+        assert!(status.last_load_error.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn manual_selection_rejects_missing_required_capability_without_saving() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let external_root = workspace.path().join("external-pack");
+        write_pack(
+            &external_root,
+            "external-yuukei",
+            "External Yuukei",
+            &["dialogue.generate"],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        let error =
+            match LocalYuukeiRuntime::select_world_pack_directory_in(env.clone(), &external_root)
+                .await
+            {
+                Ok(_) => panic!("missing required capability should reject the world pack"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("dialogue.generate"));
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
+        assert_eq!(reopened.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
+        assert!(!reopened.world_pack_status().fallback_active);
+        Ok(())
+    }
+
+    fn test_env(workspace_root: &Path, data_dir: &Path) -> LocalRuntimeEnvironment {
+        LocalRuntimeEnvironment {
+            workspace_root: workspace_root.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+            device_id: "device-test".to_string(),
+        }
+    }
+
+    fn write_pack(
+        root: &Path,
+        id: &str,
+        display_name: &str,
+        required_capabilities: &[&str],
+    ) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+ユーザー発言=入力#ユーザー発言
+「聞こえています。＜ユーザー発言＞」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": id,
+                "displayName": display_name,
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": display_name,
+                        "profile": {}
+                    }
+                ],
+                "signals": {
+                    "allow": ["conversation.text", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": required_capabilities,
+                    "optional": ["speech.synthesis"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
     }
 }

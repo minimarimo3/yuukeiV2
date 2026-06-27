@@ -513,11 +513,17 @@ fn format_diagnostics(diagnostics: &[DaihonDiagnostic]) -> String {
 
 impl WorldPack {
     pub fn load_from_dir(path: impl AsRef<Path>) -> Result<Self> {
-        let root = path.as_ref();
+        let root = fs::canonicalize(path.as_ref())?;
+        if !root.is_dir() {
+            return Err(WorldError::Validation(format!(
+                "world pack root must be a directory: {}",
+                root.display()
+            )));
+        }
         let pack_path = root.join("pack.json");
         let raw = fs::read_to_string(pack_path)?;
         let mut pack: Self = serde_json::from_str(&raw)?;
-        pack.daihon.loaded_scripts = pack.load_daihon_scripts(root)?;
+        pack.daihon.loaded_scripts = pack.load_daihon_scripts(&root)?;
         pack.validate()?;
         Ok(pack)
     }
@@ -606,7 +612,13 @@ fn validate_relative_pack_path(root: &Path, path: &str) -> Result<PathBuf> {
             "pack path must stay inside pack root: {path}"
         )));
     }
-    Ok(root.join(relative))
+    let resolved = fs::canonicalize(root.join(relative))?;
+    if !resolved.starts_with(root) {
+        return Err(WorldError::Validation(format!(
+            "pack path must stay inside pack root: {path}"
+        )));
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -675,6 +687,60 @@ mod tests {
         invalid.daihon.scripts = vec!["../escape.daihon".to_string()];
         let raw = serde_json::to_string(&invalid)?;
         fs::write(dir.path().join("pack.json"), raw)?;
+        assert!(matches!(
+            WorldPack::load_from_dir(dir.path()),
+            Err(WorldError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_pack_manifest() -> Result<()> {
+        let dir = tempdir()?;
+        assert!(matches!(
+            WorldPack::load_from_dir(dir.path()),
+            Err(WorldError::Io(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsupported_schema_version() -> Result<()> {
+        let dir = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        let mut invalid = pack();
+        invalid.schema_version = 2;
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&invalid)?,
+        )?;
+        assert!(matches!(
+            WorldPack::load_from_dir(dir.path()),
+            Err(WorldError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_for_daihon_scripts() -> Result<()> {
+        let dir = tempdir()?;
+        let outside = tempdir()?;
+        fs::write(
+            outside.path().join("escape.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("scripts"))?;
+        let mut invalid = pack();
+        invalid.daihon.scripts = vec!["scripts/escape.daihon".to_string()];
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&invalid)?,
+        )?;
         assert!(matches!(
             WorldPack::load_from_dir(dir.path()),
             Err(WorldError::Validation(_))

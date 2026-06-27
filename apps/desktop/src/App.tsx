@@ -1,6 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
-import { tauriYuukeiClient, YuukeiClient } from "./yuukeiClient";
+import {
+  tauriYuukeiClient,
+  type WorldPackSelectionState,
+  type YuukeiClient
+} from "./yuukeiClient";
 
 type AppProps = {
   client?: YuukeiClient;
@@ -11,6 +15,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [commands, setCommands] = useState<RuntimeCommand[]>([]);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("connecting");
+  const [worldPackStatus, setWorldPackStatus] =
+    useState<WorldPackSelectionState | null>(null);
+  const [worldPackError, setWorldPackError] = useState<string | null>(null);
+  const [switchingPack, setSwitchingPack] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -27,6 +35,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         const attached = await client.attachSurface();
         if (!disposed) {
           setSnapshot(attached);
+          setWorldPackStatus(await client.getWorldPackStatus());
           setStatus("ready");
         }
       } catch (error) {
@@ -60,6 +69,40 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     setSnapshot(await client.getSnapshot());
   }
 
+  async function chooseWorldPack() {
+    setWorldPackError(null);
+    setSwitchingPack(true);
+    try {
+      const path = await client.openWorldPackDirectory();
+      if (!path) return;
+      const result = await client.selectWorldPackDirectory(path);
+      setWorldPackStatus(result.status);
+      setSnapshot(result.snapshot);
+      setCommands([]);
+      setStatus("ready");
+    } catch (error) {
+      setWorldPackError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingPack(false);
+    }
+  }
+
+  async function resetWorldPack() {
+    setWorldPackError(null);
+    setSwitchingPack(true);
+    try {
+      const result = await client.resetWorldPackToDefault();
+      setWorldPackStatus(result.status);
+      setSnapshot(result.snapshot);
+      setCommands([]);
+      setStatus("ready");
+    } catch (error) {
+      setWorldPackError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSwitchingPack(false);
+    }
+  }
+
   return (
     <main className="surface-shell">
       <section className="resident-pane" aria-label="Resident surface">
@@ -74,6 +117,44 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <p className="bubble" data-testid="bubble">
             {activeActor?.bubble ?? "…"}
           </p>
+        </div>
+      </section>
+
+      <section className="settings-panel" aria-label="World Pack settings">
+        <div className="settings-copy">
+          <h2>World Pack</h2>
+          <p className="settings-title">
+            {worldPackStatus?.activeInstall.displayName ?? "loading"}
+          </p>
+          <p className="settings-path">
+            {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
+          </p>
+          {worldPackStatus?.fallbackActive ? (
+            <p className="settings-error">
+              保存済み Pack を読み込めませんでした:{" "}
+              {worldPackStatus.lastLoadError ?? "unknown error"}
+            </p>
+          ) : null}
+          {worldPackError ? (
+            <p className="settings-error">{worldPackError}</p>
+          ) : null}
+        </div>
+        <div className="settings-actions">
+          <button
+            type="button"
+            onClick={chooseWorldPack}
+            disabled={switchingPack}
+          >
+            フォルダを選択
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={resetWorldPack}
+            disabled={switchingPack}
+          >
+            Default
+          </button>
         </div>
       </section>
 

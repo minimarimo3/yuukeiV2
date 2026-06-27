@@ -1,24 +1,42 @@
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State};
-use yuukei_device_host::{tauri_surface_session, LocalYuukeiRuntime, TAURI_SURFACE_ID};
+use tokio::sync::Mutex;
+use yuukei_device_host::{
+    tauri_surface_session, LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult,
+    TAURI_SURFACE_ID,
+};
 use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
 
 pub struct AppState {
-    runtime: LocalYuukeiRuntime,
+    runtime: Mutex<LocalYuukeiRuntime>,
+    command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 #[tauri::command]
-fn attach_surface(app: AppHandle, state: State<'_, AppState>) -> Result<ResidentSnapshot, String> {
-    let session = tauri_surface_session(state.runtime.device_id());
-    let snapshot = state.runtime.attach_surface(session).map_err(to_message)?;
+async fn attach_surface(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ResidentSnapshot, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let session = tauri_surface_session(runtime.device_id());
+    let snapshot = runtime.attach_surface(session).map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn get_snapshot(state: State<'_, AppState>) -> Result<ResidentSnapshot, String> {
-    state.runtime.snapshot().map_err(to_message)
+async fn get_snapshot(state: State<'_, AppState>) -> Result<ResidentSnapshot, String> {
+    let runtime = state.runtime.lock().await.clone();
+    runtime.snapshot().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_world_pack_status(
+    state: State<'_, AppState>,
+) -> Result<WorldPackSelectionState, String> {
+    let runtime = state.runtime.lock().await;
+    Ok(runtime.world_pack_status())
 }
 
 #[tauri::command]
@@ -27,7 +45,7 @@ async fn send_conversation_text(
     state: State<'_, AppState>,
     text: String,
 ) -> Result<Vec<RuntimeCommand>, String> {
-    let runtime = state.runtime.clone();
+    let runtime = state.runtime.lock().await.clone();
     let commands = runtime
         .send_conversation_text(TAURI_SURFACE_ID, &text)
         .await
@@ -37,32 +55,91 @@ async fn send_conversation_text(
     Ok(commands)
 }
 
+#[tauri::command]
+async fn select_world_pack_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorldPackSwitchResult, String> {
+    let runtime = LocalYuukeiRuntime::select_world_pack_directory(path)
+        .await
+        .map_err(to_message)?;
+    replace_runtime(app, state, runtime).await
+}
+
+#[tauri::command]
+async fn reset_world_pack_to_default(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WorldPackSwitchResult, String> {
+    let runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
+        .await
+        .map_err(to_message)?;
+    replace_runtime(app, state, runtime).await
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let runtime = tauri::async_runtime::block_on(LocalYuukeiRuntime::open_default())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             println!("Yuukei app log: {}", runtime.paths().app_log_path.display());
-            spawn_command_forwarder(runtime.home(), app.handle().clone());
-            app.manage(AppState { runtime });
+            let command_forwarder = spawn_command_forwarder(runtime.home(), app.handle().clone());
+            app.manage(AppState {
+                runtime: Mutex::new(runtime),
+                command_forwarder: Mutex::new(Some(command_forwarder)),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             attach_surface,
             get_snapshot,
-            send_conversation_text
+            get_world_pack_status,
+            send_conversation_text,
+            select_world_pack_directory,
+            reset_world_pack_to_default
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");
 }
 
-fn spawn_command_forwarder(home: Arc<yuukei_resident_home::ResidentHome>, app: AppHandle) {
+async fn replace_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    runtime: LocalYuukeiRuntime,
+) -> Result<WorldPackSwitchResult, String> {
+    let snapshot = runtime
+        .attach_surface(tauri_surface_session(runtime.device_id()))
+        .map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    let next_forwarder = spawn_command_forwarder(runtime.home(), app);
+    let status = runtime.world_pack_status();
+
+    {
+        let mut current = state.runtime.lock().await;
+        *current = runtime;
+    }
+    {
+        let mut forwarder = state.command_forwarder.lock().await;
+        if let Some(previous) = forwarder.replace(next_forwarder) {
+            previous.abort();
+        }
+    }
+
+    Ok(WorldPackSwitchResult { status, snapshot })
+}
+
+fn spawn_command_forwarder(
+    home: Arc<yuukei_resident_home::ResidentHome>,
+    app: AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
     let mut receiver = home.subscribe_commands();
     tauri::async_runtime::spawn(async move {
         while let Ok(command) = receiver.recv().await {
             let _ = app.emit("yuukei-command", &command);
         }
-    });
+    })
 }
 
 fn to_message(error: impl std::fmt::Display) -> String {

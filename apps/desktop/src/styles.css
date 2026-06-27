@@ -21,7 +21,7 @@ input {
 .surface-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-rows: 1fr auto minmax(120px, 28vh);
+  grid-template-rows: 1fr auto auto minmax(120px, 26vh);
   gap: 16px;
   padding: 20px;
 }
@@ -68,6 +68,58 @@ input {
   line-height: 1.6;
 }
 
+.settings-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid #ded8cf;
+  border-bottom: 1px solid #ded8cf;
+  padding: 12px 0;
+}
+
+.settings-copy {
+  min-width: 0;
+}
+
+.settings-copy h2 {
+  margin: 0 0 5px;
+  color: #3c4a4d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-title {
+  margin: 0;
+  color: #202327;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.settings-path {
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: #667078;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-error {
+  margin: 6px 0 0;
+  color: #a13e2f;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -91,6 +143,29 @@ input {
   background: #2b6b73;
   color: white;
   cursor: pointer;
+}
+
+.settings-actions button {
+  min-width: 88px;
+  height: 36px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #2b6b73;
+  color: white;
+  cursor: pointer;
+}
+
+.settings-actions button:disabled,
+.input-row button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.settings-actions .secondary-button {
+  border: 1px solid #b8c0bf;
+  background: #eef3f1;
+  color: #2f4144;
 }
 
 .command-feed {
@@ -129,5 +204,17 @@ input {
   .resident-avatar {
     width: 72px;
     font-size: 32px;
+  }
+
+  .settings-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-actions {
+    justify-content: stretch;
+  }
+
+  .settings-actions button {
+    flex: 1;
   }
 }

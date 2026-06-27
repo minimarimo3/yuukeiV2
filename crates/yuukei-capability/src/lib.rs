@@ -163,6 +163,12 @@ impl CapabilityRouter {
             .collect()
     }
 
+    pub fn has_healthy_provider(&self, capability: &str) -> bool {
+        self.registrations
+            .values()
+            .any(|registration| registration.is_healthy_for(capability))
+    }
+
     pub async fn invoke(&self, invocation: CapabilityInvocation) -> Result<CapabilityResult> {
         let provider_id = self.select_provider(&invocation.capability)?;
         let registration = self
