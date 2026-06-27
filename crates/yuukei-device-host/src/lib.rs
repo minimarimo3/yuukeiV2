@@ -9,16 +9,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use yuukei_event_log::{EventLog, EventLogQuery};
-use yuukei_extension::{ProcessExtensionManifest, ProcessHookExtension};
+use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
-    new_id, now_timestamp, JsonMap, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceKind,
-    SurfacePresentation, SurfaceRenderer, SurfaceSession,
+    new_id, now_timestamp, ExtensionHookPoint, JsonMap, ResidentSnapshot, RuntimeCommand,
+    RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{WorldError, WorldPack};
 
+mod extension_settings;
 mod world_pack_registry;
 
+use extension_settings::{ExtensionRuntimeEntry, ExtensionSettingsRegistry};
+pub use extension_settings::{
+    ExtensionSettingsChangeResult, ExtensionSettingsState, InstalledExtension, TRUSTED_CODE_NOTICE,
+};
 pub use world_pack_registry::{
     LocalRuntimeEnvironment, WorldPackInstall, WorldPackSelectionState, WorldPackSource,
     WorldPackSwitchResult, DEFAULT_WORLD_PACK_INSTALL_ID,
@@ -43,6 +48,8 @@ pub enum DeviceHostError {
     World(#[from] WorldError),
     #[error("app log error: {0}")]
     AppLog(#[from] AppLogError),
+    #[error("extension settings error: {0}")]
+    ExtensionSettings(String),
 }
 
 pub type Result<T> = std::result::Result<T, DeviceHostError>;
@@ -101,6 +108,10 @@ impl LocalRuntimeConfig {
             event_log_path: self.event_log_path.clone(),
             app_log_path: self.app_log_path.clone(),
         }
+    }
+
+    fn extension_settings_registry(&self) -> Result<ExtensionSettingsRegistry> {
+        ExtensionSettingsRegistry::open(&self.data_dir, &self.extension_root)
     }
 }
 
@@ -172,6 +183,85 @@ impl LocalYuukeiRuntime {
         Ok(runtime)
     }
 
+    pub fn extension_settings_state() -> Result<ExtensionSettingsState> {
+        Self::extension_settings_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn extension_settings_state_in(
+        env: LocalRuntimeEnvironment,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        Ok(config.extension_settings_registry()?.state())
+    }
+
+    pub fn install_extension_directory(path: impl AsRef<Path>) -> Result<ExtensionSettingsState> {
+        Self::install_extension_directory_in(LocalRuntimeEnvironment::default_local(), path)
+    }
+
+    pub fn install_extension_directory_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.install_from_directory(path)
+    }
+
+    pub fn uninstall_extension(extension_id: &str) -> Result<ExtensionSettingsState> {
+        Self::uninstall_extension_in(LocalRuntimeEnvironment::default_local(), extension_id)
+    }
+
+    pub fn uninstall_extension_in(
+        env: LocalRuntimeEnvironment,
+        extension_id: &str,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.uninstall(extension_id)
+    }
+
+    pub fn set_extension_enabled(
+        extension_id: &str,
+        enabled: bool,
+    ) -> Result<ExtensionSettingsState> {
+        Self::set_extension_enabled_in(
+            LocalRuntimeEnvironment::default_local(),
+            extension_id,
+            enabled,
+        )
+    }
+
+    pub fn set_extension_enabled_in(
+        env: LocalRuntimeEnvironment,
+        extension_id: &str,
+        enabled: bool,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.set_enabled(extension_id, enabled)
+    }
+
+    pub fn set_extension_hook_order(
+        hook_point: ExtensionHookPoint,
+        extension_ids: Vec<String>,
+    ) -> Result<ExtensionSettingsState> {
+        Self::set_extension_hook_order_in(
+            LocalRuntimeEnvironment::default_local(),
+            hook_point,
+            extension_ids,
+        )
+    }
+
+    pub fn set_extension_hook_order_in(
+        env: LocalRuntimeEnvironment,
+        hook_point: ExtensionHookPoint,
+        extension_ids: Vec<String>,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.set_hook_order(hook_point, extension_ids)
+    }
+
     pub async fn open(config: LocalRuntimeConfig) -> Result<Self> {
         let install = WorldPackInstall {
             install_id: config.install_id.clone(),
@@ -240,7 +330,8 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
-        let loaded_extensions = load_trusted_extensions(&config.extension_root, &home, &logger)?;
+        let extension_settings = config.extension_settings_registry()?;
+        let loaded_extensions = load_trusted_extensions(&extension_settings, &home, &logger)?;
 
         logger.record(
             "runtime.open.ready",
@@ -311,6 +402,11 @@ impl LocalYuukeiRuntime {
 
     pub fn world_pack_status(&self) -> WorldPackSelectionState {
         self.world_pack_status.clone()
+    }
+
+    pub fn extension_settings(&self) -> Result<ExtensionSettingsState> {
+        ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
+            .map(|registry| registry.state())
     }
 
     pub fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
@@ -625,6 +721,32 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("yuukei-v2"))
 }
 
+fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig {
+    let LocalRuntimeEnvironment {
+        workspace_root,
+        data_dir,
+        device_id,
+    } = env;
+    let world_root = workspace_root.join("packs").join("default-yuukei");
+    let extension_root = data_dir.join("extensions");
+    let event_log_path = data_dir
+        .join("residents")
+        .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+        .join("events.sqlite3");
+    let app_log_path = data_dir.join("app-activity.jsonl");
+    LocalRuntimeConfig {
+        install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
+        resident_id: DEFAULT_RESIDENT_ID.to_string(),
+        device_id,
+        workspace_root,
+        world_root,
+        extension_root,
+        event_log_path,
+        app_log_path,
+        data_dir,
+    }
+}
+
 fn paths_payload(paths: &RuntimePaths) -> JsonMap {
     JsonMap::from([
         (
@@ -659,76 +781,54 @@ fn error_payload(stage: &str, error: &dyn std::fmt::Display) -> JsonMap {
 }
 
 fn load_trusted_extensions(
-    extension_root: &Path,
+    extension_settings: &ExtensionSettingsRegistry,
     home: &ResidentHome,
     logger: &AppLogger,
 ) -> Result<usize> {
     let mut loaded = 0;
-    for entry in fs::read_dir(extension_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-
-        match load_trusted_extension_manifest(&path, home) {
-            Ok(Some(extension_id)) => {
+    let hook_order = extension_settings.hook_order(&ExtensionHookPoint::BeforeCommandEmit);
+    for entry in extension_settings.runtime_entries() {
+        match entry {
+            ExtensionRuntimeEntry::Ready(install) => {
+                let extension_id = install.extension_id.clone();
+                let manifest_path = install.manifest_path.clone();
+                home.register_extension(ProcessHookExtension::from_installed_manifest(
+                    install.manifest,
+                    install.install_dir,
+                    install.enabled,
+                ))?;
                 loaded += 1;
                 logger.record(
                     "extension.load.ready",
                     "device-host",
                     JsonMap::from([
                         ("extensionId".to_string(), json!(extension_id)),
-                        ("manifestPath".to_string(), json!(display_path(&path))),
+                        (
+                            "manifestPath".to_string(),
+                            json!(display_path(&manifest_path)),
+                        ),
+                        ("enabled".to_string(), json!(install.enabled)),
                     ]),
                 )?;
             }
-            Ok(None) => {
-                logger.record(
-                    "extension.load.skipped",
-                    "device-host",
-                    JsonMap::from([("manifestPath".to_string(), json!(display_path(&path)))]),
-                )?;
-            }
-            Err(error) => {
+            ExtensionRuntimeEntry::Error(error) => {
                 logger.record(
                     "extension.load.error",
                     "device-host",
                     JsonMap::from([
-                        ("manifestPath".to_string(), json!(display_path(&path))),
-                        ("message".to_string(), json!(error)),
+                        ("extensionId".to_string(), json!(error.extension_id)),
+                        (
+                            "manifestPath".to_string(),
+                            json!(display_path(&error.manifest_path)),
+                        ),
+                        ("message".to_string(), json!(error.message)),
                     ]),
                 )?;
             }
         }
     }
+    home.set_extension_hook_order(ExtensionHookPoint::BeforeCommandEmit, hook_order)?;
     Ok(loaded)
-}
-
-fn load_trusted_extension_manifest(
-    path: &Path,
-    home: &ResidentHome,
-) -> std::result::Result<Option<String>, String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let manifest: ProcessExtensionManifest =
-        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    if manifest.schema_version != 1 {
-        return Err(format!(
-            "unsupported extension schemaVersion: {}",
-            manifest.schema_version
-        ));
-    }
-    if manifest.hooks.is_empty() {
-        return Err("extension must declare at least one hook".to_string());
-    }
-    let extension_id = manifest.id.clone();
-    if !manifest.enabled {
-        return Ok(None);
-    }
-
-    home.register_extension(ProcessHookExtension::from_manifest(manifest))
-        .map_err(|error| error.to_string())?;
-    Ok(Some(extension_id))
 }
 
 fn display_path(path: impl AsRef<Path>) -> String {
@@ -916,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_extension_manifest_is_loaded_into_snapshot() -> Result<()> {
+    async fn extension_install_copies_folder_and_persists_settings() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
         write_pack(
@@ -925,33 +1025,115 @@ mod tests {
             "Default Yuukei",
             &[],
         )?;
-        fs::create_dir_all(data.path().join("extensions"))?;
-        fs::write(
-            data.path().join("extensions").join("nya.json"),
-            serde_json::to_string_pretty(&json!({
-                "schemaVersion": 1,
-                "id": "nya-process",
-                "displayName": "Nya Process",
-                "enabled": true,
-                "hooks": [
-                    {
-                        "hookPoint": "beforeCommandEmit",
-                        "commandTypes": ["dialogue.say"]
-                    }
-                ],
-                "process": {
-                    "command": "missing-extension-command",
-                    "args": []
-                }
-            }))?,
-        )?;
+        let source = workspace.path().join("downloads").join("nya-process");
+        write_extension_source(&source, "nya-process", "Nya Process", "にゃ")?;
         let env = test_env(workspace.path(), data.path());
+
+        let state = LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
 
         let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
         let snapshot = runtime.snapshot()?;
 
         assert!(runtime.paths().extension_root.ends_with("extensions"));
+        assert!(data
+            .path()
+            .join("extensions")
+            .join("nya-process")
+            .join("manifest.json")
+            .exists());
+        assert!(data
+            .path()
+            .join("settings")
+            .join("extensions.json")
+            .exists());
+        assert_eq!(state.installed[0].extension_id, "nya-process");
+        assert_eq!(
+            state
+                .hook_order
+                .get(&ExtensionHookPoint::BeforeCommandEmit)
+                .cloned()
+                .unwrap_or_default(),
+            vec!["nya-process".to_string()]
+        );
         assert!(snapshot.extensions.contains_key("nya-process"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_extension_is_preserved_but_not_executed() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let source = workspace.path().join("downloads").join("disabled-process");
+        write_extension_source(&source, "disabled-process", "Disabled Process", "にゃ")?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let state =
+            LocalYuukeiRuntime::set_extension_enabled_in(env.clone(), "disabled-process", false)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "こんにちは")
+            .await?;
+
+        assert!(!state.installed[0].enabled);
+        assert_eq!(
+            state
+                .hook_order
+                .get(&ExtensionHookPoint::BeforeCommandEmit)
+                .cloned()
+                .unwrap_or_default(),
+            vec!["disabled-process".to_string()]
+        );
+        assert!(!runtime.snapshot()?.extensions["disabled-process"].enabled);
+        assert!(!commands[0]
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .ends_with("にゃ"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extension_hook_order_is_user_owned_and_process_cwd_is_installed_dir() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let nya_source = workspace.path().join("downloads").join("z-nya");
+        let english_source = workspace.path().join("downloads").join("a-english");
+        write_extension_source(&nya_source, "nya-suffix", "Nya Suffix", "にゃ")?;
+        write_extension_source(&english_source, "english-marker", "English Marker", " EN")?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &nya_source)?;
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &english_source)?;
+        LocalYuukeiRuntime::set_extension_hook_order_in(
+            env.clone(),
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["english-marker".to_string(), "nya-suffix".to_string()],
+        )?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "こんにちは")
+            .await?;
+
+        assert!(commands[0]
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .ends_with(" ENにゃ"));
         Ok(())
     }
 
@@ -1008,6 +1190,45 @@ mod tests {
                 "initialVariables": {},
                 "uiSpace": {}
             }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_extension_source(
+        root: &Path,
+        id: &str,
+        display_name: &str,
+        suffix: &str,
+    ) -> Result<()> {
+        fs::create_dir_all(root)?;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": id,
+                "displayName": display_name,
+                "hooks": [
+                    {
+                        "hookPoint": "beforeCommandEmit",
+                        "commandTypes": ["dialogue.say"]
+                    }
+                ],
+                "process": {
+                    "command": "node",
+                    "args": ["append.js", suffix]
+                }
+            }))?,
+        )?;
+        fs::write(
+            root.join("append.js"),
+            r#"
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const suffix = process.argv[2] ?? "";
+const command = input.command;
+command.payload.text = String(command.payload.text ?? "") + suffix;
+process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
+"#,
         )?;
         Ok(())
     }

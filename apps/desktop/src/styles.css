@@ -21,7 +21,7 @@ input {
 .surface-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-rows: 1fr auto auto minmax(120px, 26vh);
+  grid-template-rows: 1fr auto auto auto minmax(120px, 26vh);
   gap: 16px;
   padding: 20px;
 }
@@ -115,9 +115,74 @@ input {
   line-height: 1.4;
 }
 
+.settings-note {
+  max-width: 820px;
+  margin: 7px 0 0;
+  color: #59666a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .settings-actions {
   display: flex;
   gap: 8px;
+}
+
+.extension-panel {
+  align-items: start;
+}
+
+.extension-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.extension-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  border-top: 1px solid #e5ded5;
+  padding-top: 8px;
+}
+
+.extension-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+
+.extension-toggle input {
+  width: 18px;
+  height: 18px;
+}
+
+.extension-toggle strong,
+.extension-toggle small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extension-toggle strong {
+  color: #202327;
+  font-size: 14px;
+}
+
+.extension-toggle small {
+  margin-top: 2px;
+  color: #667078;
+  font-size: 11px;
+}
+
+.extension-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .input-row {
@@ -157,15 +222,25 @@ input {
 }
 
 .settings-actions button:disabled,
+.extension-actions button:disabled,
 .input-row button:disabled {
   cursor: progress;
   opacity: 0.6;
 }
 
-.settings-actions .secondary-button {
+.settings-actions .secondary-button,
+.extension-actions .secondary-button {
   border: 1px solid #b8c0bf;
   background: #eef3f1;
   color: #2f4144;
+}
+
+.compact-button {
+  min-width: 42px;
+  height: 30px;
+  border-radius: 6px;
+  padding: 0 8px;
+  cursor: pointer;
 }
 
 .command-feed {
@@ -215,6 +290,18 @@ input {
   }
 
   .settings-actions button {
+    flex: 1;
+  }
+
+  .extension-row {
+    grid-template-columns: 1fr;
+  }
+
+  .extension-actions {
+    justify-content: stretch;
+  }
+
+  .extension-actions button {
     flex: 1;
   }
 }

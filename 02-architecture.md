@@ -84,6 +84,8 @@ Capability Providerは、Coreの所有者ではない。複数Providerが同じc
 
 Hook ExtensionはCore内部オブジェクト、Surface実装、event logファイルを直接変更しない。入力として公開protocol messageのコピーを受け取り、変更案をResident Homeへ返す。Resident Homeは結果を検証し、採用した変換をcanonical event logへ記録してから次の境界へ流す。
 
+ローカルHook Extensionは、World Packとは違い、設定画面で選ばれたフォルダをDevice Host管理下の `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーしてインストールする。ユーザーが選んだ有効/無効状態とhook pointごとの実行順は `YUUKEI_DATA_DIR/settings/extensions.json` に保存し、manifest内の開発者指定priorityでは決めない。v1のExtensionは信頼済みローカルコードであり、公開protocol境界は守るがOSレベルのsandboxは保証しない。
+
 ### World Pack
 
 世界観、住人、台本、UI生活空間の解釈を持つデータパック。Yuukeiの体験を差し替える主単位。

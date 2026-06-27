@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use yuukei_device_host::{
-    tauri_surface_session, LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult,
-    TAURI_SURFACE_ID,
+    tauri_surface_session, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult, TAURI_SURFACE_ID,
 };
-use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
+use yuukei_protocol::{ExtensionHookPoint, ResidentSnapshot, RuntimeCommand};
 
 pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
@@ -37,6 +37,14 @@ async fn get_world_pack_status(
 ) -> Result<WorldPackSelectionState, String> {
     let runtime = state.runtime.lock().await;
     Ok(runtime.world_pack_status())
+}
+
+#[tauri::command]
+async fn get_extension_settings(
+    state: State<'_, AppState>,
+) -> Result<ExtensionSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.extension_settings().map_err(to_message)
 }
 
 #[tauri::command]
@@ -78,6 +86,48 @@ async fn reset_world_pack_to_default(
     replace_runtime(app, state, runtime).await
 }
 
+#[tauri::command]
+async fn install_extension_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::install_extension_directory(path).map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
+#[tauri::command]
+async fn uninstall_extension(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    extension_id: String,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::uninstall_extension(&extension_id).map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
+#[tauri::command]
+async fn set_extension_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    extension_id: String,
+    enabled: bool,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::set_extension_enabled(&extension_id, enabled).map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
+#[tauri::command]
+async fn set_extension_hook_order(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    hook_point: ExtensionHookPoint,
+    extension_ids: Vec<String>,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::set_extension_hook_order(hook_point, extension_ids).map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -96,9 +146,14 @@ pub fn run() {
             attach_surface,
             get_snapshot,
             get_world_pack_status,
+            get_extension_settings,
             send_conversation_text,
             select_world_pack_directory,
-            reset_world_pack_to_default
+            reset_world_pack_to_default,
+            install_extension_directory,
+            uninstall_extension,
+            set_extension_enabled,
+            set_extension_hook_order
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");
@@ -128,6 +183,46 @@ async fn replace_runtime(
     }
 
     Ok(WorldPackSwitchResult { status, snapshot })
+}
+
+async fn reload_runtime_for_extension_change(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    let runtime = LocalYuukeiRuntime::open_selected()
+        .await
+        .map_err(to_message)?;
+    let snapshot = replace_runtime_snapshot(app, state, runtime.clone()).await?;
+    let extension_state = runtime.extension_settings().map_err(to_message)?;
+    Ok(ExtensionSettingsChangeResult {
+        state: extension_state,
+        snapshot,
+    })
+}
+
+async fn replace_runtime_snapshot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    runtime: LocalYuukeiRuntime,
+) -> Result<ResidentSnapshot, String> {
+    let snapshot = runtime
+        .attach_surface(tauri_surface_session(runtime.device_id()))
+        .map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    let next_forwarder = spawn_command_forwarder(runtime.home(), app);
+
+    {
+        let mut current = state.runtime.lock().await;
+        *current = runtime;
+    }
+    {
+        let mut forwarder = state.command_forwarder.lock().await;
+        if let Some(previous) = forwarder.replace(next_forwarder) {
+            previous.abort();
+        }
+    }
+
+    Ok(snapshot)
 }
 
 fn spawn_command_forwarder(

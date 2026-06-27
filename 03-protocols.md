@@ -117,6 +117,8 @@ type ExtensionHookResult =
 
 Extensionが失敗した場合、Resident Homeは元のcommandを維持し、`extension.hook.result` にerrorを記録して処理を続行する。
 
+同じhook pointへ複数のExtensionが登録された場合、実行順はユーザー設定のhook orderで決める。`beforeCommandEmit` では、各Extensionの出力commandを次のExtensionの入力commandにする。manifestに開発者指定priorityは持たせない。削除済みIDは無視し、disabledのExtensionは順序設定に残っていても実行しない。
+
 ```mermaid
 flowchart LR
   D["Daihon / Capability\ncreates RuntimeCommand"] --> H["Hook Extension\nbeforeCommandEmit"]

@@ -15,8 +15,8 @@ use yuukei_extension::{
     YuukeiExtension,
 };
 use yuukei_protocol::{
-    new_id, ActorSnapshot, CapabilityInvocation, Causality, JsonMap, NewEventLogRecord,
-    ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceSession,
+    new_id, ActorSnapshot, CapabilityInvocation, Causality, ExtensionHookPoint, JsonMap,
+    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceSession,
 };
 use yuukei_world::{DaihonAdapter, WorldError, WorldPack, YuukeiDaihonAdapter};
 
@@ -241,6 +241,18 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .register(extension)?;
+        Ok(())
+    }
+
+    pub fn set_extension_hook_order(
+        &self,
+        hook_point: ExtensionHookPoint,
+        extension_ids: Vec<String>,
+    ) -> Result<()> {
+        self.extensions
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .set_hook_order(hook_point, extension_ids);
         Ok(())
     }
 

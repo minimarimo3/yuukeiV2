@@ -68,7 +68,7 @@ Device Hostはローカル端末の感覚器と能力ホストである。
 
 OS観測は段階的に増やす。Finder/Explorer、ファイル、通知、スマホセンサーなどは、すべてDevice Host側の拡張として扱う。
 
-Trusted Hook Extensionは最初は `beforeCommandEmit` だけでよい。外部プロセス型Extensionは、Device Hostがmanifestを読み込み、Resident Homeへ公開protocol hookとして登録する。ExtensionにCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さない。
+Trusted Hook Extensionは最初は `beforeCommandEmit` だけでよい。外部プロセス型Extensionは、Device Hostが設定画面で選ばれたフォルダを `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーし、`manifest.json` と `YUUKEI_DATA_DIR/settings/extensions.json` を読んでResident Homeへ公開protocol hookとして登録する。ExtensionにCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さない。v1では信頼済みローカルコードとして扱い、OS sandboxを仕様として約束しない。
 
 World Pack選択UIはDevice Hostに置く。ただし、active World Packの解釈、required capability確認、Packごとのresident/event-log分離はResident Home起動境界の責務として扱う。Surface Clientは `ResidentSnapshot.worldPackId` を表示してよいが、Pack選択や人格継続性を所有しない。
 

@@ -53,7 +53,11 @@ CLI Surfaceは手動確認だけでなく、機械的なテストに使える非
 
 ## Local Trusted Hook Extensions
 
-ローカルの信頼済みHook Extensionは `YUUKEI_DATA_DIR/extensions/*.json` にmanifestを置く。Device Hostは起動時にmanifestを読み、Resident Homeへhookとして登録する。
+ローカルの信頼済みHook Extensionは、設定画面で選んだフォルダを `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーしてインストールする。manifestは `YUUKEI_DATA_DIR/extensions/<extensionId>/manifest.json` に置く。
+
+ユーザー所有の有効/無効状態、インストール済みID、hook pointごとの実行順は `YUUKEI_DATA_DIR/settings/extensions.json` に保存する。Device Hostは起動時にこの設定を読み、Resident Homeへ公開protocol hookとして登録する。`beforeCommandEmit` では、前のExtensionが返したcommandが次のExtensionの入力になる。設定に残っているが削除済みのIDは無視し、新規インストールしたExtensionは購読しているhook pointの末尾へ追加する。
+
+Extensionは信頼したローカルコードとして実行する。YuukeiはCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さず、公開protocol messageの入力/出力だけを検証する。ただしv1ではOSレベルのファイルアクセス隔離を約束しない。
 
 最小例:
 
@@ -62,7 +66,6 @@ CLI Surfaceは手動確認だけでなく、機械的なテストに使える非
   "schemaVersion": 1,
   "id": "nya-suffix",
   "displayName": "Nya Suffix",
-  "enabled": true,
   "hooks": [
     {
       "hookPoint": "beforeCommandEmit",
@@ -71,10 +74,10 @@ CLI Surfaceは手動確認だけでなく、機械的なテストに使える非
   ],
   "process": {
     "command": "node",
-    "args": ["/absolute/path/to/nya-extension.mjs"],
+    "args": ["nya-extension.mjs"],
     "timeoutMs": 5000
   }
 }
 ```
 
-外部プロセスはstdinで `ExtensionHookInvocation` を受け取り、stdoutへ `ExtensionHookResult` をJSONで返す。たとえば `dialogue.say` の `payload.text` を変更した `replaceCommand` を返すと、Resident Homeが検証して `extension.hook.result` と変換後commandをevent logへ記録する。
+外部プロセスはデフォルトでインストール済みExtensionディレクトリをcwdとして起動する。stdinで `ExtensionHookInvocation` を受け取り、stdoutへ `ExtensionHookResult` をJSONで返す。たとえば `dialogue.say` の `payload.text` を変更した `replaceCommand` を返すと、Resident Homeが検証して `extension.hook.result` と変換後commandをevent logへ記録する。

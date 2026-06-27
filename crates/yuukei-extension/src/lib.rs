@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, process::Stdio, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -49,7 +54,7 @@ pub trait YuukeiExtension: Send + Sync {
 pub struct ExtensionRegistry {
     extensions: BTreeMap<String, Arc<dyn YuukeiExtension>>,
     registrations: BTreeMap<String, ExtensionSummary>,
-    order: Vec<String>,
+    hook_order: BTreeMap<ExtensionHookPoint, Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,12 +92,22 @@ impl ExtensionRegistry {
             ));
         }
 
-        self.order.push(registration.extension_id.clone());
         self.extensions
             .insert(registration.extension_id.clone(), Arc::new(extension));
         self.registrations
             .insert(registration.extension_id.clone(), registration);
         Ok(())
+    }
+
+    pub fn set_hook_order(&mut self, hook_point: ExtensionHookPoint, extension_ids: Vec<String>) {
+        let mut seen = BTreeSet::new();
+        let order = extension_ids
+            .into_iter()
+            .filter(|extension_id| {
+                self.registrations.contains_key(extension_id) && seen.insert(extension_id.clone())
+            })
+            .collect::<Vec<_>>();
+        self.hook_order.insert(hook_point, order);
     }
 
     pub fn summaries(&self) -> BTreeMap<String, ExtensionSummary> {
@@ -107,7 +122,7 @@ impl ExtensionRegistry {
         let mut command = command;
         let mut reports = Vec::new();
 
-        for extension_id in &self.order {
+        for extension_id in self.ordered_extension_ids(&ExtensionHookPoint::BeforeCommandEmit) {
             let Some(registration) = self.registrations.get(extension_id) else {
                 continue;
             };
@@ -157,6 +172,24 @@ impl ExtensionRegistry {
         }
 
         Ok(ExtensionPipelineResult { command, reports })
+    }
+
+    fn ordered_extension_ids(&self, hook_point: &ExtensionHookPoint) -> Vec<&String> {
+        let mut seen = BTreeSet::new();
+        let mut ordered = Vec::new();
+        if let Some(configured_order) = self.hook_order.get(hook_point) {
+            for extension_id in configured_order {
+                if self.registrations.contains_key(extension_id) && seen.insert(extension_id) {
+                    ordered.push(extension_id);
+                }
+            }
+        }
+        for extension_id in self.registrations.keys() {
+            if seen.insert(extension_id) {
+                ordered.push(extension_id);
+            }
+        }
+        ordered
     }
 }
 
@@ -284,8 +317,6 @@ pub struct ProcessExtensionManifest {
     pub schema_version: u32,
     pub id: String,
     pub display_name: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
     pub hooks: Vec<ExtensionHookSubscription>,
     pub process: ProcessCommandSpec,
 }
@@ -305,11 +336,29 @@ pub struct ProcessCommandSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessHookExtension {
     manifest: ProcessExtensionManifest,
+    install_dir: Option<PathBuf>,
+    enabled: bool,
 }
 
 impl ProcessHookExtension {
     pub fn from_manifest(manifest: ProcessExtensionManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            install_dir: None,
+            enabled: true,
+        }
+    }
+
+    pub fn from_installed_manifest(
+        manifest: ProcessExtensionManifest,
+        install_dir: impl Into<PathBuf>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            manifest,
+            install_dir: Some(install_dir.into()),
+            enabled,
+        }
     }
 }
 
@@ -321,15 +370,16 @@ impl YuukeiExtension for ProcessHookExtension {
             display_name: self.manifest.display_name.clone(),
             hooks: self.manifest.hooks.clone(),
             location: ExecutionLocation::DeviceHost,
-            enabled: self.manifest.enabled,
+            enabled: self.enabled,
         }
     }
 
     async fn invoke(&self, invocation: ExtensionHookInvocation) -> Result<ExtensionHookResult> {
-        let mut command = Command::new(&self.manifest.process.command);
+        let command_path = self.resolved_command_path();
+        let mut command = Command::new(command_path);
         command.args(&self.manifest.process.args);
         command.kill_on_drop(true);
-        if let Some(cwd) = &self.manifest.process.cwd {
+        if let Some(cwd) = self.resolved_cwd() {
             command.current_dir(cwd);
         }
         let mut child = command
@@ -359,6 +409,36 @@ impl YuukeiExtension for ProcessHookExtension {
     }
 }
 
+impl ProcessHookExtension {
+    fn resolved_command_path(&self) -> PathBuf {
+        let command = PathBuf::from(&self.manifest.process.command);
+        if command.is_absolute() || command.components().count() == 1 {
+            return command;
+        }
+        self.install_dir
+            .as_ref()
+            .map(|install_dir| install_dir.join(&command))
+            .unwrap_or(command)
+    }
+
+    fn resolved_cwd(&self) -> Option<PathBuf> {
+        let Some(install_dir) = &self.install_dir else {
+            return self.manifest.process.cwd.as_ref().map(PathBuf::from);
+        };
+        match &self.manifest.process.cwd {
+            Some(cwd) => {
+                let cwd = Path::new(cwd);
+                if cwd.is_absolute() {
+                    Some(cwd.to_path_buf())
+                } else {
+                    Some(install_dir.join(cwd))
+                }
+            }
+            None => Some(install_dir.clone()),
+        }
+    }
+}
+
 fn unchanged_result() -> ExtensionHookResult {
     ExtensionHookResult {
         action: ExtensionHookAction::Unchanged,
@@ -373,10 +453,6 @@ fn error_result(message: String) -> ExtensionHookResult {
         command: None,
         metadata: Some(JsonMap::from([("error".to_string(), json!(message))])),
     }
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -408,6 +484,111 @@ mod tests {
             result.reports[0].invocation.hook_point,
             ExtensionHookPoint::BeforeCommandEmit
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_uses_configured_hook_order() -> Result<()> {
+        let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+        command
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register(DialogueSuffixExtension::new("nya-suffix", "にゃ"))?;
+        registry.register(DialogueSuffixExtension::new("english-marker", " EN"))?;
+        registry.set_hook_order(
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["english-marker".to_string(), "nya-suffix".to_string()],
+        );
+
+        let result = registry
+            .apply_before_command_emit(
+                command,
+                ExtensionCommandContext {
+                    world_pack_id: "default-yuukei".to_string(),
+                },
+            )
+            .await?;
+
+        assert_eq!(result.command.payload["text"], "こんにちは ENにゃ");
+        assert_eq!(
+            result
+                .reports
+                .iter()
+                .map(|report| report.invocation.extension_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["english-marker", "nya-suffix"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reversing_hook_order_changes_pipeline_output() -> Result<()> {
+        let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+        command
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register(DialogueSuffixExtension::new("nya-suffix", "にゃ"))?;
+        registry.register(DialogueSuffixExtension::new("english-marker", " EN"))?;
+        registry.set_hook_order(
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["nya-suffix".to_string(), "english-marker".to_string()],
+        );
+
+        let result = registry
+            .apply_before_command_emit(
+                command,
+                ExtensionCommandContext {
+                    world_pack_id: "default-yuukei".to_string(),
+                },
+            )
+            .await?;
+
+        assert_eq!(result.command.payload["text"], "こんにちはにゃ EN");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_extension_is_preserved_in_summaries_but_skipped() -> Result<()> {
+        let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+        command
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+        let manifest = ProcessExtensionManifest {
+            schema_version: 1,
+            id: "disabled-process".to_string(),
+            display_name: "Disabled Process".to_string(),
+            hooks: vec![ExtensionHookSubscription {
+                hook_point: ExtensionHookPoint::BeforeCommandEmit,
+                command_types: vec!["dialogue.say".to_string()],
+            }],
+            process: ProcessCommandSpec {
+                command: "missing-extension-command".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                timeout_ms: None,
+            },
+        };
+
+        let mut registry = ExtensionRegistry::new();
+        registry.register(ProcessHookExtension::from_installed_manifest(
+            manifest, ".", false,
+        ))?;
+        let result = registry
+            .apply_before_command_emit(
+                command.clone(),
+                ExtensionCommandContext {
+                    world_pack_id: "default-yuukei".to_string(),
+                },
+            )
+            .await?;
+
+        assert_eq!(result.command, command);
+        assert!(result.reports.is_empty());
+        assert!(!registry.summaries()["disabled-process"].enabled);
         Ok(())
     }
 

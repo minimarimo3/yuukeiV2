@@ -2,6 +2,9 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
+  type ExtensionSettingsChangeResult,
+  type ExtensionSettingsState,
+  type InstalledExtension,
   type WorldPackSelectionState,
   type YuukeiClient
 } from "./yuukeiClient";
@@ -17,8 +20,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [status, setStatus] = useState("connecting");
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
+  const [extensionState, setExtensionState] =
+    useState<ExtensionSettingsState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
+  const [extensionError, setExtensionError] = useState<string | null>(null);
   const [switchingPack, setSwitchingPack] = useState(false);
+  const [changingExtensions, setChangingExtensions] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -36,6 +43,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         if (!disposed) {
           setSnapshot(attached);
           setWorldPackStatus(await client.getWorldPackStatus());
+          setExtensionState(await client.getExtensionSettings());
           setStatus("ready");
         }
       } catch (error) {
@@ -58,6 +66,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     if (!snapshot) return null;
     return Object.values(snapshot.actors)[0] ?? null;
   }, [snapshot]);
+
+  const orderedBeforeCommandEmitExtensions = useMemo(() => {
+    return orderExtensionsForHook(
+      extensionState?.installed ?? [],
+      extensionState?.hookOrder.beforeCommandEmit ?? []
+    );
+  }, [extensionState]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -100,6 +115,77 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setWorldPackError(error instanceof Error ? error.message : String(error));
     } finally {
       setSwitchingPack(false);
+    }
+  }
+
+  function applyExtensionResult(result: ExtensionSettingsChangeResult) {
+    setExtensionState(result.state);
+    setSnapshot(result.snapshot);
+    setCommands([]);
+    setStatus("ready");
+  }
+
+  async function chooseExtension() {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      const path = await client.openExtensionDirectory();
+      if (!path) return;
+      applyExtensionResult(await client.installExtensionDirectory(path));
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
+  async function toggleExtension(extensionId: string, enabled: boolean) {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      applyExtensionResult(await client.setExtensionEnabled(extensionId, enabled));
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
+  async function uninstallExtension(extensionId: string) {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      applyExtensionResult(await client.uninstallExtension(extensionId));
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
+  async function moveExtension(extensionId: string, direction: -1 | 1) {
+    if (!extensionState) return;
+    const currentOrder = orderedBeforeCommandEmitExtensions.map(
+      (extension) => extension.extensionId
+    );
+    const index = currentOrder.indexOf(extensionId);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= currentOrder.length) return;
+    const nextOrder = [...currentOrder];
+    [nextOrder[index], nextOrder[nextIndex]] = [
+      nextOrder[nextIndex],
+      nextOrder[index]
+    ];
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      applyExtensionResult(
+        await client.setExtensionHookOrder("beforeCommandEmit", nextOrder)
+      );
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
     }
   }
 
@@ -158,6 +244,91 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         </div>
       </section>
 
+      <section className="settings-panel extension-panel" aria-label="Extension settings">
+        <div className="settings-copy">
+          <h2>Extensions</h2>
+          <p className="settings-title">
+            {extensionState
+              ? `${extensionState.installed.length} installed`
+              : "loading"}
+          </p>
+          <p className="settings-path">
+            {extensionState?.extensionRoot ?? ""}
+          </p>
+          <p className="settings-note">
+            {extensionState?.trustedCodeNotice ?? ""}
+          </p>
+          {extensionError ? (
+            <p className="settings-error">{extensionError}</p>
+          ) : null}
+          <div className="extension-list">
+            {orderedBeforeCommandEmitExtensions.map((extension, index) => (
+              <article className="extension-row" key={extension.extensionId}>
+                <label className="extension-toggle">
+                  <input
+                    type="checkbox"
+                    aria-label={`${extension.displayName} ${extension.extensionId}`}
+                    checked={extension.enabled}
+                    disabled={changingExtensions}
+                    onChange={(event) =>
+                      toggleExtension(
+                        extension.extensionId,
+                        event.currentTarget.checked
+                      )
+                    }
+                  />
+                  <span>
+                    <strong>{extension.displayName}</strong>
+                    <small>{extension.extensionId}</small>
+                  </span>
+                </label>
+                {extension.lastLoadError ? (
+                  <p className="settings-error">{extension.lastLoadError}</p>
+                ) : null}
+                <div className="extension-actions">
+                  <button
+                    type="button"
+                    className="secondary-button compact-button"
+                    disabled={changingExtensions || index === 0}
+                    onClick={() => moveExtension(extension.extensionId, -1)}
+                  >
+                    上
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button compact-button"
+                    disabled={
+                      changingExtensions ||
+                      index === orderedBeforeCommandEmitExtensions.length - 1
+                    }
+                    onClick={() => moveExtension(extension.extensionId, 1)}
+                  >
+                    下
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button compact-button"
+                    disabled={changingExtensions}
+                    onClick={() => uninstallExtension(extension.extensionId)}
+                  >
+                    削除
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+        <div className="settings-actions">
+          <button
+            type="button"
+            onClick={chooseExtension}
+            disabled={changingExtensions}
+          >
+            追加
+          </button>
+        </div>
+      </section>
+
       <form className="input-row" onSubmit={submit}>
         <input
           aria-label="Conversation text"
@@ -182,4 +353,23 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       </section>
     </main>
   );
+}
+
+function orderExtensionsForHook(
+  extensions: InstalledExtension[],
+  orderedIds: string[]
+): InstalledExtension[] {
+  const byId = new Map(
+    extensions.map((extension) => [extension.extensionId, extension])
+  );
+  const ordered = orderedIds
+    .map((extensionId) => byId.get(extensionId))
+    .filter((extension): extension is InstalledExtension => Boolean(extension));
+  const seen = new Set(ordered.map((extension) => extension.extensionId));
+  for (const extension of extensions) {
+    if (!seen.has(extension.extensionId)) {
+      ordered.push(extension);
+    }
+  }
+  return ordered;
 }
