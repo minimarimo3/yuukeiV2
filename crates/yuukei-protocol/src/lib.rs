@@ -16,7 +16,7 @@ pub fn now_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct Causality {
@@ -105,7 +105,7 @@ impl RuntimeEvent {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct CommandTarget {
@@ -152,6 +152,75 @@ impl RuntimeCommand {
             target: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum ExtensionHookPoint {
+    BeforeCommandEmit,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionHookSubscription {
+    pub hook_point: ExtensionHookPoint,
+    #[serde(default)]
+    pub command_types: Vec<String>,
+}
+
+impl ExtensionHookSubscription {
+    pub fn matches_command(&self, hook_point: &ExtensionHookPoint, command_kind: &str) -> bool {
+        &self.hook_point == hook_point
+            && (self.command_types.is_empty()
+                || self
+                    .command_types
+                    .iter()
+                    .any(|declared| declared == command_kind))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionSummary {
+    pub extension_id: String,
+    pub display_name: String,
+    pub hooks: Vec<ExtensionHookSubscription>,
+    pub location: ExecutionLocation,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionHookInvocation {
+    pub id: String,
+    pub hook_point: ExtensionHookPoint,
+    pub extension_id: String,
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub command: RuntimeCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum ExtensionHookAction {
+    Unchanged,
+    ReplaceCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionHookResult {
+    pub action: ExtensionHookAction,
+    #[ts(optional)]
+    pub command: Option<RuntimeCommand>,
+    #[ts(type = "{ [key: string]: unknown }", optional)]
+    pub metadata: Option<JsonMap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
@@ -286,6 +355,7 @@ pub struct ResidentSnapshot {
     pub actors: BTreeMap<String, ActorSnapshot>,
     pub surfaces: BTreeMap<String, SurfaceSession>,
     pub capabilities: BTreeMap<String, CapabilityProviderSummary>,
+    pub extensions: BTreeMap<String, ExtensionSummary>,
     pub recent_event_cursor: String,
 }
 
@@ -419,6 +489,25 @@ mod tests {
         assert_eq!(value["sequence"], 7);
         assert_eq!(value["type"], "dialogue.say");
         assert_eq!(value["causality"]["sourceEventId"], "evt_1");
+        Ok(())
+    }
+
+    #[test]
+    fn extension_hook_uses_protocol_field_names() -> anyhow::Result<()> {
+        let command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+        let invocation = ExtensionHookInvocation {
+            id: "hook_1".to_string(),
+            hook_point: ExtensionHookPoint::BeforeCommandEmit,
+            extension_id: "nya-suffix".to_string(),
+            resident_id: "resident-default".to_string(),
+            world_pack_id: "default-yuukei".to_string(),
+            command,
+        };
+
+        let value = serde_json::to_value(&invocation)?;
+        assert_eq!(value["hookPoint"], "beforeCommandEmit");
+        assert_eq!(value["extensionId"], "nya-suffix");
+        assert_eq!(value["command"]["type"], "dialogue.say");
         Ok(())
     }
 }

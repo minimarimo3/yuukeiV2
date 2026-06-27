@@ -10,6 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 yuukei-event-log = { path = "../yuukei-event-log" }
+yuukei-extension = { path = "../yuukei-extension" }
 yuukei-protocol = { path = "../yuukei-protocol" }
 yuukei-resident-home = { path = "../yuukei-resident-home" }
 yuukei-world = { path = "../yuukei-world" }

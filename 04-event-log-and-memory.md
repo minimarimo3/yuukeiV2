@@ -17,6 +17,7 @@ canonical event logは、住人の生活史のsource of truthである。
 - Daihonが選んだsceneと実行結果。
 - RuntimeCommandとして出た発話、動作、UI演出。
 - CapabilityInvocationの要求と、許可された範囲の結果メタデータ。
+- Extension hookの呼び出し結果と、採用されたmessage変換のメタデータ。
 
 保存しない、または参照化するもの:
 
@@ -24,9 +25,12 @@ canonical event logは、住人の生活史のsource of truthである。
 - 無制限の画面内容。
 - マイクやカメラの生データ。
 - Provider固有の内部DB。
+- Extensionの内部状態や実行環境そのもの。
 - ユーザーが許可していない個人情報。
 
 Event logは、後から別の記憶エンジンで再indexできるよう、安定した順序、因果関係、residentId、deviceId、surfaceId、event typeを保持する。
+
+Hook Extensionが `RuntimeCommand` を変換した場合、Resident Homeは `extension.hook.result` を記録してから、変換後のcommandを通常の `RuntimeCommand` として記録する。Extensionがevent logファイルを直接書き換えることは許可しない。
 
 ## Memory Is a Derived Capability
 
@@ -116,4 +120,3 @@ type EventLogRecord = {
 - Provider固有の移行はProvider責任。
 
 この構造により、Yuukeiは特定の記憶研究や実装に賭けず、将来の良い方式を取り込める。
-

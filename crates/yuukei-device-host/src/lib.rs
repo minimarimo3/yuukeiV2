@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use yuukei_event_log::{EventLog, EventLogQuery};
+use yuukei_extension::{ProcessExtensionManifest, ProcessHookExtension};
 use yuukei_protocol::{
     new_id, now_timestamp, JsonMap, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceKind,
     SurfacePresentation, SurfaceRenderer, SurfaceSession,
@@ -51,6 +52,7 @@ pub struct RuntimePaths {
     pub workspace_root: PathBuf,
     pub data_dir: PathBuf,
     pub world_root: PathBuf,
+    pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
     pub app_log_path: PathBuf,
 }
@@ -63,6 +65,7 @@ pub struct LocalRuntimeConfig {
     pub workspace_root: PathBuf,
     pub data_dir: PathBuf,
     pub world_root: PathBuf,
+    pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
     pub app_log_path: PathBuf,
 }
@@ -72,6 +75,7 @@ impl LocalRuntimeConfig {
         let workspace_root = workspace_root();
         let data_dir = default_data_dir();
         let world_root = workspace_root.join("packs").join("default-yuukei");
+        let extension_root = data_dir.join("extensions");
         Self {
             install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
             resident_id: DEFAULT_RESIDENT_ID.to_string(),
@@ -84,6 +88,7 @@ impl LocalRuntimeConfig {
             workspace_root,
             data_dir,
             world_root,
+            extension_root,
         }
     }
 
@@ -92,6 +97,7 @@ impl LocalRuntimeConfig {
             workspace_root: self.workspace_root.clone(),
             data_dir: self.data_dir.clone(),
             world_root: self.world_root.clone(),
+            extension_root: self.extension_root.clone(),
             event_log_path: self.event_log_path.clone(),
             app_log_path: self.app_log_path.clone(),
         }
@@ -193,6 +199,7 @@ impl LocalYuukeiRuntime {
         world_pack_status: WorldPackSelectionState,
     ) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
+        fs::create_dir_all(&config.extension_root)?;
         if let Some(parent) = config.event_log_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -233,6 +240,7 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
+        let loaded_extensions = load_trusted_extensions(&config.extension_root, &home, &logger)?;
 
         logger.record(
             "runtime.open.ready",
@@ -248,6 +256,11 @@ impl LocalYuukeiRuntime {
                     "eventLogPath".to_string(),
                     json!(display_path(&config.event_log_path)),
                 ),
+                (
+                    "extensionRoot".to_string(),
+                    json!(display_path(&config.extension_root)),
+                ),
+                ("loadedExtensions".to_string(), json!(loaded_extensions)),
                 (
                     "appLogPath".to_string(),
                     json!(display_path(&config.app_log_path)),
@@ -624,6 +637,10 @@ fn paths_payload(paths: &RuntimePaths) -> JsonMap {
             json!(display_path(&paths.world_root)),
         ),
         (
+            "extensionRoot".to_string(),
+            json!(display_path(&paths.extension_root)),
+        ),
+        (
             "eventLogPath".to_string(),
             json!(display_path(&paths.event_log_path)),
         ),
@@ -639,6 +656,79 @@ fn error_payload(stage: &str, error: &dyn std::fmt::Display) -> JsonMap {
         ("stage".to_string(), json!(stage)),
         ("message".to_string(), json!(error.to_string())),
     ])
+}
+
+fn load_trusted_extensions(
+    extension_root: &Path,
+    home: &ResidentHome,
+    logger: &AppLogger,
+) -> Result<usize> {
+    let mut loaded = 0;
+    for entry in fs::read_dir(extension_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        match load_trusted_extension_manifest(&path, home) {
+            Ok(Some(extension_id)) => {
+                loaded += 1;
+                logger.record(
+                    "extension.load.ready",
+                    "device-host",
+                    JsonMap::from([
+                        ("extensionId".to_string(), json!(extension_id)),
+                        ("manifestPath".to_string(), json!(display_path(&path))),
+                    ]),
+                )?;
+            }
+            Ok(None) => {
+                logger.record(
+                    "extension.load.skipped",
+                    "device-host",
+                    JsonMap::from([("manifestPath".to_string(), json!(display_path(&path)))]),
+                )?;
+            }
+            Err(error) => {
+                logger.record(
+                    "extension.load.error",
+                    "device-host",
+                    JsonMap::from([
+                        ("manifestPath".to_string(), json!(display_path(&path))),
+                        ("message".to_string(), json!(error)),
+                    ]),
+                )?;
+            }
+        }
+    }
+    Ok(loaded)
+}
+
+fn load_trusted_extension_manifest(
+    path: &Path,
+    home: &ResidentHome,
+) -> std::result::Result<Option<String>, String> {
+    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let manifest: ProcessExtensionManifest =
+        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    if manifest.schema_version != 1 {
+        return Err(format!(
+            "unsupported extension schemaVersion: {}",
+            manifest.schema_version
+        ));
+    }
+    if manifest.hooks.is_empty() {
+        return Err("extension must declare at least one hook".to_string());
+    }
+    let extension_id = manifest.id.clone();
+    if !manifest.enabled {
+        return Ok(None);
+    }
+
+    home.register_extension(ProcessHookExtension::from_manifest(manifest))
+        .map_err(|error| error.to_string())?;
+    Ok(Some(extension_id))
 }
 
 fn display_path(path: impl AsRef<Path>) -> String {
@@ -822,6 +912,46 @@ mod tests {
         let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
         assert_eq!(reopened.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
         assert!(!reopened.world_pack_status().fallback_active);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_extension_manifest_is_loaded_into_snapshot() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        fs::create_dir_all(data.path().join("extensions"))?;
+        fs::write(
+            data.path().join("extensions").join("nya.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "nya-process",
+                "displayName": "Nya Process",
+                "enabled": true,
+                "hooks": [
+                    {
+                        "hookPoint": "beforeCommandEmit",
+                        "commandTypes": ["dialogue.say"]
+                    }
+                ],
+                "process": {
+                    "command": "missing-extension-command",
+                    "args": []
+                }
+            }))?,
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let snapshot = runtime.snapshot()?;
+
+        assert!(runtime.paths().extension_root.ends_with("extensions"));
+        assert!(snapshot.extensions.contains_key("nya-process"));
         Ok(())
     }
 

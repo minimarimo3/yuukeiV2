@@ -251,6 +251,7 @@ fn print_paths(paths: &RuntimePaths) {
     println!("Event log: {}", paths.event_log_path.display());
     println!("App log: {}", paths.app_log_path.display());
     println!("World root: {}", paths.world_root.display());
+    println!("Extension root: {}", paths.extension_root.display());
 }
 
 fn print_world_pack_status(status: &WorldPackSelectionState) {

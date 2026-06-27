@@ -205,6 +205,7 @@ impl WorldPackRegistry {
             workspace_root: self.env.workspace_root.clone(),
             data_dir: self.env.data_dir.clone(),
             world_root: install.canonical_root.clone(),
+            extension_root: self.env.data_dir.join("extensions"),
             event_log_path: resident_dir.join("events.sqlite3"),
             app_log_path: self.env.app_log_path(),
         }

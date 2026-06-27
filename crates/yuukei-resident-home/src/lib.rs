@@ -10,6 +10,10 @@ use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, StubSpeechSynthesisProvider,
 };
 use yuukei_event_log::{EventLog, EventLogError};
+use yuukei_extension::{
+    ExtensionCommandContext, ExtensionError, ExtensionHookReport, ExtensionRegistry,
+    YuukeiExtension,
+};
 use yuukei_protocol::{
     new_id, ActorSnapshot, CapabilityInvocation, Causality, JsonMap, NewEventLogRecord,
     ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceSession,
@@ -24,6 +28,8 @@ pub enum ResidentHomeError {
     World(#[from] WorldError),
     #[error("capability error: {0}")]
     Capability(#[from] CapabilityError),
+    #[error("extension error: {0}")]
+    Extension(#[from] ExtensionError),
     #[error("world pack requires unavailable capabilities: {0}")]
     MissingRequiredCapabilities(String),
     #[error("state lock is poisoned")]
@@ -40,6 +46,7 @@ pub struct ResidentHome {
     world_pack: Arc<WorldPack>,
     daihon: Arc<dyn DaihonAdapter>,
     capabilities: Arc<Mutex<CapabilityRouter>>,
+    extensions: Arc<Mutex<ExtensionRegistry>>,
     state: Arc<Mutex<HomeState>>,
     command_tx: broadcast::Sender<RuntimeCommand>,
 }
@@ -74,7 +81,26 @@ impl ResidentHome {
         world_pack: WorldPack,
         event_log: EventLog,
         daihon: Arc<dyn DaihonAdapter>,
+        capabilities: CapabilityRouter,
+    ) -> Result<Self> {
+        Self::with_parts_and_extensions(
+            resident_id,
+            world_pack,
+            event_log,
+            daihon,
+            capabilities,
+            ExtensionRegistry::new(),
+        )
+        .await
+    }
+
+    pub async fn with_parts_and_extensions(
+        resident_id: impl Into<String>,
+        world_pack: WorldPack,
+        event_log: EventLog,
+        daihon: Arc<dyn DaihonAdapter>,
         mut capabilities: CapabilityRouter,
+        extensions: ExtensionRegistry,
     ) -> Result<Self> {
         world_pack.validate()?;
         daihon.load_world(&world_pack).await?;
@@ -123,6 +149,7 @@ impl ResidentHome {
             world_pack: Arc::new(world_pack),
             daihon,
             capabilities: Arc::new(Mutex::new(capabilities)),
+            extensions: Arc::new(Mutex::new(extensions)),
             state: Arc::new(Mutex::new(HomeState {
                 resident_id,
                 active_surface_id: None,
@@ -152,6 +179,11 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .summaries();
+        let extensions = self
+            .extensions
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .summaries();
         Ok(ResidentSnapshot {
             resident_id: state.resident_id.clone(),
             world_pack_id: self.world_pack.id.clone(),
@@ -159,6 +191,7 @@ impl ResidentHome {
             actors: state.actors.clone(),
             surfaces: state.surfaces.clone(),
             capabilities,
+            extensions,
             recent_event_cursor: state.recent_event_cursor.to_string(),
         })
     }
@@ -200,6 +233,17 @@ impl ResidentHome {
         Ok(())
     }
 
+    pub fn register_extension<E>(&self, extension: E) -> Result<()>
+    where
+        E: YuukeiExtension + 'static,
+    {
+        self.extensions
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .register(extension)?;
+        Ok(())
+    }
+
     pub async fn ingest_event(&self, event: RuntimeEvent) -> Result<Vec<RuntimeCommand>> {
         let appended_event = self
             .event_log
@@ -210,7 +254,7 @@ impl ResidentHome {
             return Ok(Vec::new());
         }
 
-        let mut result = self.daihon.dispatch(&event, &self.world_pack).await?;
+        let result = self.daihon.dispatch(&event, &self.world_pack).await?;
         if !result.is_empty() {
             let result_payload = serde_json::to_value(&result)?;
             let result_record = NewEventLogRecord {
@@ -236,16 +280,21 @@ impl ResidentHome {
             let appended_result = self.event_log.append(result_record)?;
             self.set_cursor(appended_result.sequence)?;
         }
-        for command in &mut result.commands {
-            self.maybe_enrich_speech(command, &event).await?;
+        let mut emitted_commands = Vec::with_capacity(result.commands.len());
+        for command in result.commands {
+            let mut command = self
+                .apply_extensions_before_command_emit(command, &event)
+                .await?;
+            self.maybe_enrich_speech(&mut command, &event).await?;
             let appended_command = self
                 .event_log
                 .append(NewEventLogRecord::from(command.clone()))?;
             self.set_cursor(appended_command.sequence)?;
-            self.apply_command_to_snapshot(command)?;
+            self.apply_command_to_snapshot(&command)?;
             let _ = self.command_tx.send(command.clone());
+            emitted_commands.push(command);
         }
-        Ok(result.commands)
+        Ok(emitted_commands)
     }
 
     fn resident_id(&self) -> Result<String> {
@@ -313,6 +362,98 @@ impl ResidentHome {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn apply_extensions_before_command_emit(
+        &self,
+        command: RuntimeCommand,
+        source_event: &RuntimeEvent,
+    ) -> Result<RuntimeCommand> {
+        let registry = self
+            .extensions
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let result = registry
+            .apply_before_command_emit(
+                command,
+                ExtensionCommandContext {
+                    world_pack_id: self.world_pack.id.clone(),
+                },
+            )
+            .await?;
+        for report in &result.reports {
+            self.record_extension_hook_result(report, source_event)?;
+        }
+        Ok(result.command)
+    }
+
+    fn record_extension_hook_result(
+        &self,
+        report: &ExtensionHookReport,
+        source_event: &RuntimeEvent,
+    ) -> Result<()> {
+        let result_value = serde_json::to_value(&report.result)?;
+        let output_command_value = serde_json::to_value(&report.output_command)?;
+        let mut payload = JsonMap::from([
+            (
+                "invocationId".to_string(),
+                Value::String(report.invocation.id.clone()),
+            ),
+            (
+                "extensionId".to_string(),
+                Value::String(report.invocation.extension_id.clone()),
+            ),
+            (
+                "hookPoint".to_string(),
+                serde_json::to_value(&report.invocation.hook_point)?,
+            ),
+            (
+                "inputCommandId".to_string(),
+                Value::String(report.input_command.id.clone()),
+            ),
+            (
+                "outputCommandId".to_string(),
+                Value::String(report.output_command.id.clone()),
+            ),
+            (
+                "commandType".to_string(),
+                Value::String(report.output_command.kind.clone()),
+            ),
+            ("changed".to_string(), Value::Bool(report.changed)),
+            ("result".to_string(), result_value),
+            ("outputCommand".to_string(), output_command_value),
+        ]);
+        if let Some(error) = &report.error {
+            payload.insert("error".to_string(), Value::String(error.clone()));
+        }
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "extension.hook.result".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: source_event.resident_id.clone(),
+            source: "extension".to_string(),
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: report
+                .output_command
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.clone()),
+            payload,
+            causality: Some(Causality {
+                source_event_id: Some(source_event.id.clone()),
+                source_command_id: Some(report.input_command.id.clone()),
+                trace_id: source_event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
         Ok(())
     }
 
@@ -456,6 +597,7 @@ fn json_map_from_value(value: Value) -> JsonMap {
 mod tests {
     use serde_json::json;
     use yuukei_event_log::EventLogQuery;
+    use yuukei_extension::DialogueSuffixExtension;
     use yuukei_protocol::{SurfaceKind, SurfacePresentation, SurfaceRenderer};
     use yuukei_world::{
         ActorDefinition, CapabilityDeclarations, DaihonConfig, DaihonScriptSource, SignalAllowlist,
@@ -581,6 +723,58 @@ mod tests {
                 .records
                 .len(),
             1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extension_can_rewrite_dialogue_before_emit_and_tts() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        home.register_extension(DialogueSuffixExtension::new("nya-suffix", "にゃ"))?;
+        home.attach_surface(SurfaceSession {
+            surface_id: "surface-main".to_string(),
+            device_id: "device-local".to_string(),
+            kind: SurfaceKind::Desktop,
+            active: true,
+            capabilities: vec!["dialogue.say".to_string()],
+            presentation: SurfacePresentation {
+                renderer: Some(SurfaceRenderer::Html),
+                transparent: Some(false),
+                accepts_input: Some(true),
+            },
+        })?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_text".to_string();
+        event.device_id = Some("device-local".to_string());
+        event.surface_id = Some("surface-main".to_string());
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "聞こえています。こんにちはにゃ");
+        assert_eq!(
+            home.snapshot()?.actors["yuukei"].bubble.as_deref(),
+            Some("聞こえています。こんにちはにゃ")
+        );
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "extension.hook.result"));
+        let speech_request = records
+            .iter()
+            .find(|record| record.kind == "capability.invocation.request")
+            .expect("speech request");
+        assert_eq!(
+            speech_request.payload["input"]["text"],
+            "聞こえています。こんにちはにゃ"
         );
         Ok(())
     }

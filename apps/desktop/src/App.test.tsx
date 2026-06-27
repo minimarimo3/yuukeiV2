@@ -22,6 +22,7 @@ function snapshot(bubble: string | null = null): ResidentSnapshot {
     },
     surfaces: {},
     capabilities: {},
+    extensions: {},
     recentEventCursor: "1"
   };
 }

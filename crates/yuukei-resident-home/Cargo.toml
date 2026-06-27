@@ -11,9 +11,9 @@ thiserror.workspace = true
 tokio.workspace = true
 yuukei-capability = { path = "../yuukei-capability" }
 yuukei-event-log = { path = "../yuukei-event-log" }
+yuukei-extension = { path = "../yuukei-extension" }
 yuukei-protocol = { path = "../yuukei-protocol" }
 yuukei-world = { path = "../yuukei-world" }
 
 [dev-dependencies]
 tempfile.workspace = true
-

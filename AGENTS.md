@@ -32,6 +32,7 @@ If you only have time for the minimum, read `README.md`, `02-architecture.md`, `
 - Keep body, rendering, speech bubbles, animation, mobile widgets, and visual effects in `Surface Client`.
 - Keep LLM, TTS, STT, memory retrieval, memory indexing, embedding, and similar abilities behind `Capability Provider`.
 - Keep worldview, cast, scripts, allowed signals, UI-space interpretation, and required capabilities in `World Pack`.
+- Keep arbitrary user code and message interception behind `Trusted Hook Extension`; hooks operate on public protocol messages, not Core internals.
 - Keep Daihon behind a host/service boundary. Do not make `Resident Home` depend on Daihon internal parser/runtime types.
 - Treat `canonical event log` as the source of truth for records. Treat memory databases, summaries, facts, episodes, vector indexes, and provider-specific binary stores as derived data.
 
@@ -47,6 +48,7 @@ If you only have time for the minimum, read `README.md`, `02-architecture.md`, `
 ## Extension and Capability Rules
 
 - Providers do not call each other directly. Route composition through `Resident Home` and the capability router.
+- Hook Extensions do not mutate `Resident Home`, `Surface Client`, or event log storage directly. They return protocol-level hook results for `Resident Home` to validate and record.
 - A TTS Provider must not care whether text came from Daihon or an LLM. It receives normalized `speech.synthesis` input.
 - A Memory Provider must not become the owner of the resident's life history. It reads permitted event-log ranges and builds rebuildable indexes.
 - World Packs declare required or optional capabilities; they do not name a specific provider as a hard dependency unless the design explicitly needs that.
@@ -73,5 +75,6 @@ If you only have time for the minimum, read `README.md`, `02-architecture.md`, `
 - Giving `Surface Client` personality, long-term state, or authority to choose capabilities.
 - Leaking `Device Host` OS APIs into `Resident Home`.
 - Connecting extensions directly to each other.
+- Exposing Core internal function names or mutable internal state as an extension API.
 - Letting World Packs call OS APIs, AI APIs, or provider-specific APIs directly.
 - Adding compatibility layers for the unpublished MVP when a cleaner new design is better.

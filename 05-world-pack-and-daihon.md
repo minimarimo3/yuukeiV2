@@ -90,9 +90,10 @@ flowchart TB
   Candidate --> Patch["VariablePatch"]
   Candidate --> Cap["CapabilityInvocation\noptional AI / memory / TTS"]
   Cap --> Command
-  Command --> Surface["Surface Client"]
+  Command --> Hook["Trusted Hook Extension\nbeforeCommandEmit"]
+  Hook --> Surface["Surface Client"]
   Patch --> Home
-  Command --> Log
+  Hook --> Log
 ```
 
 処理手順:
@@ -105,8 +106,9 @@ flowchart TB
 6. 優先度、重み、クールダウンでsceneを選ぶ。
 7. sceneがRuntimeCommand、VariablePatch、CapabilityInvocationを生む。
 8. Capability resultが必要なら発話やUI演出に変換される。
-9. RuntimeCommandがSurfaceへ流れる。
-10. 結果がevent logへ記録される。
+9. `beforeCommandEmit` hookがあれば、Resident HomeがRuntimeCommandを公開protocol上で変換させる。
+10. hook結果と変換後RuntimeCommandがevent logへ記録される。
+11. RuntimeCommandがSurfaceへ流れる。
 
 ## Runtime Queries
 
