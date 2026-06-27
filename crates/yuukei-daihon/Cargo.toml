@@ -1,5 +1,5 @@
 [package]
-name = "daihon-core"
+name = "yuukei-daihon"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

@@ -1,3 +1,7 @@
-合図: conversation.text
-場面: 最初の返事
-Yuukei: 聞こえています。
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+ユーザー発言=入力#ユーザー発言
+＜表情 笑顔＞
+「聞こえています。＜ユーザー発言＞」

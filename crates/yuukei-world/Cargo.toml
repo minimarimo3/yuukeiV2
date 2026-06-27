@@ -10,9 +10,10 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+yuukei-daihon = { path = "../yuukei-daihon" }
 yuukei-protocol = { path = "../yuukei-protocol" }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
-

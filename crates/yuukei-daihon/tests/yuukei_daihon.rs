@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset};
-use daihon_core::*;
+use yuukei_daihon::*;
 
 #[derive(Default)]
 struct MockActionHandler {

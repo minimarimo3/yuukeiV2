@@ -28,14 +28,6 @@
   "daihon": {
     "scripts": ["scripts/desktop_reactions.daihon"]
   },
-  "fakeScenes": [
-    {
-      "id": "echo-conversation",
-      "signal": "conversation.text",
-      "actorId": "yuukei",
-      "responseTemplate": "聞こえています。「{text}」"
-    }
-  ],
   "initialVariables": {},
   "uiSpace": {
     "desktop": "shared-room"

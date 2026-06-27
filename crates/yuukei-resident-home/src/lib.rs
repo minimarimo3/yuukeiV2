@@ -14,7 +14,7 @@ use yuukei_protocol::{
     new_id, ActorSnapshot, CapabilityInvocation, Causality, JsonMap, NewEventLogRecord,
     ResidentSnapshot, RuntimeCommand, RuntimeEvent, SurfaceSession,
 };
-use yuukei_world::{DaihonAdapter, FakeDaihonAdapter, WorldError, WorldPack};
+use yuukei_world::{DaihonAdapter, WorldError, WorldPack, YuukeiDaihonAdapter};
 
 #[derive(Debug, Error)]
 pub enum ResidentHomeError {
@@ -61,7 +61,7 @@ impl ResidentHome {
             resident_id,
             world_pack,
             event_log,
-            Arc::new(FakeDaihonAdapter),
+            Arc::new(YuukeiDaihonAdapter::default()),
             CapabilityRouter::new(),
         )
         .await
@@ -197,6 +197,31 @@ impl ResidentHome {
         }
 
         let mut result = self.daihon.dispatch(&event, &self.world_pack).await?;
+        if !result.is_empty() {
+            let result_payload = serde_json::to_value(&result)?;
+            let result_record = NewEventLogRecord {
+                id: new_id("evt"),
+                kind: "daihon.dispatch.result".to_string(),
+                timestamp: yuukei_protocol::now_timestamp(),
+                resident_id: event.resident_id.clone(),
+                source: "daihon".to_string(),
+                device_id: event.device_id.clone(),
+                surface_id: event.surface_id.clone(),
+                actor_id: event.actor_id.clone(),
+                payload: json_map_from_value(result_payload),
+                causality: Some(Causality {
+                    source_event_id: Some(event.id.clone()),
+                    source_command_id: None,
+                    trace_id: event
+                        .causality
+                        .as_ref()
+                        .and_then(|causality| causality.trace_id.clone()),
+                }),
+                privacy: None,
+            };
+            let appended_result = self.event_log.append(result_record)?;
+            self.set_cursor(appended_result.sequence)?;
+        }
         for command in &mut result.commands {
             self.maybe_enrich_speech(command, &event).await?;
             let appended_command = self
@@ -227,9 +252,6 @@ impl ResidentHome {
     }
 
     fn apply_command_to_snapshot(&self, command: &RuntimeCommand) -> Result<()> {
-        if command.kind != "dialogue.say" {
-            return Ok(());
-        }
         let actor_id = command
             .target
             .as_ref()
@@ -241,21 +263,41 @@ impl ResidentHome {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             });
-        let text = command
-            .payload
-            .get("text")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+        let Some(actor_id) = actor_id else {
+            return Ok(());
+        };
 
-        if let (Some(actor_id), Some(text)) = (actor_id, text) {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| ResidentHomeError::PoisonedLock)?;
-            if let Some(actor) = state.actors.get_mut(&actor_id) {
-                actor.speaking = Some(true);
-                actor.bubble = Some(text);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        let Some(actor) = state.actors.get_mut(&actor_id) else {
+            return Ok(());
+        };
+        match command.kind.as_str() {
+            "dialogue.say" => {
+                if let Some(text) = command
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                {
+                    actor.speaking = Some(true);
+                    actor.bubble = Some(text);
+                }
             }
+            "avatar.expression" => {
+                if let Some(expression) = command.payload.get("expression").and_then(Value::as_str)
+                {
+                    actor.expression = expression.to_string();
+                }
+            }
+            "avatar.motion" => {
+                if let Some(motion) = command.payload.get("motion").and_then(Value::as_str) {
+                    actor.motion = motion.to_string();
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -402,7 +444,7 @@ mod tests {
     use yuukei_event_log::EventLogQuery;
     use yuukei_protocol::{SurfaceKind, SurfacePresentation, SurfaceRenderer};
     use yuukei_world::{
-        ActorDefinition, CapabilityDeclarations, DaihonConfig, FakeScene, SignalAllowlist,
+        ActorDefinition, CapabilityDeclarations, DaihonConfig, DaihonScriptSource, SignalAllowlist,
     };
 
     use super::*;
@@ -428,13 +470,22 @@ mod tests {
                 required: Vec::new(),
                 optional: vec!["speech.synthesis".to_string()],
             },
-            daihon: DaihonConfig::default(),
-            fake_scenes: vec![FakeScene {
-                id: "echo-conversation".to_string(),
-                signal: "conversation.text".to_string(),
-                actor_id: "yuukei".to_string(),
-                response_template: "聞こえています。「{text}」".to_string(),
-            }],
+            daihon: DaihonConfig {
+                scripts: vec!["scripts/reactions.daihon".to_string()],
+                loaded_scripts: vec![DaihonScriptSource {
+                    path: "scripts/reactions.daihon".to_string(),
+                    source: r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+ユーザー発言=入力#ユーザー発言
+＜表情 笑顔＞
+「聞こえています。＜ユーザー発言＞」
+"#
+                    .to_string(),
+                }],
+            },
             initial_variables: JsonMap::new(),
             ui_space: JsonMap::new(),
         }
@@ -467,14 +518,17 @@ mod tests {
             .insert("text".to_string(), json!("こんにちは"));
 
         let commands = home.ingest_event(event).await?;
-        assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].kind, "dialogue.say");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].kind, "avatar.expression");
+        assert_eq!(commands[1].kind, "dialogue.say");
         assert_eq!(
-            commands[0].payload["speechRef"],
-            format!("stub-speech://{}", commands[0].id)
+            commands[1].payload["speechRef"],
+            format!("stub-speech://{}", commands[1].id)
         );
-        let broadcast = receiver.recv().await.expect("command broadcast");
-        assert_eq!(broadcast.kind, "dialogue.say");
+        let expression = receiver.recv().await.expect("expression broadcast");
+        assert_eq!(expression.kind, "avatar.expression");
+        let dialogue = receiver.recv().await.expect("dialogue broadcast");
+        assert_eq!(dialogue.kind, "dialogue.say");
 
         let records = home
             .event_log()
@@ -484,15 +538,18 @@ mod tests {
             .map(|record| record.kind)
             .collect::<Vec<_>>();
         assert!(records.contains(&"conversation.text".to_string()));
+        assert!(records.contains(&"daihon.dispatch.result".to_string()));
+        assert!(records.contains(&"avatar.expression".to_string()));
         assert!(records.contains(&"dialogue.say".to_string()));
         assert!(records.contains(&"capability.invocation.request".to_string()));
         assert!(records.contains(&"capability.invocation.result".to_string()));
 
         let snapshot = home.snapshot()?;
         assert_eq!(snapshot.active_surface_id.as_deref(), Some("surface-main"));
+        assert_eq!(snapshot.actors["yuukei"].expression, "笑顔");
         assert_eq!(
             snapshot.actors["yuukei"].bubble.as_deref(),
-            Some("聞こえています。「こんにちは」")
+            Some("聞こえています。こんにちは")
         );
         Ok(())
     }

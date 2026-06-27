@@ -117,6 +117,13 @@ impl InMemoryVariableStore {
         Self::default()
     }
 
+    pub fn from_values(values: BTreeMap<String, DaihonValue>) -> Self {
+        Self {
+            values,
+            input_values: BTreeMap::new(),
+        }
+    }
+
     pub fn with_input(mut self, name: impl Into<String>, value: DaihonValue) -> Self {
         self.input_values.insert(name.into(), value);
         self
@@ -124,6 +131,10 @@ impl InMemoryVariableStore {
 
     pub fn values(&self) -> &BTreeMap<String, DaihonValue> {
         &self.values
+    }
+
+    pub fn into_values(self) -> BTreeMap<String, DaihonValue> {
+        self.values
     }
 
     fn key(reference: &VariableRef) -> String {

@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/daihon-core",
     "crates/yuukei-capability",
+    "crates/yuukei-daihon",
     "crates/yuukei-device-host",
     "crates/yuukei-event-log",
     "crates/yuukei-protocol",
