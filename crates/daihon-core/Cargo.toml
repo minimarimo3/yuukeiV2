@@ -1,0 +1,19 @@
+[package]
+name = "daihon-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+async-recursion.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+chumsky.workspace = true
+miette.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
