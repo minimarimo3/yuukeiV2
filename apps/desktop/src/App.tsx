@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
@@ -13,11 +14,24 @@ type AppProps = {
   client?: YuukeiClient;
 };
 
+type SettingsCategoryId = "worldPack" | "extensions";
+
+type SettingsCategory = {
+  id: SettingsCategoryId;
+  label: string;
+  ariaLabel: string;
+  panelId: string;
+  panelClassName?: string;
+  content: ReactNode;
+};
+
 export function App({ client = tauriYuukeiClient }: AppProps) {
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [commands, setCommands] = useState<RuntimeCommand[]>([]);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("connecting");
+  const [activeSettingsCategoryId, setActiveSettingsCategoryId] =
+    useState<SettingsCategoryId>("worldPack");
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
   const [extensionState, setExtensionState] =
@@ -189,6 +203,151 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  const settingsCategories: SettingsCategory[] = [
+    {
+      id: "worldPack",
+      label: "World Pack",
+      ariaLabel: "World Pack settings",
+      panelId: "settings-world-pack-panel",
+      content: (
+        <>
+          <div className="settings-copy">
+            <h2>World Pack</h2>
+            <p className="settings-title">
+              {worldPackStatus?.activeInstall.displayName ?? "loading"}
+            </p>
+            <p className="settings-path">
+              {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
+            </p>
+            {worldPackStatus?.fallbackActive ? (
+              <p className="settings-error">
+                保存済み Pack を読み込めませんでした:{" "}
+                {worldPackStatus.lastLoadError ?? "unknown error"}
+              </p>
+            ) : null}
+            {worldPackError ? (
+              <p className="settings-error">{worldPackError}</p>
+            ) : null}
+          </div>
+          <div className="settings-actions">
+            <button
+              type="button"
+              onClick={chooseWorldPack}
+              disabled={switchingPack}
+            >
+              フォルダを選択
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={resetWorldPack}
+              disabled={switchingPack}
+            >
+              Default
+            </button>
+          </div>
+        </>
+      )
+    },
+    {
+      id: "extensions",
+      label: "Extensions",
+      ariaLabel: "Extension settings",
+      panelId: "settings-extensions-panel",
+      panelClassName: "extension-panel",
+      content: (
+        <>
+          <div className="settings-copy">
+            <h2>Extensions</h2>
+            <p className="settings-title">
+              {extensionState
+                ? `${extensionState.installed.length} installed`
+                : "loading"}
+            </p>
+            <p className="settings-path">
+              {extensionState?.extensionRoot ?? ""}
+            </p>
+            <p className="settings-note">
+              {extensionState?.trustedCodeNotice ?? ""}
+            </p>
+            {extensionError ? (
+              <p className="settings-error">{extensionError}</p>
+            ) : null}
+            <div className="extension-list">
+              {orderedBeforeCommandEmitExtensions.map((extension, index) => (
+                <article className="extension-row" key={extension.extensionId}>
+                  <label className="extension-toggle">
+                    <input
+                      type="checkbox"
+                      aria-label={`${extension.displayName} ${extension.extensionId}`}
+                      checked={extension.enabled}
+                      disabled={changingExtensions}
+                      onChange={(event) =>
+                        toggleExtension(
+                          extension.extensionId,
+                          event.currentTarget.checked
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{extension.displayName}</strong>
+                      <small>{extension.extensionId}</small>
+                    </span>
+                  </label>
+                  {extension.lastLoadError ? (
+                    <p className="settings-error">{extension.lastLoadError}</p>
+                  ) : null}
+                  <div className="extension-actions">
+                    <button
+                      type="button"
+                      className="secondary-button compact-button"
+                      disabled={changingExtensions || index === 0}
+                      onClick={() => moveExtension(extension.extensionId, -1)}
+                    >
+                      上
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button compact-button"
+                      disabled={
+                        changingExtensions ||
+                        index === orderedBeforeCommandEmitExtensions.length - 1
+                      }
+                      onClick={() => moveExtension(extension.extensionId, 1)}
+                    >
+                      下
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button compact-button"
+                      disabled={changingExtensions}
+                      onClick={() => uninstallExtension(extension.extensionId)}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+          <div className="settings-actions">
+            <button
+              type="button"
+              onClick={chooseExtension}
+              disabled={changingExtensions}
+            >
+              追加
+            </button>
+          </div>
+        </>
+      )
+    }
+  ];
+  const activeSettingsCategory =
+    settingsCategories.find(
+      (category) => category.id === activeSettingsCategoryId
+    ) ?? settingsCategories[0];
+
   return (
     <main className="surface-shell">
       <section className="resident-pane" aria-label="Resident surface">
@@ -206,126 +365,56 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         </div>
       </section>
 
-      <section className="settings-panel" aria-label="World Pack settings">
-        <div className="settings-copy">
-          <h2>World Pack</h2>
-          <p className="settings-title">
-            {worldPackStatus?.activeInstall.displayName ?? "loading"}
-          </p>
-          <p className="settings-path">
-            {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
-          </p>
-          {worldPackStatus?.fallbackActive ? (
-            <p className="settings-error">
-              保存済み Pack を読み込めませんでした:{" "}
-              {worldPackStatus.lastLoadError ?? "unknown error"}
-            </p>
-          ) : null}
-          {worldPackError ? (
-            <p className="settings-error">{worldPackError}</p>
-          ) : null}
-        </div>
-        <div className="settings-actions">
-          <button
-            type="button"
-            onClick={chooseWorldPack}
-            disabled={switchingPack}
-          >
-            フォルダを選択
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={resetWorldPack}
-            disabled={switchingPack}
-          >
-            Default
-          </button>
-        </div>
-      </section>
-
-      <section className="settings-panel extension-panel" aria-label="Extension settings">
-        <div className="settings-copy">
-          <h2>Extensions</h2>
-          <p className="settings-title">
-            {extensionState
-              ? `${extensionState.installed.length} installed`
-              : "loading"}
-          </p>
-          <p className="settings-path">
-            {extensionState?.extensionRoot ?? ""}
-          </p>
-          <p className="settings-note">
-            {extensionState?.trustedCodeNotice ?? ""}
-          </p>
-          {extensionError ? (
-            <p className="settings-error">{extensionError}</p>
-          ) : null}
-          <div className="extension-list">
-            {orderedBeforeCommandEmitExtensions.map((extension, index) => (
-              <article className="extension-row" key={extension.extensionId}>
-                <label className="extension-toggle">
-                  <input
-                    type="checkbox"
-                    aria-label={`${extension.displayName} ${extension.extensionId}`}
-                    checked={extension.enabled}
-                    disabled={changingExtensions}
-                    onChange={(event) =>
-                      toggleExtension(
-                        extension.extensionId,
-                        event.currentTarget.checked
-                      )
-                    }
-                  />
-                  <span>
-                    <strong>{extension.displayName}</strong>
-                    <small>{extension.extensionId}</small>
-                  </span>
-                </label>
-                {extension.lastLoadError ? (
-                  <p className="settings-error">{extension.lastLoadError}</p>
-                ) : null}
-                <div className="extension-actions">
-                  <button
-                    type="button"
-                    className="secondary-button compact-button"
-                    disabled={changingExtensions || index === 0}
-                    onClick={() => moveExtension(extension.extensionId, -1)}
-                  >
-                    上
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button compact-button"
-                    disabled={
-                      changingExtensions ||
-                      index === orderedBeforeCommandEmitExtensions.length - 1
-                    }
-                    onClick={() => moveExtension(extension.extensionId, 1)}
-                  >
-                    下
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button compact-button"
-                    disabled={changingExtensions}
-                    onClick={() => uninstallExtension(extension.extensionId)}
-                  >
-                    削除
-                  </button>
-                </div>
-              </article>
-            ))}
+      <section className="settings-workspace" aria-label="Settings">
+        <aside className="settings-sidebar">
+          <div className="settings-sidebar-head">
+            <p className="settings-eyebrow">Preferences</p>
+            <h2>設定</h2>
           </div>
-        </div>
-        <div className="settings-actions">
-          <button
-            type="button"
-            onClick={chooseExtension}
-            disabled={changingExtensions}
+          <nav className="settings-menu" aria-label="設定カテゴリ" role="tablist">
+            {settingsCategories.map((category) => {
+              const selected = category.id === activeSettingsCategory.id;
+              return (
+                <button
+                  key={category.id}
+                  id={`settings-${category.id}-tab`}
+                  type="button"
+                  className="settings-menu-item"
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={category.panelId}
+                  onClick={() => setActiveSettingsCategoryId(category.id)}
+                >
+                  <span className="settings-menu-mark" aria-hidden="true">
+                    {category.label.slice(0, 1)}
+                  </span>
+                  <span>{category.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </aside>
+        <div className="settings-content">
+          <header className="settings-content-header">
+            <div>
+              <p className="settings-eyebrow">Selected</p>
+              <h2>{activeSettingsCategory.label}</h2>
+            </div>
+            <span className="settings-badge">{activeSettingsCategory.id}</span>
+          </header>
+          <section
+            className={[
+              "settings-panel",
+              activeSettingsCategory.panelClassName
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            id={activeSettingsCategory.panelId}
+            role="tabpanel"
+            aria-label={activeSettingsCategory.ariaLabel}
           >
-            追加
-          </button>
+            {activeSettingsCategory.content}
+          </section>
         </div>
       </section>
 

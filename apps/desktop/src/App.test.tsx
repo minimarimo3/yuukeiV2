@@ -157,7 +157,10 @@ describe("App", () => {
     expect(await screen.findByText("Yuukei")).toBeInTheDocument();
     expect(await screen.findByTestId("bubble")).toHaveTextContent("ただいま");
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
-    expect(await screen.findByText("0 installed")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
 
     commandCallbacks[0]?.(command("聞こえています", "cmd_2"));
     expect(await screen.findByText("聞こえています")).toBeInTheDocument();
@@ -169,6 +172,28 @@ describe("App", () => {
       expect(client.sendConversationText).toHaveBeenCalledWith("こんにちは");
     });
     expect(await screen.findAllByText("返事しました")).toHaveLength(2);
+  });
+
+  it("switches settings categories without leaving the app surface", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
+    expect(screen.queryByText("0 installed")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    expect(await screen.findByText("0 installed")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Extensions" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "false"
+    );
+    expect(screen.queryByText("Default Yuukei")).not.toBeInTheDocument();
   });
 
   it("ignores a canceled World Pack directory dialog", async () => {
@@ -244,6 +269,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
     await screen.findByText("0 installed");
     await userEvent.click(screen.getByRole("button", { name: "追加" }));
 
@@ -289,6 +315,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
     await screen.findByText("Nya Suffix");
     await userEvent.click(screen.getByLabelText("Nya Suffix nya-suffix"));
     await waitFor(() => {
