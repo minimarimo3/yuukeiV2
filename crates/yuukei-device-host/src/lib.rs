@@ -3,11 +3,14 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use chrono::{DateTime, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
+use tokio::task::JoinHandle;
 use yuukei_event_log::{EventLog, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
@@ -33,6 +36,7 @@ pub const DEFAULT_RESIDENT_ID: &str = "resident-default";
 pub const DEFAULT_DEVICE_ID: &str = "device-local";
 pub const TAURI_SURFACE_ID: &str = "surface-tauri";
 pub const CLI_SURFACE_ID: &str = "surface-cli";
+pub const PRESENCE_IDLE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Error)]
 pub enum DeviceHostError {
@@ -50,6 +54,8 @@ pub enum DeviceHostError {
     AppLog(#[from] AppLogError),
     #[error("extension settings error: {0}")]
     ExtensionSettings(String),
+    #[error("presence state lock is poisoned")]
+    PresenceState,
 }
 
 pub type Result<T> = std::result::Result<T, DeviceHostError>;
@@ -124,6 +130,32 @@ pub struct LocalYuukeiRuntime {
     device_id: String,
     paths: RuntimePaths,
     world_pack_status: WorldPackSelectionState,
+    presence_state: Arc<Mutex<PresenceState>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PresenceState {
+    startup_emitted: bool,
+    last_time_period: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalTimePeriod {
+    Morning,
+    Day,
+    Evening,
+    LateNight,
+}
+
+impl LocalTimePeriod {
+    pub fn as_daihon_value(self) -> &'static str {
+        match self {
+            Self::Morning => "朝",
+            Self::Day => "昼",
+            Self::Evening => "夜",
+            Self::LateNight => "深夜",
+        }
+    }
 }
 
 impl LocalYuukeiRuntime {
@@ -367,6 +399,7 @@ impl LocalYuukeiRuntime {
             device_id: config.device_id,
             paths,
             world_pack_status,
+            presence_state: Arc::new(Mutex::new(PresenceState::default())),
         };
         runtime.record_world_pack_activated().await?;
         Ok(runtime)
@@ -409,7 +442,7 @@ impl LocalYuukeiRuntime {
             .map(|registry| registry.state())
     }
 
-    pub fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
+    pub async fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
         self.logger.record(
             "surface.attach.request",
             "device-host",
@@ -420,7 +453,7 @@ impl LocalYuukeiRuntime {
                 ("presentation".to_string(), json!(session.presentation)),
             ]),
         )?;
-        match self.home.attach_surface(session.clone()) {
+        match self.home.attach_surface(session.clone()).await {
             Ok(snapshot) => {
                 self.logger.record(
                     "surface.attach.ready",
@@ -502,6 +535,148 @@ impl LocalYuukeiRuntime {
                     "runtime.commands.error",
                     "resident-home",
                     error_payload("conversation.text", &error),
+                );
+                Err(error.into())
+            }
+        }
+    }
+
+    pub async fn emit_app_startup(&self) -> Result<Vec<RuntimeCommand>> {
+        let snapshot = current_presence_snapshot();
+        {
+            let mut state = self
+                .presence_state
+                .lock()
+                .map_err(|_| DeviceHostError::PresenceState)?;
+            if state.startup_emitted {
+                return Ok(Vec::new());
+            }
+            state.startup_emitted = true;
+            state.last_time_period = Some(snapshot.time_period.to_string());
+        }
+        let result = self
+            .emit_runtime_event("app.startup", snapshot.into_payload())
+            .await;
+        if result.is_err() {
+            if let Ok(mut state) = self.presence_state.lock() {
+                state.startup_emitted = false;
+                state.last_time_period = None;
+            }
+        }
+        result
+    }
+
+    pub async fn emit_presence_tick(&self) -> Result<Vec<RuntimeCommand>> {
+        let snapshot = current_presence_snapshot();
+        let time_period_changed = {
+            let mut state = self
+                .presence_state
+                .lock()
+                .map_err(|_| DeviceHostError::PresenceState)?;
+            let changed = state.last_time_period.as_deref() != Some(snapshot.time_period);
+            if changed {
+                state.last_time_period = Some(snapshot.time_period.to_string());
+            }
+            changed
+        };
+
+        let mut commands = Vec::new();
+        if time_period_changed {
+            commands.extend(
+                self.emit_runtime_event("presence.time_period", snapshot.clone().into_payload())
+                    .await?,
+            );
+        }
+        commands.extend(
+            self.emit_runtime_event("presence.idle_tick", snapshot.into_payload())
+                .await?,
+        );
+        Ok(commands)
+    }
+
+    pub async fn emit_device_sleep_before(&self) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event("device.sleep.before", current_presence_payload())
+            .await
+    }
+
+    pub async fn emit_device_wake(&self) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event("device.wake", current_presence_payload())
+            .await
+    }
+
+    pub fn spawn_presence_loop(&self) -> JoinHandle<()> {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PRESENCE_IDLE_TICK_INTERVAL).await;
+                if let Err(error) = runtime.emit_presence_tick().await {
+                    let _ = runtime.logger.record(
+                        "presence.loop.error",
+                        "device-host",
+                        error_payload("presence", &error),
+                    );
+                }
+            }
+        })
+    }
+
+    async fn emit_runtime_event(
+        &self,
+        kind: &str,
+        payload: JsonMap,
+    ) -> Result<Vec<RuntimeCommand>> {
+        let active_surface_id = self.home.snapshot()?.active_surface_id;
+        let event = RuntimeEvent {
+            id: new_id("evt"),
+            kind: kind.to_string(),
+            timestamp: now_timestamp(),
+            source: "device".to_string(),
+            resident_id: self.resident_id.clone(),
+            payload,
+            causality: None,
+            device_id: Some(self.device_id.clone()),
+            surface_id: active_surface_id,
+            actor_id: None,
+        };
+        self.logger.record(
+            "runtime.event.emit",
+            "device-host",
+            JsonMap::from([
+                ("eventId".to_string(), json!(event.id)),
+                ("eventType".to_string(), json!(event.kind)),
+            ]),
+        )?;
+        match self.home.ingest_event(event.clone()).await {
+            Ok(commands) => {
+                self.logger.record(
+                    "runtime.commands.emitted",
+                    "resident-home",
+                    JsonMap::from([
+                        ("sourceEventId".to_string(), json!(event.id)),
+                        (
+                            "commandIds".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.id)
+                                .collect::<Vec<_>>()),
+                        ),
+                        (
+                            "commandTypes".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.kind)
+                                .collect::<Vec<_>>()),
+                        ),
+                        ("count".to_string(), json!(commands.len())),
+                    ]),
+                )?;
+                Ok(commands)
+            }
+            Err(error) => {
+                let _ = self.logger.record(
+                    "runtime.commands.error",
+                    "resident-home",
+                    error_payload(kind, &error),
                 );
                 Err(error.into())
             }
@@ -707,6 +882,49 @@ pub fn build_conversation_text_event(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PresenceSnapshot {
+    local_hour: u32,
+    local_minute: u32,
+    time_period: &'static str,
+}
+
+impl PresenceSnapshot {
+    fn into_payload(self) -> JsonMap {
+        JsonMap::from([
+            ("localHour".to_string(), json!(self.local_hour)),
+            ("localMinute".to_string(), json!(self.local_minute)),
+            ("timePeriod".to_string(), json!(self.time_period)),
+        ])
+    }
+}
+
+fn current_presence_payload() -> JsonMap {
+    current_presence_snapshot().into_payload()
+}
+
+fn current_presence_snapshot() -> PresenceSnapshot {
+    presence_snapshot_at(Local::now())
+}
+
+fn presence_snapshot_at(now: DateTime<Local>) -> PresenceSnapshot {
+    let local_hour = now.hour();
+    PresenceSnapshot {
+        local_hour,
+        local_minute: now.minute(),
+        time_period: time_period_for_hour(local_hour).as_daihon_value(),
+    }
+}
+
+pub fn time_period_for_hour(hour: u32) -> LocalTimePeriod {
+    match hour {
+        5..=9 => LocalTimePeriod::Morning,
+        10..=16 => LocalTimePeriod::Day,
+        17..=21 => LocalTimePeriod::Evening,
+        _ => LocalTimePeriod::LateNight,
+    }
+}
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -886,6 +1104,103 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-test"));
         assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[test]
+    fn time_period_uses_four_life_periods() {
+        assert_eq!(time_period_for_hour(5).as_daihon_value(), "朝");
+        assert_eq!(time_period_for_hour(9).as_daihon_value(), "朝");
+        assert_eq!(time_period_for_hour(10).as_daihon_value(), "昼");
+        assert_eq!(time_period_for_hour(16).as_daihon_value(), "昼");
+        assert_eq!(time_period_for_hour(17).as_daihon_value(), "夜");
+        assert_eq!(time_period_for_hour(21).as_daihon_value(), "夜");
+        assert_eq!(time_period_for_hour(22).as_daihon_value(), "深夜");
+        assert_eq!(time_period_for_hour(4).as_daihon_value(), "深夜");
+    }
+
+    #[tokio::test]
+    async fn app_startup_event_dispatches_once_with_japanese_time_input() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+        let commands = runtime.emit_app_startup().await?;
+        let second = runtime.emit_app_startup().await?;
+
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0]
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .starts_with("起動："));
+        assert_eq!(
+            commands[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.surface_id.as_deref()),
+            Some(CLI_SURFACE_ID)
+        );
+        assert!(second.is_empty());
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|kind| kind.as_str() == "app.startup")
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn device_power_events_are_logged_and_dispatched() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+        let sleep = runtime.emit_device_sleep_before().await?;
+        let wake = runtime.emit_device_wake().await?;
+
+        assert_eq!(sleep[0].payload["text"], "少し眠ります。");
+        assert_eq!(wake[0].payload["text"], "おかえりなさい。");
+        assert_eq!(
+            wake[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.surface_id.as_deref()),
+            Some(CLI_SURFACE_ID)
+        );
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert!(records.iter().any(|kind| kind == "device.sleep.before"));
+        assert!(records.iter().any(|kind| kind == "device.wake"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1182,6 +1497,59 @@ mod tests {
                 },
                 "capabilities": {
                     "required": required_capabilities,
+                    "optional": ["speech.synthesis"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_lifecycle_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### startup
+合図: ＠アプリ_起動
+話者: yuukei
+「起動：＜入力#時間帯＞」
+
+### before sleep
+合図: ＠端末_スリープ前
+話者: yuukei
+「少し眠ります。」
+
+### wake
+合図: ＠端末_復帰
+話者: yuukei
+「おかえりなさい。」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Default Yuukei",
+                        "profile": {}
+                    }
+                ],
+                "signals": {
+                    "allow": ["app.startup", "surface.attach", "device.sleep.before", "device.wake"]
+                },
+                "capabilities": {
+                    "required": [],
                     "optional": ["speech.synthesis"]
                 },
                 "daihon": {

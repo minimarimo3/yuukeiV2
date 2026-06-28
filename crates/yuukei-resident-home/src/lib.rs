@@ -196,7 +196,7 @@ impl ResidentHome {
         })
     }
 
-    pub fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
+    pub async fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
         let payload = serde_json::to_value(&session)?;
         let event = RuntimeEvent {
             id: new_id("evt"),
@@ -210,15 +210,19 @@ impl ResidentHome {
             surface_id: Some(session.surface_id.clone()),
             actor_id: None,
         };
-        let appended = self.event_log.append(NewEventLogRecord::from(event))?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| ResidentHomeError::PoisonedLock)?;
-        state.recent_event_cursor = appended.sequence;
-        state.active_surface_id = Some(session.surface_id.clone());
-        state.surfaces.insert(session.surface_id.clone(), session);
-        drop(state);
+        let appended = self
+            .event_log
+            .append(NewEventLogRecord::from(event.clone()))?;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.recent_event_cursor = appended.sequence;
+            state.active_surface_id = Some(session.surface_id.clone());
+            state.surfaces.insert(session.surface_id.clone(), session);
+        }
+        self.dispatch_recorded_event(event).await?;
         self.snapshot()
     }
 
@@ -261,7 +265,10 @@ impl ResidentHome {
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
         self.set_cursor(appended_event.sequence)?;
+        self.dispatch_recorded_event(event).await
+    }
 
+    async fn dispatch_recorded_event(&self, event: RuntimeEvent) -> Result<Vec<RuntimeCommand>> {
         if !self.world_pack.allows_signal(&event.kind) {
             return Ok(Vec::new());
         }
@@ -675,7 +682,8 @@ mod tests {
                 transparent: Some(false),
                 accepts_input: Some(true),
             },
-        })?;
+        })
+        .await?;
 
         let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
         event.id = "evt_text".to_string();
@@ -740,6 +748,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn surface_attach_is_logged_and_dispatched() -> Result<()> {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### attach
+合図: ＠画面_接続
+話者: yuukei
+「ここにいます。」
+"#
+        .to_string();
+        let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+
+        let snapshot = home
+            .attach_surface(SurfaceSession {
+                surface_id: "surface-main".to_string(),
+                device_id: "device-local".to_string(),
+                kind: SurfaceKind::Desktop,
+                active: true,
+                capabilities: vec!["dialogue.say".to_string()],
+                presentation: SurfacePresentation {
+                    renderer: Some(SurfaceRenderer::Html),
+                    transparent: Some(false),
+                    accepts_input: Some(true),
+                },
+            })
+            .await?;
+
+        assert_eq!(snapshot.active_surface_id.as_deref(), Some("surface-main"));
+        let dialogue = receiver.recv().await.expect("attach dialogue broadcast");
+        assert_eq!(dialogue.kind, "dialogue.say");
+        assert_eq!(dialogue.payload["text"], json!("ここにいます。"));
+
+        let records = home
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert!(records.contains(&"surface.attach".to_string()));
+        assert!(records.contains(&"daihon.dispatch.result".to_string()));
+        assert!(records.contains(&"dialogue.say".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn extension_can_rewrite_dialogue_before_emit_and_tts() -> Result<()> {
         let home =
             ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
@@ -755,7 +810,8 @@ mod tests {
                 transparent: Some(false),
                 accepts_input: Some(true),
             },
-        })?;
+        })
+        .await?;
 
         let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
         event.id = "evt_text".to_string();

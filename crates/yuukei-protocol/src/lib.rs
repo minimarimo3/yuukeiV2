@@ -8,6 +8,64 @@ use uuid::Uuid;
 
 pub type JsonMap = BTreeMap<String, Value>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StandardSignalDefinition {
+    pub canonical_id: &'static str,
+    pub daihon_alias: &'static str,
+    pub display_label: &'static str,
+}
+
+const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
+    StandardSignalDefinition {
+        canonical_id: "conversation.text",
+        daihon_alias: "会話_入力",
+        display_label: "会話入力",
+    },
+    StandardSignalDefinition {
+        canonical_id: "surface.attach",
+        daihon_alias: "画面_接続",
+        display_label: "画面接続",
+    },
+    StandardSignalDefinition {
+        canonical_id: "app.startup",
+        daihon_alias: "アプリ_起動",
+        display_label: "アプリ起動",
+    },
+    StandardSignalDefinition {
+        canonical_id: "presence.idle_tick",
+        daihon_alias: "生活_定期",
+        display_label: "生活定期",
+    },
+    StandardSignalDefinition {
+        canonical_id: "presence.time_period",
+        daihon_alias: "時間帯_変化",
+        display_label: "時間帯変化",
+    },
+    StandardSignalDefinition {
+        canonical_id: "device.sleep.before",
+        daihon_alias: "端末_スリープ前",
+        display_label: "端末スリープ前",
+    },
+    StandardSignalDefinition {
+        canonical_id: "device.wake",
+        daihon_alias: "端末_復帰",
+        display_label: "端末復帰",
+    },
+];
+
+pub fn standard_signal_definitions() -> &'static [StandardSignalDefinition] {
+    STANDARD_SIGNAL_DEFINITIONS
+}
+
+pub fn canonical_signal_id(signal: &str) -> &str {
+    let trimmed = signal.trim();
+    standard_signal_definitions()
+        .iter()
+        .find(|definition| definition.canonical_id == trimmed || definition.daihon_alias == trimmed)
+        .map(|definition| definition.canonical_id)
+        .unwrap_or(trimmed)
+}
+
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
 }
@@ -462,6 +520,14 @@ mod tests {
         assert_eq!(value["deviceId"], "device-local");
         assert!(value.get("kind").is_none());
         Ok(())
+    }
+
+    #[test]
+    fn standard_signals_resolve_daihon_aliases_to_canonical_ids() {
+        assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
+        assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
+        assert_eq!(canonical_signal_id(" device.wake "), "device.wake");
+        assert_eq!(canonical_signal_id("pack.custom"), "pack.custom");
     }
 
     #[test]

@@ -25,3 +25,9 @@ tokio.workspace = true
 yuukei-device-host = { path = "../../../crates/yuukei-device-host" }
 yuukei-protocol = { path = "../../../crates/yuukei-protocol" }
 yuukei-resident-home = { path = "../../../crates/yuukei-resident-home" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "block2"] }
+objc2-foundation = { version = "0.3", features = ["NSNotification", "NSObject", "NSOperation", "NSString", "block2"] }

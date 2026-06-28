@@ -1432,20 +1432,40 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
             continue;
         }
         if dialogue {
-            if ch == '」' && chars.get(index + 1).map(|(_, c)| *c) == Some('」') {
-                index += 2;
-                current_column += 2;
-                continue;
-            }
-            if ch == '「' && chars.get(index + 1).map(|(_, c)| *c) == Some('「') {
-                index += 2;
-                current_column += 2;
-                continue;
-            }
-            if ch == '＜' && chars.get(index + 1).map(|(_, c)| *c) != Some('＜') {
-                function_depth += 1;
-            } else if ch == '」' {
-                dialogue = false;
+            if function_depth > 0 {
+                if in_function_string {
+                    if ch == '」' && chars.get(index + 1).map(|(_, c)| *c) == Some('」') {
+                        index += 2;
+                        current_column += 2;
+                        continue;
+                    }
+                    if ch == '」' {
+                        in_function_string = false;
+                    }
+                } else {
+                    match ch {
+                        '「' => in_function_string = true,
+                        '＜' => function_depth += 1,
+                        '＞' => function_depth = function_depth.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+            } else {
+                if ch == '」' && chars.get(index + 1).map(|(_, c)| *c) == Some('」') {
+                    index += 2;
+                    current_column += 2;
+                    continue;
+                }
+                if ch == '「' && chars.get(index + 1).map(|(_, c)| *c) == Some('「') {
+                    index += 2;
+                    current_column += 2;
+                    continue;
+                }
+                if ch == '＜' && chars.get(index + 1).map(|(_, c)| *c) != Some('＜') {
+                    function_depth += 1;
+                } else if ch == '」' {
+                    dialogue = false;
+                }
             }
         } else if in_function_string {
             if ch == '」' && chars.get(index + 1).map(|(_, c)| *c) != Some('」') {

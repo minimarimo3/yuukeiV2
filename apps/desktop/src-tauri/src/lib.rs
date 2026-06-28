@@ -8,9 +8,14 @@ use yuukei_device_host::{
 };
 use yuukei_protocol::{ExtensionHookPoint, ResidentSnapshot, RuntimeCommand};
 
+mod power_observer;
+use power_observer::PowerObserver;
+
 pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    power_observer: Mutex<Option<PowerObserver>>,
 }
 
 #[tauri::command]
@@ -20,7 +25,8 @@ async fn attach_surface(
 ) -> Result<ResidentSnapshot, String> {
     let runtime = state.runtime.lock().await.clone();
     let session = tauri_surface_session(runtime.device_id());
-    let snapshot = runtime.attach_surface(session).map_err(to_message)?;
+    let snapshot = runtime.attach_surface(session).await.map_err(to_message)?;
+    ensure_presence_loop(&state, &runtime).await?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     Ok(snapshot)
 }
@@ -136,9 +142,12 @@ pub fn run() {
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             println!("Yuukei app log: {}", runtime.paths().app_log_path.display());
             let command_forwarder = spawn_command_forwarder(runtime.home(), app.handle().clone());
+            let power_observer = PowerObserver::new(runtime.clone());
             app.manage(AppState {
                 runtime: Mutex::new(runtime),
                 command_forwarder: Mutex::new(Some(command_forwarder)),
+                presence_loop: Mutex::new(None),
+                power_observer: Mutex::new(Some(power_observer)),
             });
             Ok(())
         })
@@ -166,9 +175,13 @@ async fn replace_runtime(
 ) -> Result<WorldPackSwitchResult, String> {
     let snapshot = runtime
         .attach_surface(tauri_surface_session(runtime.device_id()))
+        .await
         .map_err(to_message)?;
+    runtime.emit_app_startup().await.map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app);
+    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
 
     {
@@ -180,6 +193,16 @@ async fn replace_runtime(
         if let Some(previous) = forwarder.replace(next_forwarder) {
             previous.abort();
         }
+    }
+    {
+        let mut presence_loop = state.presence_loop.lock().await;
+        if let Some(previous) = presence_loop.replace(next_presence_loop) {
+            previous.abort();
+        }
+    }
+    {
+        let mut power_observer = state.power_observer.lock().await;
+        let _previous = power_observer.replace(next_power_observer);
     }
 
     Ok(WorldPackSwitchResult { status, snapshot })
@@ -207,9 +230,13 @@ async fn replace_runtime_snapshot(
 ) -> Result<ResidentSnapshot, String> {
     let snapshot = runtime
         .attach_surface(tauri_surface_session(runtime.device_id()))
+        .await
         .map_err(to_message)?;
+    runtime.emit_app_startup().await.map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app);
+    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_power_observer = PowerObserver::new(runtime.clone());
 
     {
         let mut current = state.runtime.lock().await;
@@ -221,8 +248,30 @@ async fn replace_runtime_snapshot(
             previous.abort();
         }
     }
+    {
+        let mut presence_loop = state.presence_loop.lock().await;
+        if let Some(previous) = presence_loop.replace(next_presence_loop) {
+            previous.abort();
+        }
+    }
+    {
+        let mut power_observer = state.power_observer.lock().await;
+        let _previous = power_observer.replace(next_power_observer);
+    }
 
     Ok(snapshot)
+}
+
+async fn ensure_presence_loop(
+    state: &State<'_, AppState>,
+    runtime: &LocalYuukeiRuntime,
+) -> Result<(), String> {
+    runtime.emit_app_startup().await.map_err(to_message)?;
+    let mut presence_loop = state.presence_loop.lock().await;
+    if presence_loop.is_none() {
+        *presence_loop = Some(runtime.spawn_presence_loop());
+    }
+    Ok(())
 }
 
 fn spawn_command_forwarder(

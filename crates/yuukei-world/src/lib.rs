@@ -15,7 +15,9 @@ use yuukei_daihon::{
     InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script, Span,
     SystemEvent, ValidationMode,
 };
-use yuukei_protocol::{Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent};
+use yuukei_protocol::{
+    canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
+};
 
 #[derive(Debug, Error)]
 pub enum WorldError {
@@ -156,8 +158,9 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         let function_registry = yuukei_function_registry();
         let mut scripts = Vec::new();
         for source in &world.daihon.loaded_scripts {
-            let script = parse_script(&source.source)
+            let mut script = parse_script(&source.source)
                 .map_err(|diagnostics| WorldError::Daihon(format_diagnostics(&diagnostics)))?;
+            canonicalize_daihon_script_signals(&mut script);
             let diagnostics = validate_script(&script, Some(&function_registry));
             if has_errors(&diagnostics) {
                 return Err(WorldError::Daihon(format_diagnostics(&diagnostics)));
@@ -362,6 +365,7 @@ fn function_value(
 }
 
 fn script_accepts_event(script: &Script, event_kind: &str) -> bool {
+    let event_kind = canonical_signal_id(event_kind);
     script.event.name.value == event_kind
         || script.event.scenes.iter().any(|scene| {
             scene
@@ -370,6 +374,14 @@ fn script_accepts_event(script: &Script, event_kind: &str) -> bool {
                 .iter()
                 .any(|signal| signal.name.value == event_kind)
         })
+}
+
+fn canonicalize_daihon_script_signals(script: &mut Script) {
+    for scene in &mut script.event.scenes {
+        for signal in &mut scene.metadata.signals {
+            signal.name.value = canonical_signal_id(&signal.name.value).to_string();
+        }
+    }
 }
 
 fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
@@ -415,6 +427,24 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         inputs.push((
             "ユーザー発言".to_string(),
             DaihonValue::String(text.to_string()),
+        ));
+    }
+    if let Some(hour) = event.payload.get("localHour").and_then(Value::as_i64) {
+        inputs.push((
+            "現在時".to_string(),
+            DaihonValue::Number(DaihonNumber::Integer(hour)),
+        ));
+    }
+    if let Some(minute) = event.payload.get("localMinute").and_then(Value::as_i64) {
+        inputs.push((
+            "現在分".to_string(),
+            DaihonValue::Number(DaihonNumber::Integer(minute)),
+        ));
+    }
+    if let Some(period) = event.payload.get("timePeriod").and_then(Value::as_str) {
+        inputs.push((
+            "時間帯".to_string(),
+            DaihonValue::String(period.to_string()),
         ));
     }
     inputs
@@ -506,7 +536,14 @@ fn format_diagnostics(diagnostics: &[DaihonDiagnostic]) -> String {
     }
     diagnostics
         .iter()
-        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .map(|diagnostic| {
+            let location = diagnostic
+                .labels
+                .first()
+                .map(|label| format!(" at {}:{}", label.span.line, label.span.column))
+                .unwrap_or_default();
+            format!("{}{}: {}", diagnostic.code, location, diagnostic.message)
+        })
         .collect::<Vec<_>>()
         .join("; ")
 }
@@ -559,9 +596,10 @@ impl WorldPack {
         let mut signals = BTreeSet::new();
         for signal in &self.signals.allow {
             require_non_empty("signals.allow", signal)?;
-            if !signals.insert(signal.clone()) {
+            let canonical = canonical_signal_id(signal).to_string();
+            if !signals.insert(canonical.clone()) {
                 return Err(WorldError::Validation(format!(
-                    "duplicate signal: {}",
+                    "duplicate signal after canonicalization: {} ({canonical})",
                     signal
                 )));
             }
@@ -571,7 +609,11 @@ impl WorldPack {
     }
 
     pub fn allows_signal(&self, signal: &str) -> bool {
-        self.signals.allow.iter().any(|allowed| allowed == signal)
+        let signal = canonical_signal_id(signal);
+        self.signals
+            .allow
+            .iter()
+            .any(|allowed| canonical_signal_id(allowed) == signal)
     }
 
     pub fn actor_map(&self) -> BTreeMap<String, ActorDefinition> {
@@ -678,6 +720,23 @@ mod tests {
         let mut invalid = pack();
         invalid.default_actor_id = "unknown".to_string();
         assert!(matches!(invalid.validate(), Err(WorldError::Validation(_))));
+    }
+
+    #[test]
+    fn validates_signal_allowlist_after_alias_canonicalization() {
+        let mut world = pack();
+        world.signals.allow = vec!["会話_入力".to_string(), "conversation.text".to_string()];
+        let error = world.validate().expect_err("duplicate canonical signal");
+        assert!(error.to_string().contains("conversation.text"));
+    }
+
+    #[test]
+    fn allows_signal_accepts_standard_aliases() {
+        let mut world = pack();
+        world.signals.allow = vec!["会話_入力".to_string()];
+        assert!(world.allows_signal("conversation.text"));
+        assert!(world.allows_signal("会話_入力"));
+        assert!(!world.allows_signal("surface.attach"));
     }
 
     #[test]
@@ -791,6 +850,36 @@ mod tests {
         );
         assert_eq!(result.executed_scenes[0].scene_name, "conversation");
         assert!(!result.variable_patches.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_resolves_daihon_signal_aliases() -> Result<()> {
+        let mut world = pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### conversation
+合図: ＠会話_入力
+話者: yuukei
+ユーザー発言=入力#ユーザー発言
+「日本語合図で聞こえています。＜ユーザー発言＞」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_alias".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(
+            result.commands[0].payload["text"],
+            "日本語合図で聞こえています。こんにちは"
+        );
+        assert_eq!(result.executed_scenes[0].scene_name, "conversation");
         Ok(())
     }
 

@@ -184,6 +184,32 @@ fn parser_reads_scoped_variables_and_dialogue_embed() {
 }
 
 #[test]
+fn parser_splits_dialogue_embeds_before_following_scene_metadata() {
+    let script = parse_script(
+        r#"
+## 生活
+### 起動
+合図: ＠app.startup
+「起動：＜入力#時間帯＞」
+### 接続
+合図: ＠surface.attach
+「ここにいます。」
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(script.event.scenes.len(), 2);
+    assert_eq!(
+        script.event.scenes[0].metadata.signals[0].name.value,
+        "app.startup"
+    );
+    assert_eq!(
+        script.event.scenes[1].metadata.signals[0].name.value,
+        "surface.attach"
+    );
+}
+
+#[test]
 fn validator_rejects_completed_spec_errors() {
     let script = parse_script(
         r#"

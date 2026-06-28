@@ -16,7 +16,10 @@
   "signals": {
     "allow": [
       "conversation.text",
+      "app.startup",
       "presence.idle_tick",
+      "presence.time_period",
+      "device.sleep.before",
       "device.wake",
       "surface.attach"
     ]

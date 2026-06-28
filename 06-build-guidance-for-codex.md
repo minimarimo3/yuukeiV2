@@ -83,6 +83,10 @@ Daihonはsidecarまたはservice境界として接続する。
 
 Daihonなしでも最小Resident Homeは起動できるようにする。ただし、製品のキャラクターらしさはDaihonで作る。
 
+Daihon作者向けの標準日本語合図名は、YuukeiのWorld/Daihon境界でcanonical RuntimeEvent typeへ解決する。Daihon coreにYuukei固有signal辞書を焼き込まず、event logやHook Extensionへは `device.wake` などのcanonical IDだけを流す。
+
+OSのsleep/wake、idle、時間帯変化などの観測はDevice Hostで行う。Resident Homeは受け取った `RuntimeEvent` を記録してDaihonへ渡すだけにし、Tauri、AppKit、OS通知APIを内部へ入れない。
+
 ### 6. Official Capability Providers
 
 最後に公式Providerを足す。

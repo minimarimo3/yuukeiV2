@@ -57,6 +57,22 @@ type RuntimeEvent = YuukeiMessage & {
 
 RuntimeEventはevent logへ保存される。個人情報や重い観測は、権限付きのcontext referenceとして扱い、event payloadへ無制限に埋め込まない。
 
+### Daihon Signal Aliases
+
+`RuntimeEvent.type` とevent logは常に `device.wake` のようなcanonical IDを使う。一方でDaihon作者は、IME切り替えなしで書ける標準別名を使える。
+
+標準例:
+
+- `会話_入力` -> `conversation.text`
+- `画面_接続` -> `surface.attach`
+- `アプリ_起動` -> `app.startup`
+- `生活_定期` -> `presence.idle_tick`
+- `時間帯_変化` -> `presence.time_period`
+- `端末_スリープ前` -> `device.sleep.before`
+- `端末_復帰` -> `device.wake`
+
+Daihon load時にYuukei側のWorld/Daihon境界で標準別名をcanonical IDへ解決する。Daihon core自体はYuukei固有signal辞書を所有しない。
+
 ## RuntimeCommand
 
 Resident HomeからSurface ClientまたはDevice Hostへ出る命令。住人の見える振る舞いを表す。

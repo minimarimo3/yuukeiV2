@@ -39,7 +39,12 @@ async fn main() -> Result<()> {
     };
     let snapshot = runtime
         .attach_surface(cli_surface_session(runtime.device_id()))
+        .await
         .context("failed to attach CLI surface")?;
+    runtime
+        .emit_app_startup()
+        .await
+        .context("failed to emit app startup")?;
 
     match mode {
         CliMode::Wizard => run_wizard(runtime, snapshot).await,
@@ -120,6 +125,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliMode> {
 async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> Result<()> {
     let theme = ColorfulTheme::default();
     let mut command_history: Vec<RuntimeCommand> = Vec::new();
+    let mut presence_loop = runtime.spawn_presence_loop();
 
     println!("Yuukei CLI Surface");
     println!("Surface: {CLI_SURFACE_ID}");
@@ -171,7 +177,12 @@ async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot)
                     LocalYuukeiRuntime::select_world_pack_directory(PathBuf::from(path.trim()))
                         .await
                         .context("failed to select World Pack")?;
-                let snapshot = runtime.attach_surface(cli_surface_session(runtime.device_id()))?;
+                let snapshot = runtime
+                    .attach_surface(cli_surface_session(runtime.device_id()))
+                    .await?;
+                runtime.emit_app_startup().await?;
+                presence_loop.abort();
+                presence_loop = runtime.spawn_presence_loop();
                 command_history.clear();
                 print_world_pack_status(&runtime.world_pack_status());
                 print_snapshot_summary(&snapshot);
@@ -180,12 +191,18 @@ async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot)
                 runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
                     .await
                     .context("failed to reset World Pack")?;
-                let snapshot = runtime.attach_surface(cli_surface_session(runtime.device_id()))?;
+                let snapshot = runtime
+                    .attach_surface(cli_surface_session(runtime.device_id()))
+                    .await?;
+                runtime.emit_app_startup().await?;
+                presence_loop.abort();
+                presence_loop = runtime.spawn_presence_loop();
                 command_history.clear();
                 print_world_pack_status(&runtime.world_pack_status());
                 print_snapshot_summary(&snapshot);
             }
             WizardAction::Quit => {
+                presence_loop.abort();
                 println!("CLI Surface を終了します。");
                 return Ok(());
             }

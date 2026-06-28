@@ -6,9 +6,11 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 yuukei-event-log = { path = "../yuukei-event-log" }
 yuukei-extension = { path = "../yuukei-extension" }
 yuukei-protocol = { path = "../yuukei-protocol" }
@@ -17,4 +19,3 @@ yuukei-world = { path = "../yuukei-world" }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
