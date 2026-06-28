@@ -377,6 +377,7 @@ fn script_accepts_event(script: &Script, event_kind: &str) -> bool {
 }
 
 fn canonicalize_daihon_script_signals(script: &mut Script) {
+    script.event.name.value = canonical_signal_id(&script.event.name.value).to_string();
     for scene in &mut script.event.scenes {
         for signal in &mut scene.metadata.signals {
             signal.name.value = canonical_signal_id(&signal.name.value).to_string();
@@ -879,6 +880,29 @@ mod tests {
             result.commands[0].payload["text"],
             "日本語合図で聞こえています。こんにちは"
         );
+        assert_eq!(result.executed_scenes[0].scene_name, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_resolves_top_level_daihon_signal_aliases() -> Result<()> {
+        let mut world = pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## 会話_入力
+### conversation
+話者: yuukei
+「top-level alias」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_top_level_alias".to_string();
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "top-level alias");
+        assert_eq!(result.executed_scenes[0].event_name, "conversation.text");
         assert_eq!(result.executed_scenes[0].scene_name, "conversation");
         Ok(())
     }

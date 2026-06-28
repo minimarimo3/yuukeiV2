@@ -36,7 +36,7 @@ pub const DEFAULT_RESIDENT_ID: &str = "resident-default";
 pub const DEFAULT_DEVICE_ID: &str = "device-local";
 pub const TAURI_SURFACE_ID: &str = "surface-tauri";
 pub const CLI_SURFACE_ID: &str = "surface-cli";
-pub const PRESENCE_IDLE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Error)]
 pub enum DeviceHostError {
@@ -588,7 +588,7 @@ impl LocalYuukeiRuntime {
             );
         }
         commands.extend(
-            self.emit_runtime_event("presence.idle_tick", snapshot.into_payload())
+            self.emit_runtime_event("presence.life_tick", snapshot.into_payload())
                 .await?,
         );
         Ok(commands)
@@ -608,7 +608,7 @@ impl LocalYuukeiRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(PRESENCE_IDLE_TICK_INTERVAL).await;
+                tokio::time::sleep(PRESENCE_LIFE_TICK_INTERVAL).await;
                 if let Err(error) = runtime.emit_presence_tick().await {
                     let _ = runtime.logger.record(
                         "presence.loop.error",
@@ -1204,6 +1204,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn presence_tick_uses_life_tick_signal() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_presence_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+        let commands = runtime.emit_presence_tick().await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "生活時計です。");
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert!(records.iter().any(|kind| kind == "presence.life_tick"));
+        assert!(!records.iter().any(|kind| kind == "presence.idle_tick"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn selected_default_uses_per_pack_event_log() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
@@ -1547,6 +1576,49 @@ mod tests {
                 ],
                 "signals": {
                     "allow": ["app.startup", "surface.attach", "device.sleep.before", "device.wake"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": ["speech.synthesis"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_presence_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### life tick
+合図: ＠生活_定期
+話者: yuukei
+「生活時計です。」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Default Yuukei",
+                        "profile": {}
+                    }
+                ],
+                "signals": {
+                    "allow": ["presence.life_tick", "surface.attach"]
                 },
                 "capabilities": {
                     "required": [],

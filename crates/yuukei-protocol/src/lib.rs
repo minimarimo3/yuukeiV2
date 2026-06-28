@@ -32,7 +32,7 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "アプリ起動",
     },
     StandardSignalDefinition {
-        canonical_id: "presence.idle_tick",
+        canonical_id: "presence.life_tick",
         daihon_alias: "生活_定期",
         display_label: "生活定期",
     },
@@ -525,6 +525,7 @@ mod tests {
     #[test]
     fn standard_signals_resolve_daihon_aliases_to_canonical_ids() {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
+        assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
         assert_eq!(canonical_signal_id(" device.wake "), "device.wake");
         assert_eq!(canonical_signal_id("pack.custom"), "pack.custom");

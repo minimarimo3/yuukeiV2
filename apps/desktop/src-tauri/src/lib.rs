@@ -25,8 +25,9 @@ async fn attach_surface(
 ) -> Result<ResidentSnapshot, String> {
     let runtime = state.runtime.lock().await.clone();
     let session = tauri_surface_session(runtime.device_id());
-    let snapshot = runtime.attach_surface(session).await.map_err(to_message)?;
+    runtime.attach_surface(session).await.map_err(to_message)?;
     ensure_presence_loop(&state, &runtime).await?;
+    let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     Ok(snapshot)
 }
@@ -173,11 +174,12 @@ async fn replace_runtime(
     state: State<'_, AppState>,
     runtime: LocalYuukeiRuntime,
 ) -> Result<WorldPackSwitchResult, String> {
-    let snapshot = runtime
+    runtime
         .attach_surface(tauri_surface_session(runtime.device_id()))
         .await
         .map_err(to_message)?;
     runtime.emit_app_startup().await.map_err(to_message)?;
+    let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app);
     let next_presence_loop = runtime.spawn_presence_loop();
@@ -228,11 +230,12 @@ async fn replace_runtime_snapshot(
     state: State<'_, AppState>,
     runtime: LocalYuukeiRuntime,
 ) -> Result<ResidentSnapshot, String> {
-    let snapshot = runtime
+    runtime
         .attach_surface(tauri_surface_session(runtime.device_id()))
         .await
         .map_err(to_message)?;
     runtime.emit_app_startup().await.map_err(to_message)?;
+    let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app);
     let next_presence_loop = runtime.spawn_presence_loop();

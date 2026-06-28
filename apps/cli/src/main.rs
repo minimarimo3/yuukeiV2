@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
             .await
             .context("failed to open Yuukei local runtime")?,
     };
-    let snapshot = runtime
+    runtime
         .attach_surface(cli_surface_session(runtime.device_id()))
         .await
         .context("failed to attach CLI surface")?;
@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
         .emit_app_startup()
         .await
         .context("failed to emit app startup")?;
+    let snapshot = runtime.snapshot()?;
 
     match mode {
         CliMode::Wizard => run_wizard(runtime, snapshot).await,
@@ -177,10 +178,11 @@ async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot)
                     LocalYuukeiRuntime::select_world_pack_directory(PathBuf::from(path.trim()))
                         .await
                         .context("failed to select World Pack")?;
-                let snapshot = runtime
+                runtime
                     .attach_surface(cli_surface_session(runtime.device_id()))
                     .await?;
                 runtime.emit_app_startup().await?;
+                let snapshot = runtime.snapshot()?;
                 presence_loop.abort();
                 presence_loop = runtime.spawn_presence_loop();
                 command_history.clear();
@@ -191,10 +193,11 @@ async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot)
                 runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
                     .await
                     .context("failed to reset World Pack")?;
-                let snapshot = runtime
+                runtime
                     .attach_surface(cli_surface_session(runtime.device_id()))
                     .await?;
                 runtime.emit_app_startup().await?;
+                let snapshot = runtime.snapshot()?;
                 presence_loop.abort();
                 presence_loop = runtime.spawn_presence_loop();
                 command_history.clear();
