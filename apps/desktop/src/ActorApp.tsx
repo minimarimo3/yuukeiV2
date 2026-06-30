@@ -29,6 +29,8 @@ import {
   type HitZoneCandidate,
   type ResolvedActorHitZone
 } from "./actorHitZones";
+import { ActorBubbleLayer } from "./ActorBubbleLayer";
+import type { ActorBubbleAnchor } from "./actorBubbleLayout";
 
 type ActorAppProps = {
   client?: YuukeiClient;
@@ -43,11 +45,13 @@ type LoadedActor = {
   hitZones: ResolvedActorHitZone[];
   boneNodes: Map<string, THREE.Object3D>;
   hitTestRadius: number;
+  mouthOffsetY: number;
 };
 
 type VrmStageProps = {
   assets: ActorSurfaceAsset[];
   snapshot: ResidentSnapshot | null;
+  onBubbleAnchorsChange(anchors: Record<string, ActorBubbleAnchor>): void;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
 };
@@ -56,6 +60,9 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [bubbleAnchors, setBubbleAnchors] = useState<
+    Record<string, ActorBubbleAnchor>
+  >({});
 
   useEffect(() => {
     let disposed = false;
@@ -113,22 +120,23 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
     },
     [client]
   );
+  const updateBubbleAnchors = useCallback(
+    (anchors: Record<string, ActorBubbleAnchor>) => {
+      setBubbleAnchors(anchors);
+    },
+    []
+  );
 
   return (
     <main className="actor-shell" aria-label="Yuukei actor surface">
       <VrmStage
         assets={assets}
         snapshot={snapshot}
+        onBubbleAnchorsChange={updateBubbleAnchors}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
       />
-      <div className="actor-bubbles" aria-live="polite">
-        {bubbleActors.map(([actorId, actor]) => (
-          <p className="actor-bubble" data-actor-solid="true" key={actorId}>
-            {actor.bubble}
-          </p>
-        ))}
-      </div>
+      <ActorBubbleLayer actors={bubbleActors} anchors={bubbleAnchors} />
       {status ? (
         <p className="actor-status" data-actor-solid="true" role="alert">
           {status}
@@ -141,6 +149,7 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
 function VrmStage({
   assets,
   snapshot,
+  onBubbleAnchorsChange,
   onHitTestChange,
   onAvatarGesturePoke
 }: VrmStageProps) {
@@ -163,6 +172,7 @@ function VrmStage({
     let animationFrame = 0;
     let hitTestTimer = 0;
     let lastPassthrough: boolean | null = null;
+    let lastAnchorSignature = "";
 
     const actorRoot = new THREE.Group();
     const scene = new THREE.Scene();
@@ -193,6 +203,7 @@ function VrmStage({
     const loadedActors = new Map<string, LoadedActor>();
     const clock = new THREE.Clock();
     const semanticRaycaster = new THREE.Raycaster();
+    onBubbleAnchorsChange({});
 
     function resize() {
       const width = Math.max(checkedStageElement.clientWidth, 1);
@@ -232,7 +243,8 @@ function VrmStage({
           currentMotionId: null,
           hitZones,
           boneNodes,
-          hitTestRadius: semanticHitTestRadius(vrm.scene)
+          hitTestRadius: semanticHitTestRadius(vrm.scene),
+          mouthOffsetY: estimateMouthOffsetY(vrm.scene)
         };
         loadedActors.set(asset.actorId, loaded);
         await loadMotionActions(asset.renderer, loaded);
@@ -251,8 +263,21 @@ function VrmStage({
         loaded.mixer.update(delta);
         loaded.vrm.update(delta);
       }
+      publishBubbleAnchors();
       renderer.render(scene, camera);
       animationFrame = window.requestAnimationFrame(animate);
+    }
+
+    function publishBubbleAnchors() {
+      const anchors = projectActorMouthAnchors(
+        renderer.domElement,
+        camera,
+        loadedActors
+      );
+      const signature = anchorSignature(anchors);
+      if (signature === lastAnchorSignature) return;
+      lastAnchorSignature = signature;
+      onBubbleAnchorsChange(anchors);
     }
 
     async function updateClickThrough() {
@@ -307,7 +332,7 @@ function VrmStage({
       }
       renderer.dispose();
     };
-  }, [assets, onAvatarGesturePoke, onHitTestChange]);
+  }, [assets, onAvatarGesturePoke, onBubbleAnchorsChange, onHitTestChange]);
 
   return (
     <div className="actor-stage" ref={containerRef}>
@@ -607,6 +632,87 @@ function semanticHitTestRadius(root: THREE.Object3D): number {
   return Math.max(size.y * 0.16, 0.12);
 }
 
+function estimateMouthOffsetY(root: THREE.Object3D): number {
+  const box = new THREE.Box3().setFromObject(root);
+  if (box.isEmpty()) return 0.1;
+  return Math.max(box.getSize(new THREE.Vector3()).y * 0.075, 0.08);
+}
+
+function projectActorMouthAnchors(
+  canvas: HTMLCanvasElement,
+  camera: THREE.PerspectiveCamera,
+  loadedActors: Map<string, LoadedActor>
+): Record<string, ActorBubbleAnchor> {
+  const rect = canvas.getBoundingClientRect();
+  const anchors: Record<string, ActorBubbleAnchor> = {};
+  camera.updateMatrixWorld();
+
+  for (const loaded of loadedActors.values()) {
+    loaded.vrm.scene.updateWorldMatrix(true, true);
+    const worldPosition = mouthWorldPosition(loaded);
+    anchors[loaded.actorId] = worldPosition
+      ? projectWorldPosition(worldPosition, camera, rect)
+      : { x: 0, y: 0, visible: false };
+  }
+
+  return anchors;
+}
+
+function mouthWorldPosition(loaded: LoadedActor): THREE.Vector3 | null {
+  const node =
+    loaded.boneNodes.get(VRMHumanBoneName.Head) ??
+    loaded.boneNodes.get(VRMHumanBoneName.Neck) ??
+    loaded.boneNodes.get(VRMHumanBoneName.UpperChest) ??
+    loaded.boneNodes.get(VRMHumanBoneName.Chest);
+  if (!node) return null;
+
+  const position = new THREE.Vector3();
+  node.getWorldPosition(position);
+  position.y -= loaded.mouthOffsetY;
+  return position;
+}
+
+function projectWorldPosition(
+  worldPosition: THREE.Vector3,
+  camera: THREE.PerspectiveCamera,
+  rect: DOMRect
+): ActorBubbleAnchor {
+  if (rect.width <= 0 || rect.height <= 0) {
+    return { x: 0, y: 0, visible: false };
+  }
+
+  const projected = worldPosition.clone().project(camera);
+  if (
+    !Number.isFinite(projected.x) ||
+    !Number.isFinite(projected.y) ||
+    !Number.isFinite(projected.z)
+  ) {
+    return { x: 0, y: 0, visible: false };
+  }
+
+  const x = rect.left + (projected.x * 0.5 + 0.5) * rect.width;
+  const y = rect.top + (-projected.y * 0.5 + 0.5) * rect.height;
+  const visible =
+    projected.z >= -1 &&
+    projected.z <= 1 &&
+    x >= rect.left &&
+    x <= rect.right &&
+    y >= rect.top &&
+    y <= rect.bottom;
+
+  return { x, y, visible };
+}
+
+function anchorSignature(anchors: Record<string, ActorBubbleAnchor>): string {
+  return Object.entries(anchors)
+    .map(([actorId, anchor]) => {
+      return `${actorId}:${Math.round(anchor.x)}:${Math.round(anchor.y)}:${
+        anchor.visible ? 1 : 0
+      }`;
+    })
+    .join("|");
+}
+
 function isDescendantOf(object: THREE.Object3D, root: THREE.Object3D): boolean {
   let current: THREE.Object3D | null = object;
   while (current) {
@@ -654,7 +760,7 @@ export function expressionPresetFor(expression: string | undefined): string | nu
   }
 }
 
-function applyCommandHint(
+export function applyCommandHint(
   snapshot: ResidentSnapshot | null,
   command: RuntimeCommand
 ): ResidentSnapshot | null {
@@ -677,6 +783,19 @@ function applyCommandHint(
         [actorId]: {
           ...actor,
           motion: command.payload.motion
+        }
+      }
+    };
+  }
+  if (command.type === "dialogue.say" && typeof command.payload.text === "string") {
+    return {
+      ...snapshot,
+      actors: {
+        ...snapshot.actors,
+        [actorId]: {
+          ...actor,
+          bubble: command.payload.text,
+          speaking: true
         }
       }
     };

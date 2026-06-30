@@ -70,30 +70,83 @@ input {
   background: transparent;
 }
 
-.actor-bubbles {
+.actor-bubble-layer {
   position: absolute;
-  right: 28px;
-  bottom: 22px;
-  left: 28px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 10px;
+  inset: 0;
   pointer-events: none;
+  z-index: 2;
 }
 
 .actor-bubble {
-  max-width: min(320px, 42vw);
+  position: absolute;
+  min-width: min(180px, calc(100vw - 32px));
+  max-width: var(--actor-bubble-max-width, min(360px, calc(100vw - 32px)));
   margin: 0;
-  border: 1px solid rgba(23, 32, 51, 0.12);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 10px 24px rgba(16, 24, 40, 0.14);
+  border: 1.5px solid rgba(23, 32, 51, 0.36);
+  border-radius: 24px 26px 22px 26px;
+  padding: 12px 15px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 10px 24px rgba(16, 24, 40, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
   color: var(--text);
   font-size: 13px;
   line-height: 1.5;
   pointer-events: auto;
+}
+
+.actor-bubble-content {
+  display: block;
+  max-height: min(220px, 38vh);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.actor-bubble-tail {
+  position: absolute;
+  top: var(--actor-bubble-tail-top, 50%);
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.actor-bubble-tail::after {
+  position: absolute;
+  content: "";
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: translateY(-50%);
+}
+
+.actor-bubble--right .actor-bubble-tail {
+  left: -15px;
+  border-top: 10px solid transparent;
+  border-right: 16px solid rgba(23, 32, 51, 0.34);
+  border-bottom: 10px solid transparent;
+}
+
+.actor-bubble--right .actor-bubble-tail::after {
+  left: 3px;
+  border-top: 8px solid transparent;
+  border-right: 13px solid rgba(255, 255, 255, 0.96);
+  border-bottom: 8px solid transparent;
+}
+
+.actor-bubble--left .actor-bubble-tail {
+  right: -15px;
+  border-top: 10px solid transparent;
+  border-bottom: 10px solid transparent;
+  border-left: 16px solid rgba(23, 32, 51, 0.34);
+}
+
+.actor-bubble--left .actor-bubble-tail::after {
+  right: 3px;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-left: 13px solid rgba(255, 255, 255, 0.96);
 }
 
 .actor-status {

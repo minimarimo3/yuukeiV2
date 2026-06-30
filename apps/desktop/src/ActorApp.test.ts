@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { expressionPresetFor, normalizeMotionId } from "./ActorApp";
+import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
+import { applyCommandHint, expressionPresetFor, normalizeMotionId } from "./ActorApp";
 import {
   autoHitZoneDefinitions,
   buildAvatarGesturePokePayload,
@@ -7,6 +8,10 @@ import {
   mergeHitZoneDefinitions,
   type ResolvedActorHitZone
 } from "./actorHitZones";
+import {
+  chooseBubbleSide,
+  computeBubblePlacement
+} from "./actorBubbleLayout";
 
 describe("ActorApp renderer helpers", () => {
   it("normalizes authored motion aliases to renderer motion ids", () => {
@@ -110,6 +115,67 @@ describe("ActorApp renderer helpers", () => {
       }
     });
   });
+
+  it("places actor bubbles on the side with more space", () => {
+    expect(chooseBubbleSide(120, 800, 16)).toBe("right");
+    expect(chooseBubbleSide(680, 800, 16)).toBe("left");
+
+    expect(
+      computeBubblePlacement(
+        { x: 120, y: 160, visible: true },
+        { width: 800, height: 420 },
+        { width: 240, height: 80 }
+      ).left
+    ).toBeGreaterThan(120);
+
+    expect(
+      computeBubblePlacement(
+        { x: 680, y: 160, visible: true },
+        { width: 800, height: 420 },
+        { width: 240, height: 80 }
+      ).left
+    ).toBeLessThan(680);
+  });
+
+  it("clamps actor bubbles inside the viewport near edges", () => {
+    const placement = computeBubblePlacement(
+      { x: 790, y: 4, visible: true },
+      { width: 800, height: 280 },
+      { width: 260, height: 96 }
+    );
+
+    expect(placement.left).toBeGreaterThanOrEqual(16);
+    expect(placement.left + placement.width).toBeLessThanOrEqual(800 - 16);
+    expect(placement.top).toBeGreaterThanOrEqual(16);
+  });
+
+  it("applies dialogue.say hints to the targeted actor bubble immediately", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("dialogue.say", {
+        targetActorId: "yuukei",
+        speakerId: "another",
+        payload: { text: "今ここで話します" }
+      })
+    );
+
+    expect(next?.actors.yuukei?.bubble).toBe("今ここで話します");
+    expect(next?.actors.yuukei?.speaking).toBe(true);
+    expect(next?.actors.another?.bubble).toBeUndefined();
+  });
+
+  it("uses payload speakerId for dialogue.say when target actorId is missing", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("dialogue.say", {
+        speakerId: "another",
+        payload: { text: "こちらからです" }
+      })
+    );
+
+    expect(next?.actors.another?.bubble).toBe("こちらからです");
+    expect(next?.actors.another?.speaking).toBe(true);
+  });
 });
 
 function hitZone(
@@ -126,5 +192,58 @@ function hitZone(
     shape: "auto",
     events,
     priority
+  };
+}
+
+function snapshotFixture(): ResidentSnapshot {
+  return {
+    residentId: "resident-default",
+    worldPackId: "default-yuukei",
+    activeSurfaceId: "surface-actor",
+    actors: {
+      yuukei: {
+        displayName: "Yuukei",
+        expression: "neutral",
+        motion: "idle",
+        location: "desktop"
+      },
+      another: {
+        displayName: "Another",
+        expression: "neutral",
+        motion: "idle",
+        location: "desktop"
+      }
+    },
+    surfaces: {},
+    capabilities: {},
+    extensions: {},
+    recentEventCursor: "cursor-1"
+  };
+}
+
+function commandFixture(
+  type: string,
+  options: {
+    targetActorId?: string;
+    speakerId?: string;
+    payload?: Record<string, unknown>;
+  } = {}
+): RuntimeCommand {
+  return {
+    id: "cmd-test",
+    type,
+    timestamp: "2026-06-30T00:00:00.000Z",
+    source: "daihon",
+    residentId: "resident-default",
+    payload: {
+      ...(options.speakerId ? { speakerId: options.speakerId } : {}),
+      ...(options.payload ?? {})
+    },
+    target: options.targetActorId
+      ? {
+          actorId: options.targetActorId,
+          surfaceId: "surface-actor"
+        }
+      : undefined
   };
 }
