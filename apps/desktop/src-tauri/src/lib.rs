@@ -363,6 +363,7 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("settings")
         .ok_or_else(|| "settings window is not available".to_string())?;
+    window.unminimize().map_err(to_message)?;
     window.show().map_err(to_message)?;
     window.set_focus().map_err(to_message)?;
     Ok(())

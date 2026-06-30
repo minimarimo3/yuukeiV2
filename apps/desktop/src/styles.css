@@ -18,6 +18,11 @@
   box-sizing: border-box;
 }
 
+html,
+#root {
+  background: transparent;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -33,6 +38,10 @@ body[data-surface="actor"] {
   overflow: hidden;
   min-width: 1px;
   min-height: 1px;
+  background: transparent;
+}
+
+body[data-surface="actor"] #root {
   background: transparent;
 }
 
