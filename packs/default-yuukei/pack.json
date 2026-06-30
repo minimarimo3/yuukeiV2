@@ -10,6 +10,30 @@
       "profile": {
         "role": "UI resident",
         "speechStyle": "short and present"
+      },
+      "renderer": {
+        "kind": "vrm",
+        "model": "character/character_1.vrm",
+        "motions": {
+          "walk": "motion/walk.vrma",
+          "歩く": "motion/walk.vrma"
+        }
+      }
+    },
+    {
+      "id": "partner",
+      "displayName": "Partner",
+      "profile": {
+        "role": "UI resident",
+        "speechStyle": "quiet and observant"
+      },
+      "renderer": {
+        "kind": "vrm",
+        "model": "character/character_2.vrm",
+        "motions": {
+          "walk": "motion/walk.vrma",
+          "歩く": "motion/walk.vrma"
+        }
       }
     }
   ],

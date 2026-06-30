@@ -11,11 +11,14 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.5.4",
+    "@pixiv/three-vrm-animation": "^3.5.4",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "2.2.0",
     "@yuukei/protocol": "workspace:*",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "^0.185.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",
@@ -23,6 +26,7 @@
     "@testing-library/user-event": "^14.5.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "@types/three": "^0.185.0",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^25.0.1",
     "typescript": "^5.7.2",

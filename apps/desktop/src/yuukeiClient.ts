@@ -60,11 +60,31 @@ export type ExtensionSettingsChangeResult = {
   snapshot: ResidentSnapshot;
 };
 
+export type ActorSurfaceAssetCatalog = {
+  worldPackId: string;
+  actors: ActorSurfaceAsset[];
+};
+
+export type ActorSurfaceAsset = {
+  actorId: string;
+  displayName: string;
+  renderer?: ActorSurfaceRendererAsset;
+};
+
+export type ActorSurfaceRendererAsset = {
+  kind: "vrm";
+  modelUrl: string;
+  motions: Record<string, string>;
+};
+
 export type YuukeiClient = {
   attachSurface(): Promise<ResidentSnapshot>;
   getSnapshot(): Promise<ResidentSnapshot>;
   getWorldPackStatus(): Promise<WorldPackSelectionState>;
   getExtensionSettings(): Promise<ExtensionSettingsState>;
+  getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
+  setActorWindowClickThrough(passthrough: boolean): Promise<void>;
+  openSettingsWindow(): Promise<void>;
   sendConversationText(text: string): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
@@ -84,6 +104,9 @@ export type YuukeiClient = {
   ): Promise<ExtensionSettingsChangeResult>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
+  onAssetsChanged(
+    callback: (catalog: ActorSurfaceAssetCatalog) => void
+  ): Promise<() => void>;
 };
 
 export const tauriYuukeiClient: YuukeiClient = {
@@ -93,6 +116,11 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<WorldPackSelectionState>("get_world_pack_status"),
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
+  getActorSurfaceAssets: () =>
+    invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
+  setActorWindowClickThrough: (passthrough: boolean) =>
+    invoke<void>("set_actor_window_click_through", { passthrough }),
+  openSettingsWindow: () => invoke<void>("open_settings_window"),
   sendConversationText: (text: string) =>
     invoke<RuntimeCommand[]>("send_conversation_text", { text }),
   openWorldPackDirectory: async () => {
@@ -138,6 +166,15 @@ export const tauriYuukeiClient: YuukeiClient = {
     const unlisten = await listen<ResidentSnapshot>("yuukei-snapshot", (event) => {
       callback(event.payload);
     });
+    return unlisten;
+  },
+  onAssetsChanged: async (callback) => {
+    const unlisten = await listen<ActorSurfaceAssetCatalog>(
+      "yuukei-assets-changed",
+      (event) => {
+        callback(event.payload);
+      }
+    );
     return unlisten;
   }
 };

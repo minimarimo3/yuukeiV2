@@ -53,14 +53,18 @@ pub struct WorldPackSwitchResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalRuntimeEnvironment {
     pub workspace_root: PathBuf,
+    pub default_world_root: PathBuf,
     pub data_dir: PathBuf,
     pub device_id: String,
 }
 
 impl LocalRuntimeEnvironment {
     pub fn default_local() -> Self {
+        let workspace_root = crate::workspace_root();
+        let default_world_root = workspace_root.join("packs").join("default-yuukei");
         Self {
-            workspace_root: crate::workspace_root(),
+            workspace_root,
+            default_world_root,
             data_dir: crate::default_data_dir(),
             device_id: DEFAULT_DEVICE_ID.to_string(),
         }
@@ -259,7 +263,7 @@ impl WorldPackRegistry {
 }
 
 fn default_install(env: &LocalRuntimeEnvironment) -> Result<WorldPackInstall> {
-    let canonical_root = fs::canonicalize(env.workspace_root.join("packs").join("default-yuukei"))?;
+    let canonical_root = fs::canonicalize(&env.default_world_root)?;
     let pack = WorldPack::load_from_dir(&canonical_root)?;
     Ok(WorldPackInstall {
         install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),

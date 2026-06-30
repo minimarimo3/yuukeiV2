@@ -12,9 +12,23 @@
   "app": {
     "windows": [
       {
+        "label": "actor",
         "title": "Yuukei",
-        "width": 520,
+        "width": 760,
+        "height": 620,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "settings",
+        "title": "Yuukei Settings",
+        "width": 760,
         "height": 640,
+        "visible": false,
         "resizable": true
       }
     ],
@@ -25,6 +39,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": [],
+    "resources": {
+      "../../../packs/default-yuukei": "packs/default-yuukei"
+    }
   }
 }

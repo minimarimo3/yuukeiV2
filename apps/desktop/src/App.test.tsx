@@ -120,6 +120,12 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
+    getActorSurfaceAssets: vi.fn(async () => ({
+      worldPackId: "default-yuukei",
+      actors: []
+    })),
+    setActorWindowClickThrough: vi.fn(async () => undefined),
+    openSettingsWindow: vi.fn(async () => undefined),
     sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
     openWorldPackDirectory: vi.fn(async () => null),
     openExtensionDirectory: vi.fn(async () => null),
@@ -134,6 +140,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
+    onAssetsChanged: vi.fn(async () => () => undefined),
     ...overrides
   };
 }
@@ -143,35 +150,18 @@ describe("App", () => {
     cleanup();
   });
 
-  it("attaches, renders snapshot, and displays dialogue commands", async () => {
-    const commandCallbacks: Array<(command: RuntimeCommand) => void> = [];
-    const client = clientFixture({
-      onCommand: vi.fn(async (callback) => {
-        commandCallbacks.push(callback);
-        return () => undefined;
-      })
-    });
+  it("renders settings without attaching the actor surface", async () => {
+    const client = clientFixture();
 
     render(<App client={client} />);
 
-    expect(await screen.findByText("Yuukei")).toBeInTheDocument();
-    expect(await screen.findByTestId("bubble")).toHaveTextContent("ただいま");
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
       "aria-selected",
       "true"
     );
-
-    commandCallbacks[0]?.(command("聞こえています", "cmd_2"));
-    expect(await screen.findByText("聞こえています")).toBeInTheDocument();
-
-    await userEvent.type(screen.getByLabelText("Conversation text"), "こんにちは");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-
-    await waitFor(() => {
-      expect(client.sendConversationText).toHaveBeenCalledWith("こんにちは");
-    });
-    expect(await screen.findAllByText("返事しました")).toHaveLength(2);
+    expect(client.attachSurface).not.toHaveBeenCalled();
+    expect(client.sendConversationText).not.toHaveBeenCalled();
   });
 
   it("switches settings categories without leaving the app surface", async () => {
@@ -211,7 +201,7 @@ describe("App", () => {
       expect(client.openWorldPackDirectory).toHaveBeenCalled();
     });
     expect(client.selectWorldPackDirectory).not.toHaveBeenCalled();
-    expect(screen.getByTestId("bubble")).toHaveTextContent("ただいま");
+    expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
   });
 
   it("switches to a selected World Pack and refreshes the snapshot", async () => {
@@ -236,8 +226,7 @@ describe("App", () => {
         "/Users/example/custom-pack"
       );
     });
-    expect(await screen.findAllByText("Custom Yuukei")).toHaveLength(2);
-    expect(screen.getByTestId("bubble")).toHaveTextContent("外部Packです");
+    expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
   });
 
   it("shows World Pack selection errors without replacing the current snapshot", async () => {
@@ -254,7 +243,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
 
     expect(await screen.findByText("pack.json is missing")).toBeInTheDocument();
-    expect(screen.getByTestId("bubble")).toHaveTextContent("ただいま");
+    expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
   });
 
   it("installs an Extension directory and refreshes extension state", async () => {
@@ -279,9 +268,6 @@ describe("App", () => {
       );
     });
     expect(await screen.findByText("Nya Suffix")).toBeInTheDocument();
-    expect(screen.getByTestId("bubble")).toHaveTextContent(
-      "Extensionを読み込みました"
-    );
   });
 
   it("toggles, reorders, and uninstalls Extensions", async () => {

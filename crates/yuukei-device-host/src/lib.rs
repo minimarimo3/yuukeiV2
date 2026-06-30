@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -18,7 +19,7 @@ use yuukei_protocol::{
     RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
-use yuukei_world::{WorldError, WorldPack};
+use yuukei_world::{ActorRendererKind, WorldError, WorldPack};
 
 mod extension_settings;
 mod world_pack_registry;
@@ -85,9 +86,10 @@ pub struct LocalRuntimeConfig {
 
 impl LocalRuntimeConfig {
     pub fn default_local() -> Self {
-        let workspace_root = workspace_root();
-        let data_dir = default_data_dir();
-        let world_root = workspace_root.join("packs").join("default-yuukei");
+        let env = LocalRuntimeEnvironment::default_local();
+        let workspace_root = env.workspace_root;
+        let data_dir = env.data_dir;
+        let world_root = env.default_world_root;
         let extension_root = data_dir.join("extensions");
         Self {
             install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
@@ -121,6 +123,37 @@ impl LocalRuntimeConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorSurfaceAssetCatalog {
+    pub world_pack_id: String,
+    pub actors: Vec<ActorSurfaceAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorSurfaceAsset {
+    pub actor_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<ActorSurfaceRendererAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorSurfaceRendererAsset {
+    pub kind: ActorSurfaceRendererKind,
+    pub model: String,
+    #[serde(default)]
+    pub motions: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorSurfaceRendererKind {
+    Vrm,
+}
+
 #[derive(Clone)]
 pub struct LocalYuukeiRuntime {
     home: Arc<ResidentHome>,
@@ -130,6 +163,7 @@ pub struct LocalYuukeiRuntime {
     device_id: String,
     paths: RuntimePaths,
     world_pack_status: WorldPackSelectionState,
+    actor_surface_assets: ActorSurfaceAssetCatalog,
     presence_state: Arc<Mutex<PresenceState>>,
 }
 
@@ -340,6 +374,7 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
+        let actor_surface_assets = actor_surface_asset_catalog(&world);
         let event_log = match EventLog::open(&config.event_log_path) {
             Ok(event_log) => event_log,
             Err(error) => {
@@ -399,6 +434,7 @@ impl LocalYuukeiRuntime {
             device_id: config.device_id,
             paths,
             world_pack_status,
+            actor_surface_assets,
             presence_state: Arc::new(Mutex::new(PresenceState::default())),
         };
         runtime.record_world_pack_activated().await?;
@@ -435,6 +471,10 @@ impl LocalYuukeiRuntime {
 
     pub fn world_pack_status(&self) -> WorldPackSelectionState {
         self.world_pack_status.clone()
+    }
+
+    pub fn actor_surface_assets(&self) -> ActorSurfaceAssetCatalog {
+        self.actor_surface_assets.clone()
     }
 
     pub fn extension_settings(&self) -> Result<ExtensionSettingsState> {
@@ -836,8 +876,8 @@ pub fn tauri_surface_session(device_id: &str) -> SurfaceSession {
             "avatar.motion".to_string(),
         ],
         presentation: SurfacePresentation {
-            renderer: Some(SurfaceRenderer::Html),
-            transparent: Some(false),
+            renderer: Some(SurfaceRenderer::Vrm),
+            transparent: Some(true),
             accepts_input: Some(true),
         },
     }
@@ -942,10 +982,11 @@ fn default_data_dir() -> PathBuf {
 fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig {
     let LocalRuntimeEnvironment {
         workspace_root,
+        default_world_root,
         data_dir,
         device_id,
     } = env;
-    let world_root = workspace_root.join("packs").join("default-yuukei");
+    let world_root = default_world_root;
     let extension_root = data_dir.join("extensions");
     let event_log_path = data_dir
         .join("residents")
@@ -962,6 +1003,30 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         event_log_path,
         app_log_path,
         data_dir,
+    }
+}
+
+fn actor_surface_asset_catalog(world: &WorldPack) -> ActorSurfaceAssetCatalog {
+    ActorSurfaceAssetCatalog {
+        world_pack_id: world.id.clone(),
+        actors: world
+            .actors
+            .iter()
+            .map(|actor| ActorSurfaceAsset {
+                actor_id: actor.id.clone(),
+                display_name: actor.display_name.clone(),
+                renderer: actor
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| ActorSurfaceRendererAsset {
+                        kind: match renderer.kind {
+                            ActorRendererKind::Vrm => ActorSurfaceRendererKind::Vrm,
+                        },
+                        model: renderer.model.clone(),
+                        motions: renderer.motions.clone(),
+                    }),
+            })
+            .collect(),
     }
 }
 
@@ -1072,6 +1137,17 @@ mod tests {
             session.presentation.renderer,
             Some(SurfaceRenderer::Terminal)
         );
+        assert_eq!(session.presentation.accepts_input, Some(true));
+    }
+
+    #[test]
+    fn tauri_session_declares_transparent_vrm_surface() {
+        let session = tauri_surface_session("device-test");
+        assert_eq!(session.surface_id, TAURI_SURFACE_ID);
+        assert_eq!(session.device_id, "device-test");
+        assert_eq!(session.kind, SurfaceKind::Desktop);
+        assert_eq!(session.presentation.renderer, Some(SurfaceRenderer::Vrm));
+        assert_eq!(session.presentation.transparent, Some(true));
         assert_eq!(session.presentation.accepts_input, Some(true));
     }
 
@@ -1258,6 +1334,38 @@ mod tests {
             .world_pack_status()
             .settings_path
             .ends_with("settings/world-packs.json"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn actor_surface_assets_are_read_from_world_pack() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let root = workspace.path().join("packs").join("default-yuukei");
+        write_pack_with_renderer_assets(&root)?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let catalog = runtime.actor_surface_assets();
+
+        assert_eq!(catalog.world_pack_id, "default-yuukei");
+        assert_eq!(catalog.actors.len(), 2);
+        assert_eq!(catalog.actors[0].actor_id, "yuukei");
+        assert_eq!(
+            catalog.actors[0]
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.model.as_str()),
+            Some("character/character_1.vrm")
+        );
+        assert_eq!(
+            catalog.actors[1]
+                .renderer
+                .as_ref()
+                .and_then(|renderer| renderer.motions.get("walk"))
+                .map(String::as_str),
+            Some("motion/walk.vrma")
+        );
         Ok(())
     }
 
@@ -1484,6 +1592,7 @@ mod tests {
     fn test_env(workspace_root: &Path, data_dir: &Path) -> LocalRuntimeEnvironment {
         LocalRuntimeEnvironment {
             workspace_root: workspace_root.to_path_buf(),
+            default_world_root: workspace_root.join("packs").join("default-yuukei"),
             data_dir: data_dir.to_path_buf(),
             device_id: "device-test".to_string(),
         }
@@ -1527,6 +1636,73 @@ mod tests {
                 "capabilities": {
                     "required": required_capabilities,
                     "optional": ["speech.synthesis"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_pack_with_renderer_assets(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::create_dir_all(root.join("character"))?;
+        fs::create_dir_all(root.join("motion"))?;
+        fs::write(
+            root.join("scripts").join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「聞こえています。」
+"#,
+        )?;
+        fs::write(root.join("character").join("character_1.vrm"), [])?;
+        fs::write(root.join("character").join("character_2.vrm"), [])?;
+        fs::write(root.join("motion").join("walk.vrma"), [])?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Yuukei",
+                        "profile": {},
+                        "renderer": {
+                            "kind": "vrm",
+                            "model": "character/character_1.vrm",
+                            "motions": {
+                                "walk": "motion/walk.vrma"
+                            }
+                        }
+                    },
+                    {
+                        "id": "partner",
+                        "displayName": "Partner",
+                        "profile": {},
+                        "renderer": {
+                            "kind": "vrm",
+                            "model": "character/character_2.vrm",
+                            "motions": {
+                                "walk": "motion/walk.vrma"
+                            }
+                        }
+                    }
+                ],
+                "signals": {
+                    "allow": ["conversation.text", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": []
                 },
                 "daihon": {
                     "scripts": ["scripts/desktop_reactions.daihon"]

@@ -59,6 +59,23 @@ pub struct ActorDefinition {
     pub display_name: String,
     #[serde(default)]
     pub profile: JsonMap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<ActorRendererDefinition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorRendererDefinition {
+    pub kind: ActorRendererKind,
+    pub model: String,
+    #[serde(default)]
+    pub motions: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorRendererKind {
+    Vrm,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -562,6 +579,7 @@ impl WorldPack {
         let raw = fs::read_to_string(pack_path)?;
         let mut pack: Self = serde_json::from_str(&raw)?;
         pack.daihon.loaded_scripts = pack.load_daihon_scripts(&root)?;
+        pack.validate_renderer_assets(&root)?;
         pack.validate()?;
         Ok(pack)
     }
@@ -585,6 +603,13 @@ impl WorldPack {
                     "duplicate actor id: {}",
                     actor.id
                 )));
+            }
+            if let Some(renderer) = &actor.renderer {
+                require_non_empty("actor.renderer.model", &renderer.model)?;
+                for (motion_id, motion_path) in &renderer.motions {
+                    require_non_empty("actor.renderer.motions key", motion_id)?;
+                    require_non_empty("actor.renderer.motions value", motion_path)?;
+                }
             }
         }
         if !actor_ids.contains(&self.default_actor_id) {
@@ -627,13 +652,26 @@ impl WorldPack {
     fn load_daihon_scripts(&self, root: &Path) -> Result<Vec<DaihonScriptSource>> {
         let mut sources = Vec::new();
         for script in &self.daihon.scripts {
-            let path = validate_relative_pack_path(root, script)?;
+            let path = resolve_pack_relative_path(root, script)?;
             sources.push(DaihonScriptSource {
                 path: script.clone(),
                 source: fs::read_to_string(path)?,
             });
         }
         Ok(sources)
+    }
+
+    fn validate_renderer_assets(&self, root: &Path) -> Result<()> {
+        for actor in &self.actors {
+            let Some(renderer) = &actor.renderer else {
+                continue;
+            };
+            resolve_pack_relative_path(root, &renderer.model)?;
+            for motion in renderer.motions.values() {
+                resolve_pack_relative_path(root, motion)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -644,7 +682,7 @@ fn require_non_empty(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_relative_pack_path(root: &Path, path: &str) -> Result<PathBuf> {
+pub fn resolve_pack_relative_path(root: &Path, path: &str) -> Result<PathBuf> {
     let relative = Path::new(path);
     if relative.is_absolute()
         || relative
@@ -682,6 +720,7 @@ mod tests {
                 id: "yuukei".to_string(),
                 display_name: "Yuukei".to_string(),
                 profile: JsonMap::new(),
+                renderer: None,
             }],
             signals: SignalAllowlist {
                 allow: vec!["conversation.text".to_string()],
@@ -755,6 +794,66 @@ mod tests {
     }
 
     #[test]
+    fn load_from_dir_validates_renderer_asset_paths() -> Result<()> {
+        let dir = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::create_dir_all(dir.path().join("character"))?;
+        fs::create_dir_all(dir.path().join("motion"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        fs::write(dir.path().join("character").join("character_1.vrm"), [])?;
+        fs::write(dir.path().join("motion").join("walk.vrma"), [])?;
+        let mut raw_pack = pack();
+        raw_pack.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::from([("walk".to_string(), "motion/walk.vrma".to_string())]),
+        });
+        raw_pack.daihon.loaded_scripts.clear();
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&raw_pack)?,
+        )?;
+
+        let loaded = WorldPack::load_from_dir(dir.path())?;
+        assert_eq!(
+            loaded.actors[0]
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.model.as_str()),
+            Some("character/character_1.vrm")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_renderer_asset_path_traversal() -> Result<()> {
+        let dir = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        let mut invalid = pack();
+        invalid.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "../escape.vrm".to_string(),
+            motions: BTreeMap::new(),
+        });
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&invalid)?,
+        )?;
+        assert!(matches!(
+            WorldPack::load_from_dir(dir.path()),
+            Err(WorldError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_missing_pack_manifest() -> Result<()> {
         let dir = tempdir()?;
         assert!(matches!(
@@ -797,6 +896,35 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), dir.path().join("scripts"))?;
         let mut invalid = pack();
         invalid.daihon.scripts = vec!["scripts/escape.daihon".to_string()];
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&invalid)?,
+        )?;
+        assert!(matches!(
+            WorldPack::load_from_dir(dir.path()),
+            Err(WorldError::Validation(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_for_renderer_assets() -> Result<()> {
+        let dir = tempdir()?;
+        let outside = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        fs::write(outside.path().join("character_1.vrm"), [])?;
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("character"))?;
+        let mut invalid = pack();
+        invalid.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::new(),
+        });
         fs::write(
             dir.path().join("pack.json"),
             serde_json::to_string(&invalid)?,

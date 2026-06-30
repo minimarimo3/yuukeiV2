@@ -42,6 +42,28 @@ World Packが持たないもの:
 
 保存済みPackが削除、移動、破損していた場合、Device HostはDefault World Packで起動して設定画面に失敗理由を表示する。保存済み選択は勝手に消さない。ユーザーが修復するか別Packを選べるようにする。
 
+## Renderer Assets
+
+World Packは、actorごとにSurface Client向けのrenderer asset参照を宣言できる。参照はPack rootからの相対pathだけを許可する。絶対path、`..`、symlinkでPack root外へ抜ける参照はDevice Hostがload時に拒否する。
+
+最小のVRM actor宣言:
+
+```json
+{
+  "id": "yuukei",
+  "displayName": "Yuukei",
+  "renderer": {
+    "kind": "vrm",
+    "model": "character/character_1.vrm",
+    "motions": {
+      "walk": "motion/walk.vrma"
+    }
+  }
+}
+```
+
+Surface ClientはPack rootを探索しない。Device Hostが検証済みasset catalogを公開protocol URLへ変換して渡し、Surface ClientはそのURLを描画に使う。DaihonやRuntimeCommandは `avatar.motion` のようなcommandを出すだけで、renderer file pathを直接扱わない。
+
 ## Daihon Responsibilities
 
 Daihonは、条件、優先度、重み、クールダウン、変数更新、発話、動作、UI演出を扱う。

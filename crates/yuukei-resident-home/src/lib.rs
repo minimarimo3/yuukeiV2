@@ -634,6 +634,7 @@ mod tests {
                 id: "yuukei".to_string(),
                 display_name: "Yuukei".to_string(),
                 profile: JsonMap::new(),
+                renderer: None,
             }],
             signals: SignalAllowlist {
                 allow: vec![

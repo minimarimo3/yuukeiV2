@@ -5037,6 +5037,7 @@ dependencies = [
  "yuukei-device-host",
  "yuukei-protocol",
  "yuukei-resident-home",
+ "yuukei-world",
 ]
 
 [[package]]
