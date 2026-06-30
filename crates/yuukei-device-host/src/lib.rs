@@ -19,7 +19,9 @@ use yuukei_protocol::{
     RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
-use yuukei_world::{ActorRendererKind, WorldError, WorldPack};
+use yuukei_world::{
+    ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, WorldError, WorldPack,
+};
 
 mod extension_settings;
 mod world_pack_registry;
@@ -146,12 +148,72 @@ pub struct ActorSurfaceRendererAsset {
     pub model: String,
     #[serde(default)]
     pub motions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub hit_zones: Vec<ActorSurfaceHitZoneDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActorSurfaceRendererKind {
     Vrm,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorSurfaceHitZoneDefinition {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub source: ActorSurfaceHitZoneSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bones: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ActorSurfaceHitZoneShape>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorSurfaceHitZoneSource {
+    HumanoidBone,
+    NodeName,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorSurfaceHitZoneShape {
+    Auto,
+    Mesh,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarGesturePoke {
+    pub actor_id: String,
+    pub hit_zone_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_zone_label: Option<String>,
+    pub input: AvatarGestureInput,
+    pub screen: AvatarGestureScreen,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarGestureInput {
+    pub kind: String,
+    pub button: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvatarGestureScreen {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Clone)]
@@ -581,6 +643,72 @@ impl LocalYuukeiRuntime {
         }
     }
 
+    pub async fn send_avatar_gesture_poke(
+        &self,
+        surface_id: &str,
+        gesture: AvatarGesturePoke,
+    ) -> Result<Vec<RuntimeCommand>> {
+        let event = build_avatar_gesture_poke_event(
+            self.resident_id(),
+            self.device_id(),
+            surface_id,
+            gesture,
+        );
+        self.logger.record(
+            "surface.input.avatar_gesture",
+            "surface",
+            JsonMap::from([
+                ("eventId".to_string(), json!(event.id)),
+                ("surfaceId".to_string(), json!(surface_id)),
+                ("actorId".to_string(), json!(event.actor_id.clone())),
+                (
+                    "hitZoneId".to_string(),
+                    event
+                        .payload
+                        .get("hitZoneId")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+            ]),
+        )?;
+
+        match self.home.ingest_event(event.clone()).await {
+            Ok(commands) => {
+                self.logger.record(
+                    "runtime.commands.emitted",
+                    "resident-home",
+                    JsonMap::from([
+                        ("sourceEventId".to_string(), json!(event.id)),
+                        (
+                            "commandIds".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.id)
+                                .collect::<Vec<_>>()),
+                        ),
+                        (
+                            "commandTypes".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.kind)
+                                .collect::<Vec<_>>()),
+                        ),
+                        ("count".to_string(), json!(commands.len())),
+                    ]),
+                )?;
+                Ok(commands)
+            }
+            Err(error) => {
+                let _ = self.logger.record(
+                    "runtime.commands.error",
+                    "resident-home",
+                    error_payload("avatar.gesture.poke", &error),
+                );
+                Err(error.into())
+            }
+        }
+    }
+
     pub async fn emit_app_startup(&self) -> Result<Vec<RuntimeCommand>> {
         let snapshot = current_presence_snapshot();
         {
@@ -874,6 +1002,7 @@ pub fn tauri_surface_session(device_id: &str) -> SurfaceSession {
             "dialogue.say".to_string(),
             "avatar.expression".to_string(),
             "avatar.motion".to_string(),
+            "avatar.gesture.poke".to_string(),
         ],
         presentation: SurfacePresentation {
             renderer: Some(SurfaceRenderer::Vrm),
@@ -919,6 +1048,55 @@ pub fn build_conversation_text_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: None,
+    }
+}
+
+pub fn build_avatar_gesture_poke_event(
+    resident_id: &str,
+    device_id: &str,
+    surface_id: &str,
+    gesture: AvatarGesturePoke,
+) -> RuntimeEvent {
+    let AvatarGesturePoke {
+        actor_id,
+        hit_zone_id,
+        hit_zone_label,
+        input,
+        screen,
+    } = gesture;
+    let mut payload = JsonMap::from([
+        ("actorId".to_string(), Value::String(actor_id.clone())),
+        ("hitZoneId".to_string(), Value::String(hit_zone_id)),
+        (
+            "input".to_string(),
+            json!({
+                "kind": input.kind,
+                "button": input.button,
+            }),
+        ),
+        (
+            "screen".to_string(),
+            json!({
+                "x": screen.x,
+                "y": screen.y,
+            }),
+        ),
+    ]);
+    if let Some(label) = hit_zone_label {
+        payload.insert("hitZoneLabel".to_string(), Value::String(label));
+    }
+
+    RuntimeEvent {
+        id: new_id("evt"),
+        kind: "avatar.gesture.poke".to_string(),
+        timestamp: now_timestamp(),
+        source: "surface".to_string(),
+        resident_id: resident_id.to_string(),
+        payload,
+        causality: None,
+        device_id: Some(device_id.to_string()),
+        surface_id: Some(surface_id.to_string()),
+        actor_id: Some(actor_id),
     }
 }
 
@@ -1024,6 +1202,30 @@ fn actor_surface_asset_catalog(world: &WorldPack) -> ActorSurfaceAssetCatalog {
                         },
                         model: renderer.model.clone(),
                         motions: renderer.motions.clone(),
+                        hit_zones: renderer
+                            .hit_zones
+                            .iter()
+                            .map(|hit_zone| ActorSurfaceHitZoneDefinition {
+                                id: hit_zone.id.clone(),
+                                label: hit_zone.label.clone(),
+                                source: match hit_zone.source {
+                                    ActorHitZoneSource::HumanoidBone => {
+                                        ActorSurfaceHitZoneSource::HumanoidBone
+                                    }
+                                    ActorHitZoneSource::NodeName => {
+                                        ActorSurfaceHitZoneSource::NodeName
+                                    }
+                                },
+                                bones: hit_zone.bones.clone(),
+                                nodes: hit_zone.nodes.clone(),
+                                shape: hit_zone.shape.map(|shape| match shape {
+                                    ActorHitZoneShape::Auto => ActorSurfaceHitZoneShape::Auto,
+                                    ActorHitZoneShape::Mesh => ActorSurfaceHitZoneShape::Mesh,
+                                }),
+                                events: hit_zone.events.clone(),
+                                priority: hit_zone.priority,
+                            })
+                            .collect(),
                     }),
             })
             .collect(),
@@ -1149,6 +1351,10 @@ mod tests {
         assert_eq!(session.presentation.renderer, Some(SurfaceRenderer::Vrm));
         assert_eq!(session.presentation.transparent, Some(true));
         assert_eq!(session.presentation.accepts_input, Some(true));
+        assert!(session
+            .capabilities
+            .iter()
+            .any(|capability| capability == "avatar.gesture.poke"));
     }
 
     #[test]
@@ -1180,6 +1386,39 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-test"));
         assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[test]
+    fn avatar_gesture_poke_event_uses_surface_boundary_fields() {
+        let event = build_avatar_gesture_poke_event(
+            "resident-test",
+            "device-test",
+            "surface-test",
+            AvatarGesturePoke {
+                actor_id: "yuukei".to_string(),
+                hit_zone_id: "head".to_string(),
+                hit_zone_label: Some("頭".to_string()),
+                input: AvatarGestureInput {
+                    kind: "pointer".to_string(),
+                    button: "primary".to_string(),
+                },
+                screen: AvatarGestureScreen { x: 123.0, y: 456.0 },
+            },
+        );
+
+        assert_eq!(event.kind, "avatar.gesture.poke");
+        assert_eq!(event.source, "surface");
+        assert_eq!(event.resident_id, "resident-test");
+        assert_eq!(event.device_id.as_deref(), Some("device-test"));
+        assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
+        assert_eq!(event.actor_id.as_deref(), Some("yuukei"));
+        assert_eq!(event.payload["actorId"], json!("yuukei"));
+        assert_eq!(event.payload["hitZoneId"], json!("head"));
+        assert_eq!(event.payload["hitZoneLabel"], json!("頭"));
+        assert_eq!(event.payload["input"]["kind"], json!("pointer"));
+        assert_eq!(event.payload["input"]["button"], json!("primary"));
+        assert_eq!(event.payload["screen"]["x"], json!(123.0));
+        assert_eq!(event.payload["screen"]["y"], json!(456.0));
     }
 
     #[test]
@@ -1359,6 +1598,14 @@ mod tests {
             Some("character/character_1.vrm")
         );
         assert_eq!(
+            catalog.actors[0]
+                .renderer
+                .as_ref()
+                .and_then(|renderer| renderer.hit_zones.first())
+                .map(|hit_zone| hit_zone.id.as_str()),
+            Some("head")
+        );
+        assert_eq!(
             catalog.actors[1]
                 .renderer
                 .as_ref()
@@ -1366,6 +1613,61 @@ mod tests {
                 .map(String::as_str),
             Some("motion/walk.vrma")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn avatar_gesture_poke_is_logged_and_dispatches_daihon() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_avatar_gesture_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(tauri_surface_session(runtime.device_id()))
+            .await?;
+        let commands = runtime
+            .send_avatar_gesture_poke(
+                TAURI_SURFACE_ID,
+                AvatarGesturePoke {
+                    actor_id: "yuukei".to_string(),
+                    hit_zone_id: "head".to_string(),
+                    hit_zone_label: Some("頭".to_string()),
+                    input: AvatarGestureInput {
+                        kind: "pointer".to_string(),
+                        button: "primary".to_string(),
+                    },
+                    screen: AvatarGestureScreen { x: 12.0, y: 34.0 },
+                },
+            )
+            .await?;
+
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("poke dialogue command");
+        assert_eq!(
+            dialogue.payload["text"],
+            "わ、頭は急に触らないでください……！"
+        );
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        let poke = records
+            .iter()
+            .find(|record| record.kind == "avatar.gesture.poke")
+            .expect("poke event log record");
+        assert_eq!(poke.actor_id.as_deref(), Some("yuukei"));
+        assert_eq!(poke.surface_id.as_deref(), Some(TAURI_SURFACE_ID));
+        assert_eq!(poke.payload["hitZoneId"], json!("head"));
+        assert_eq!(poke.payload["hitZoneLabel"], json!("頭"));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "daihon.dispatch.result"));
         Ok(())
     }
 
@@ -1681,7 +1983,18 @@ mod tests {
                             "model": "character/character_1.vrm",
                             "motions": {
                                 "walk": "motion/walk.vrma"
-                            }
+                            },
+                            "hitZones": [
+                                {
+                                    "id": "head",
+                                    "label": "頭",
+                                    "source": "humanoidBone",
+                                    "bones": ["head"],
+                                    "shape": "auto",
+                                    "events": ["avatar.gesture.poke", "avatar.gesture.pat"],
+                                    "priority": 40
+                                }
+                            ]
                         }
                     },
                     {
@@ -1711,6 +2024,67 @@ mod tests {
                 "uiSpace": {}
             }))?,
         )?;
+        Ok(())
+    }
+
+    fn write_avatar_gesture_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### poke head
+合図: ＠住人_つつく
+条件:（入力#hitZoneId = 「head」）
+話者: yuukei
+＜表情 照れ＞
+「わ、頭は急に触らないでください……！」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Yuukei",
+                        "profile": {},
+                        "renderer": {
+                            "kind": "vrm",
+                            "model": "character/character_1.vrm",
+                            "hitZones": [
+                                {
+                                    "id": "head",
+                                    "label": "頭",
+                                    "source": "humanoidBone",
+                                    "bones": ["head"],
+                                    "shape": "auto",
+                                    "events": ["avatar.gesture.poke", "avatar.gesture.pat"]
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "signals": {
+                    "allow": ["avatar.gesture.poke", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": ["speech.synthesis"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        fs::create_dir_all(root.join("character"))?;
+        fs::write(root.join("character").join("character_1.vrm"), [])?;
         Ok(())
     }
 

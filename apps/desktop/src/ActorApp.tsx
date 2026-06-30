@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
+import {
+  VRMHumanBoneName,
+  VRMLoaderPlugin,
+  VRMUtils,
+  type VRM
+} from "@pixiv/three-vrm";
 import {
   createVRMAnimationClip,
   VRMAnimationLoaderPlugin,
@@ -11,10 +16,19 @@ import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import type { ActorSnapshot, ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
+  type AvatarGesturePokeInput,
   type ActorSurfaceAsset,
   type ActorSurfaceRendererAsset,
   type YuukeiClient
 } from "./yuukeiClient";
+import {
+  autoHitZoneDefinitions,
+  buildAvatarGesturePokePayload,
+  chooseHitZoneCandidate,
+  mergeHitZoneDefinitions,
+  type HitZoneCandidate,
+  type ResolvedActorHitZone
+} from "./actorHitZones";
 
 type ActorAppProps = {
   client?: YuukeiClient;
@@ -26,12 +40,16 @@ type LoadedActor = {
   mixer: THREE.AnimationMixer;
   actions: Map<string, THREE.AnimationAction>;
   currentMotionId: string | null;
+  hitZones: ResolvedActorHitZone[];
+  boneNodes: Map<string, THREE.Object3D>;
+  hitTestRadius: number;
 };
 
 type VrmStageProps = {
   assets: ActorSurfaceAsset[];
   snapshot: ResidentSnapshot | null;
   onHitTestChange(passthrough: boolean): Promise<void>;
+  onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
 };
 
 export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
@@ -89,6 +107,12 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
     (passthrough: boolean) => client.setActorWindowClickThrough(passthrough),
     [client]
   );
+  const sendAvatarGesturePoke = useCallback(
+    async (gesture: AvatarGesturePokeInput) => {
+      await client.sendAvatarGesturePoke(gesture);
+    },
+    [client]
+  );
 
   return (
     <main className="actor-shell" aria-label="Yuukei actor surface">
@@ -96,6 +120,7 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
         assets={assets}
         snapshot={snapshot}
         onHitTestChange={setClickThrough}
+        onAvatarGesturePoke={sendAvatarGesturePoke}
       />
       <div className="actor-bubbles" aria-live="polite">
         {bubbleActors.map(([actorId, actor]) => (
@@ -113,7 +138,12 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
   );
 }
 
-function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
+function VrmStage({
+  assets,
+  snapshot,
+  onHitTestChange,
+  onAvatarGesturePoke
+}: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const snapshotRef = useRef<ResidentSnapshot | null>(snapshot);
@@ -162,6 +192,7 @@ function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
 
     const loadedActors = new Map<string, LoadedActor>();
     const clock = new THREE.Clock();
+    const semanticRaycaster = new THREE.Raycaster();
 
     function resize() {
       const width = Math.max(checkedStageElement.clientWidth, 1);
@@ -187,13 +218,21 @@ function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
         vrm.scene.name = `actor-${asset.actorId}`;
         vrm.scene.position.x = (index - (vrmAssets.length - 1) / 2) * 1.05;
         actorRoot.add(vrm.scene);
+        const boneNodes = humanoidBoneNodes(vrm);
+        const hitZones = mergeHitZoneDefinitions(
+          autoHitZoneDefinitions(new Set(boneNodes.keys())),
+          asset.renderer.hitZones ?? []
+        );
 
         const loaded: LoadedActor = {
           actorId: asset.actorId,
           vrm,
           mixer: new THREE.AnimationMixer(vrm.scene),
           actions: new Map(),
-          currentMotionId: null
+          currentMotionId: null,
+          hitZones,
+          boneNodes,
+          hitTestRadius: semanticHitTestRadius(vrm.scene)
         };
         loadedActors.set(asset.actorId, loaded);
         await loadMotionActions(asset.renderer, loaded);
@@ -226,7 +265,26 @@ function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
       }
     }
 
+    function handlePointerDown(event: PointerEvent) {
+      if (event.button !== 0) return;
+      const hit = semanticHitZoneAtPointer(
+        event,
+        renderer.domElement,
+        camera,
+        loadedActors,
+        semanticRaycaster
+      );
+      if (!hit) return;
+      event.preventDefault();
+      void onAvatarGesturePoke(
+        buildAvatarGesturePokePayload(hit.actorId, hit.zone, event)
+      ).catch((error) => {
+        console.warn("Failed to send avatar gesture", error);
+      });
+    }
+
     window.addEventListener("resize", resize);
+    canvas.addEventListener("pointerdown", handlePointerDown);
     resize();
     void loadActors().catch((error) => {
       console.error("Failed to load VRM actors", error);
@@ -239,6 +297,7 @@ function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
     return () => {
       disposed = true;
       window.removeEventListener("resize", resize);
+      canvas.removeEventListener("pointerdown", handlePointerDown);
       window.cancelAnimationFrame(animationFrame);
       window.clearInterval(hitTestTimer);
       rendererRef.current = null;
@@ -248,7 +307,7 @@ function VrmStage({ assets, snapshot, onHitTestChange }: VrmStageProps) {
       }
       renderer.dispose();
     };
-  }, [assets, onHitTestChange]);
+  }, [assets, onAvatarGesturePoke, onHitTestChange]);
 
   return (
     <div className="actor-stage" ref={containerRef}>
@@ -397,6 +456,164 @@ async function pointerHitsVisibleSurface(
   } catch {
     return true;
   }
+}
+
+type SemanticHitZoneResult = {
+  actorId: string;
+  zone: ResolvedActorHitZone;
+};
+
+const HUMANOID_BONE_NAMES = Object.values(VRMHumanBoneName);
+
+function humanoidBoneNodes(vrm: VRM): Map<string, THREE.Object3D> {
+  const nodes = new Map<string, THREE.Object3D>();
+  for (const boneName of HUMANOID_BONE_NAMES) {
+    const node = vrm.humanoid.getRawBoneNode(boneName);
+    if (node) {
+      nodes.set(boneName, node);
+    }
+  }
+  return nodes;
+}
+
+function semanticHitZoneAtPointer(
+  event: PointerEvent,
+  canvas: HTMLCanvasElement,
+  camera: THREE.PerspectiveCamera,
+  loadedActors: Map<string, LoadedActor>,
+  raycaster: THREE.Raycaster
+): SemanticHitZoneResult | null {
+  const rect = canvas.getBoundingClientRect();
+  if (
+    event.clientX < rect.left ||
+    event.clientX > rect.right ||
+    event.clientY < rect.top ||
+    event.clientY > rect.bottom
+  ) {
+    return null;
+  }
+
+  const pointer = new THREE.Vector2(
+    ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1,
+    -(((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 - 1)
+  );
+  raycaster.setFromCamera(pointer, camera);
+
+  const actorScenes = [...loadedActors.values()].map((loaded) => loaded.vrm.scene);
+  const candidates: Array<HitZoneCandidate & { actorId: string }> = [];
+  for (const intersection of raycaster.intersectObjects(actorScenes, true)) {
+    const loaded = loadedActorForObject(intersection.object, loadedActors);
+    if (!loaded) continue;
+    for (const candidate of hitZoneCandidatesForIntersection(loaded, intersection)) {
+      candidates.push({ ...candidate, actorId: loaded.actorId });
+    }
+  }
+
+  const selected = chooseHitZoneCandidate(candidates);
+  if (!selected) return null;
+  return {
+    actorId: selected.actorId,
+    zone: selected.zone
+  };
+}
+
+function loadedActorForObject(
+  object: THREE.Object3D,
+  loadedActors: Map<string, LoadedActor>
+): LoadedActor | null {
+  for (const loaded of loadedActors.values()) {
+    if (isDescendantOf(object, loaded.vrm.scene)) {
+      return loaded;
+    }
+  }
+  return null;
+}
+
+function hitZoneCandidatesForIntersection(
+  loaded: LoadedActor,
+  intersection: THREE.Intersection
+): HitZoneCandidate[] {
+  const names = objectLineageNames(intersection.object, loaded.vrm.scene);
+  const candidates: HitZoneCandidate[] = [];
+
+  for (const zone of loaded.hitZones) {
+    if (
+      zone.source === "nodeName" &&
+      zone.nodes.some((nodeName) => names.includes(nodeName))
+    ) {
+      candidates.push({ zone, distance: intersection.distance });
+      continue;
+    }
+
+    if (zone.source !== "humanoidBone") continue;
+    const nearestBone = nearestBoneDistance(zone.bones, loaded.boneNodes, intersection.point);
+    if (nearestBone === null) continue;
+    const threshold = semanticBoneThreshold(zone, loaded.hitTestRadius);
+    if (nearestBone <= threshold) {
+      candidates.push({
+        zone,
+        distance: intersection.distance + nearestBone * 0.05
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function objectLineageNames(object: THREE.Object3D, root: THREE.Object3D): string[] {
+  const names: string[] = [];
+  let current: THREE.Object3D | null = object;
+  while (current) {
+    if (current.name) {
+      names.push(current.name);
+    }
+    if (current === root) break;
+    current = current.parent;
+  }
+  return names;
+}
+
+function nearestBoneDistance(
+  bones: string[],
+  boneNodes: Map<string, THREE.Object3D>,
+  point: THREE.Vector3
+): number | null {
+  let nearest: number | null = null;
+  const bonePosition = new THREE.Vector3();
+  for (const bone of bones) {
+    const node = boneNodes.get(bone);
+    if (!node) continue;
+    node.getWorldPosition(bonePosition);
+    const distance = bonePosition.distanceTo(point);
+    nearest = nearest === null ? distance : Math.min(nearest, distance);
+  }
+  return nearest;
+}
+
+function semanticBoneThreshold(
+  zone: ResolvedActorHitZone,
+  baseRadius: number
+): number {
+  if (zone.id === "body") return baseRadius * 1.8;
+  if (zone.id === "head") return baseRadius * 1.2;
+  if (zone.id === "leftHand" || zone.id === "rightHand") return baseRadius;
+  return baseRadius;
+}
+
+function semanticHitTestRadius(root: THREE.Object3D): number {
+  const box = new THREE.Box3().setFromObject(root);
+  if (box.isEmpty()) return 0.18;
+  const size = box.getSize(new THREE.Vector3());
+  return Math.max(size.y * 0.16, 0.12);
+}
+
+function isDescendantOf(object: THREE.Object3D, root: THREE.Object3D): boolean {
+  let current: THREE.Object3D | null = object;
+  while (current) {
+    if (current === root) return true;
+    current = current.parent;
+  }
+  return false;
 }
 
 function hasVrmRenderer(

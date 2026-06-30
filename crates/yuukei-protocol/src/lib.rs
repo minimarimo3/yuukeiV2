@@ -51,6 +51,16 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         daihon_alias: "端末_復帰",
         display_label: "端末復帰",
     },
+    StandardSignalDefinition {
+        canonical_id: "avatar.gesture.poke",
+        daihon_alias: "住人_つつく",
+        display_label: "住人つつき",
+    },
+    StandardSignalDefinition {
+        canonical_id: "avatar.gesture.pat",
+        daihon_alias: "住人_なでる",
+        display_label: "住人なで",
+    },
 ];
 
 pub fn standard_signal_definitions() -> &'static [StandardSignalDefinition] {
@@ -527,6 +537,8 @@ mod tests {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
         assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
+        assert_eq!(canonical_signal_id("住人_つつく"), "avatar.gesture.poke");
+        assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");
         assert_eq!(canonical_signal_id(" device.wake "), "device.wake");
         assert_eq!(canonical_signal_id("pack.custom"), "pack.custom");
     }

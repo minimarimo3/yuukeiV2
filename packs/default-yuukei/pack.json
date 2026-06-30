@@ -17,7 +17,18 @@
         "motions": {
           "walk": "motion/walk.vrma",
           "歩く": "motion/walk.vrma"
-        }
+        },
+        "hitZones": [
+          {
+            "id": "head",
+            "label": "頭",
+            "source": "humanoidBone",
+            "bones": ["head"],
+            "shape": "auto",
+            "events": ["avatar.gesture.poke", "avatar.gesture.pat"],
+            "priority": 40
+          }
+        ]
       }
     },
     {
@@ -45,7 +56,8 @@
       "presence.time_period",
       "device.sleep.before",
       "device.wake",
-      "surface.attach"
+      "surface.attach",
+      "avatar.gesture.poke"
     ]
   },
   "capabilities": {

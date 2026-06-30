@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{
     http::{Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -14,9 +14,10 @@ use tauri::{
 };
 use tokio::sync::Mutex;
 use yuukei_device_host::{
-    tauri_surface_session, ActorSurfaceRendererKind, ExtensionSettingsChangeResult,
-    ExtensionSettingsState, LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState,
-    WorldPackSwitchResult, TAURI_SURFACE_ID,
+    tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
+    AvatarGesturePoke, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{ExtensionHookPoint, ResidentSnapshot, RuntimeCommand};
 use yuukei_world::resolve_pack_relative_path;
@@ -60,6 +61,30 @@ struct DesktopActorSurfaceRendererAsset {
     kind: &'static str,
     model_url: String,
     motions: HashMap<String, String>,
+    hit_zones: Vec<ActorSurfaceHitZoneDefinition>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAvatarGesturePoke {
+    actor_id: String,
+    hit_zone_id: String,
+    #[serde(default)]
+    hit_zone_label: Option<String>,
+    input: yuukei_device_host::AvatarGestureInput,
+    screen: yuukei_device_host::AvatarGestureScreen,
+}
+
+impl From<DesktopAvatarGesturePoke> for AvatarGesturePoke {
+    fn from(value: DesktopAvatarGesturePoke) -> Self {
+        Self {
+            actor_id: value.actor_id,
+            hit_zone_id: value.hit_zone_id,
+            hit_zone_label: value.hit_zone_label,
+            input: value.input,
+            screen: value.screen,
+        }
+    }
 }
 
 const PACK_ASSET_SCHEME: &str = "yuukei-pack";
@@ -135,6 +160,22 @@ async fn send_conversation_text(
     let runtime = state.runtime.lock().await.clone();
     let commands = runtime
         .send_conversation_text(TAURI_SURFACE_ID, &text)
+        .await
+        .map_err(to_message)?;
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
+async fn send_avatar_gesture_poke(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    gesture: DesktopAvatarGesturePoke,
+) -> Result<Vec<RuntimeCommand>, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let commands = runtime
+        .send_avatar_gesture_poke(TAURI_SURFACE_ID, gesture.into())
         .await
         .map_err(to_message)?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
@@ -262,6 +303,7 @@ pub fn run() {
             set_actor_window_click_through,
             open_settings_window,
             send_conversation_text,
+            send_avatar_gesture_poke,
             select_world_pack_directory,
             reset_world_pack_to_default,
             install_extension_directory,
@@ -474,6 +516,7 @@ fn desktop_actor_surface_assets(runtime: &LocalYuukeiRuntime) -> DesktopActorSur
                                 (motion_id, pack_asset_url(&route))
                             })
                             .collect(),
+                        hit_zones: renderer.hit_zones,
                     });
                 DesktopActorSurfaceAsset {
                     actor_id: actor.actor_id,
@@ -667,7 +710,10 @@ fn to_message(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use yuukei_device_host::{build_conversation_text_event, DEFAULT_RESIDENT_ID};
+    use yuukei_device_host::{
+        build_avatar_gesture_poke_event, build_conversation_text_event, AvatarGestureInput,
+        AvatarGesturePoke, AvatarGestureScreen, DEFAULT_RESIDENT_ID,
+    };
     use yuukei_protocol::{SurfaceKind, SurfaceRenderer};
 
     #[test]
@@ -680,6 +726,10 @@ mod tests {
         assert_eq!(session.presentation.renderer, Some(SurfaceRenderer::Vrm));
         assert_eq!(session.presentation.transparent, Some(true));
         assert_eq!(session.presentation.accepts_input, Some(true));
+        assert!(session
+            .capabilities
+            .iter()
+            .any(|capability| capability == "avatar.gesture.poke"));
     }
 
     #[test]
@@ -709,5 +759,32 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-local"));
         assert_eq!(event.surface_id.as_deref(), Some(TAURI_SURFACE_ID));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[test]
+    fn avatar_gesture_poke_is_sent_as_surface_event() {
+        let event = build_avatar_gesture_poke_event(
+            DEFAULT_RESIDENT_ID,
+            "device-local",
+            TAURI_SURFACE_ID,
+            AvatarGesturePoke {
+                actor_id: "yuukei".to_string(),
+                hit_zone_id: "head".to_string(),
+                hit_zone_label: Some("頭".to_string()),
+                input: AvatarGestureInput {
+                    kind: "pointer".to_string(),
+                    button: "primary".to_string(),
+                },
+                screen: AvatarGestureScreen { x: 12.0, y: 34.0 },
+            },
+        );
+        assert_eq!(event.kind, "avatar.gesture.poke");
+        assert_eq!(event.source, "surface");
+        assert_eq!(event.resident_id, DEFAULT_RESIDENT_ID);
+        assert_eq!(event.device_id.as_deref(), Some("device-local"));
+        assert_eq!(event.surface_id.as_deref(), Some(TAURI_SURFACE_ID));
+        assert_eq!(event.actor_id.as_deref(), Some("yuukei"));
+        assert_eq!(event.payload["hitZoneId"], json!("head"));
+        assert_eq!(event.payload["hitZoneLabel"], json!("頭"));
     }
 }

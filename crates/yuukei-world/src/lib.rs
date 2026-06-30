@@ -70,12 +70,47 @@ pub struct ActorRendererDefinition {
     pub model: String,
     #[serde(default)]
     pub motions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hit_zones: Vec<ActorHitZoneDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActorRendererKind {
     Vrm,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorHitZoneDefinition {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub source: ActorHitZoneSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bones: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ActorHitZoneShape>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorHitZoneSource {
+    HumanoidBone,
+    NodeName,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActorHitZoneShape {
+    Auto,
+    Mesh,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -610,6 +645,7 @@ impl WorldPack {
                     require_non_empty("actor.renderer.motions key", motion_id)?;
                     require_non_empty("actor.renderer.motions value", motion_path)?;
                 }
+                validate_hit_zones(&actor.id, &renderer.hit_zones)?;
             }
         }
         if !actor_ids.contains(&self.default_actor_id) {
@@ -673,6 +709,53 @@ impl WorldPack {
         }
         Ok(())
     }
+}
+
+fn validate_hit_zones(actor_id: &str, hit_zones: &[ActorHitZoneDefinition]) -> Result<()> {
+    let mut ids = BTreeSet::new();
+    for hit_zone in hit_zones {
+        require_non_empty("actor.renderer.hitZones.id", &hit_zone.id)?;
+        if !ids.insert(hit_zone.id.clone()) {
+            return Err(WorldError::Validation(format!(
+                "duplicate hitZone id for actor {actor_id}: {}",
+                hit_zone.id
+            )));
+        }
+
+        match hit_zone.source {
+            ActorHitZoneSource::HumanoidBone => {
+                require_non_empty_list(
+                    "actor.renderer.hitZones.bones",
+                    &hit_zone.bones,
+                    &hit_zone.id,
+                )?;
+            }
+            ActorHitZoneSource::NodeName => {
+                require_non_empty_list(
+                    "actor.renderer.hitZones.nodes",
+                    &hit_zone.nodes,
+                    &hit_zone.id,
+                )?;
+            }
+        }
+
+        for event in &hit_zone.events {
+            require_non_empty("actor.renderer.hitZones.events", event)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_non_empty_list(field: &str, values: &[String], hit_zone_id: &str) -> Result<()> {
+    if values.is_empty() {
+        return Err(WorldError::Validation(format!(
+            "{field} must not be empty for hitZone {hit_zone_id}"
+        )));
+    }
+    for value in values {
+        require_non_empty(field, value)?;
+    }
+    Ok(())
 }
 
 fn require_non_empty(field: &str, value: &str) -> Result<()> {
@@ -810,6 +893,7 @@ mod tests {
             kind: ActorRendererKind::Vrm,
             model: "character/character_1.vrm".to_string(),
             motions: BTreeMap::from([("walk".to_string(), "motion/walk.vrma".to_string())]),
+            hit_zones: Vec::new(),
         });
         raw_pack.daihon.loaded_scripts.clear();
         fs::write(
@@ -841,6 +925,7 @@ mod tests {
             kind: ActorRendererKind::Vrm,
             model: "../escape.vrm".to_string(),
             motions: BTreeMap::new(),
+            hit_zones: Vec::new(),
         });
         fs::write(
             dir.path().join("pack.json"),
@@ -924,6 +1009,7 @@ mod tests {
             kind: ActorRendererKind::Vrm,
             model: "character/character_1.vrm".to_string(),
             motions: BTreeMap::new(),
+            hit_zones: Vec::new(),
         });
         fs::write(
             dir.path().join("pack.json"),
@@ -1044,5 +1130,88 @@ mod tests {
         let result = adapter.dispatch(&event, &world).await?;
         assert!(result.commands.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn hit_zones_are_optional_for_renderer_assets() {
+        let mut world = pack();
+        world.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::new(),
+            hit_zones: Vec::new(),
+        });
+
+        assert!(world.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_humanoid_hit_zone_without_bones() {
+        let mut world = pack();
+        world.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::new(),
+            hit_zones: vec![ActorHitZoneDefinition {
+                id: "head".to_string(),
+                label: Some("頭".to_string()),
+                source: ActorHitZoneSource::HumanoidBone,
+                bones: Vec::new(),
+                nodes: Vec::new(),
+                shape: Some(ActorHitZoneShape::Auto),
+                events: vec!["avatar.gesture.poke".to_string()],
+                priority: None,
+            }],
+        });
+
+        let error = world.validate().expect_err("empty bones should fail");
+        assert!(error.to_string().contains("hitZone head"));
+    }
+
+    #[test]
+    fn rejects_node_hit_zone_without_nodes() {
+        let mut world = pack();
+        world.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::new(),
+            hit_zones: vec![ActorHitZoneDefinition {
+                id: "tail".to_string(),
+                label: Some("しっぽ".to_string()),
+                source: ActorHitZoneSource::NodeName,
+                bones: Vec::new(),
+                nodes: Vec::new(),
+                shape: Some(ActorHitZoneShape::Mesh),
+                events: vec!["avatar.gesture.poke".to_string()],
+                priority: None,
+            }],
+        });
+
+        let error = world.validate().expect_err("empty nodes should fail");
+        assert!(error.to_string().contains("hitZone tail"));
+    }
+
+    #[test]
+    fn rejects_duplicate_hit_zone_ids_per_actor() {
+        let mut world = pack();
+        let hit_zone = ActorHitZoneDefinition {
+            id: "head".to_string(),
+            label: Some("頭".to_string()),
+            source: ActorHitZoneSource::HumanoidBone,
+            bones: vec!["head".to_string()],
+            nodes: Vec::new(),
+            shape: Some(ActorHitZoneShape::Auto),
+            events: vec!["avatar.gesture.poke".to_string()],
+            priority: None,
+        };
+        world.actors[0].renderer = Some(ActorRendererDefinition {
+            kind: ActorRendererKind::Vrm,
+            model: "character/character_1.vrm".to_string(),
+            motions: BTreeMap::new(),
+            hit_zones: vec![hit_zone.clone(), hit_zone],
+        });
+
+        let error = world.validate().expect_err("duplicate hitZone should fail");
+        assert!(error.to_string().contains("duplicate hitZone id"));
     }
 }

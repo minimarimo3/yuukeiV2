@@ -75,6 +75,32 @@ export type ActorSurfaceRendererAsset = {
   kind: "vrm";
   modelUrl: string;
   motions: Record<string, string>;
+  hitZones: ActorHitZoneDefinition[];
+};
+
+export type ActorHitZoneDefinition = {
+  id: string;
+  label?: string;
+  source: "humanoidBone" | "nodeName";
+  bones?: string[];
+  nodes?: string[];
+  shape?: "auto" | "mesh";
+  events?: string[];
+  priority?: number;
+};
+
+export type AvatarGesturePokeInput = {
+  actorId: string;
+  hitZoneId: string;
+  hitZoneLabel?: string;
+  input: {
+    kind: "pointer";
+    button: string;
+  };
+  screen: {
+    x: number;
+    y: number;
+  };
 };
 
 export type YuukeiClient = {
@@ -86,6 +112,9 @@ export type YuukeiClient = {
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
   openSettingsWindow(): Promise<void>;
   sendConversationText(text: string): Promise<RuntimeCommand[]>;
+  sendAvatarGesturePoke(
+    gesture: AvatarGesturePokeInput
+  ): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
   selectWorldPackDirectory(path: string): Promise<WorldPackSwitchResult>;
@@ -123,6 +152,8 @@ export const tauriYuukeiClient: YuukeiClient = {
   openSettingsWindow: () => invoke<void>("open_settings_window"),
   sendConversationText: (text: string) =>
     invoke<RuntimeCommand[]>("send_conversation_text", { text }),
+  sendAvatarGesturePoke: (gesture: AvatarGesturePokeInput) =>
+    invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
   openWorldPackDirectory: async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
