@@ -103,6 +103,50 @@ export type AvatarGesturePokeInput = {
   };
 };
 
+export type StageRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type StageAnchor = {
+  x: number;
+  y: number;
+  visible: boolean;
+};
+
+export type StageMonitor = {
+  id: string;
+  label: string;
+  name?: string;
+  bounds: StageRect;
+  scaleFactor: number;
+};
+
+export type StageActor = {
+  actorId: string;
+  displayName: string;
+  windowLabel: string;
+  bounds: StageRect;
+  anchor: StageAnchor;
+  visible: boolean;
+};
+
+export type StageBubble = {
+  bubbleId: string;
+  actorId: string;
+  text: string;
+  createdAtMs: number;
+  durationMs: number;
+};
+
+export type DesktopStageState = {
+  monitors: StageMonitor[];
+  actors: StageActor[];
+  bubbles: StageBubble[];
+};
+
 export type YuukeiClient = {
   attachSurface(): Promise<ResidentSnapshot>;
   getSnapshot(): Promise<ResidentSnapshot>;
@@ -110,6 +154,10 @@ export type YuukeiClient = {
   getExtensionSettings(): Promise<ExtensionSettingsState>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
+  setStageOverlayClickThrough(passthrough: boolean): Promise<void>;
+  getDesktopStageState(): Promise<DesktopStageState>;
+  reportActorStageAnchor(actorId: string, anchor: StageAnchor): Promise<void>;
+  dismissStageBubble(bubbleId: string): Promise<void>;
   openSettingsWindow(): Promise<void>;
   sendConversationText(text: string): Promise<RuntimeCommand[]>;
   sendAvatarGesturePoke(
@@ -136,6 +184,7 @@ export type YuukeiClient = {
   onAssetsChanged(
     callback: (catalog: ActorSurfaceAssetCatalog) => void
   ): Promise<() => void>;
+  onStageState(callback: (state: DesktopStageState) => void): Promise<() => void>;
 };
 
 export const tauriYuukeiClient: YuukeiClient = {
@@ -149,6 +198,17 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
   setActorWindowClickThrough: (passthrough: boolean) =>
     invoke<void>("set_actor_window_click_through", { passthrough }),
+  setStageOverlayClickThrough: (passthrough: boolean) =>
+    invoke<void>("set_stage_overlay_click_through", { passthrough }),
+  getDesktopStageState: () =>
+    invoke<DesktopStageState>("get_desktop_stage_state"),
+  reportActorStageAnchor: (actorId: string, anchor: StageAnchor) =>
+    invoke<void>("report_actor_stage_anchor", {
+      actorId,
+      report: { anchor }
+    }),
+  dismissStageBubble: (bubbleId: string) =>
+    invoke<void>("dismiss_stage_bubble", { bubbleId }),
   openSettingsWindow: () => invoke<void>("open_settings_window"),
   sendConversationText: (text: string) =>
     invoke<RuntimeCommand[]>("send_conversation_text", { text }),
@@ -202,6 +262,15 @@ export const tauriYuukeiClient: YuukeiClient = {
   onAssetsChanged: async (callback) => {
     const unlisten = await listen<ActorSurfaceAssetCatalog>(
       "yuukei-assets-changed",
+      (event) => {
+        callback(event.payload);
+      }
+    );
+    return unlisten;
+  },
+  onStageState: async (callback) => {
+    const unlisten = await listen<DesktopStageState>(
+      "yuukei-stage-state",
       (event) => {
         callback(event.payload);
       }

@@ -4,7 +4,6 @@ import {
   actorIdFromLocation,
   actorSurfaceAssetsForActor,
   applyCommandHint,
-  bubbleActorEntriesForActor,
   expressionPresetFor,
   normalizeMotionId
 } from "./ActorApp";
@@ -191,24 +190,6 @@ describe("ActorApp renderer helpers", () => {
     expect(next?.actors.yuukei?.bubble).toBe("今ここで話します");
     expect(next?.actors.yuukei?.speaking).toBe(true);
     expect(next?.actors.another?.bubble).toBeUndefined();
-  });
-
-  it("exposes only the targeted actor bubble for an actor window", () => {
-    const next = applyCommandHint(
-      snapshotFixture(),
-      commandFixture("dialogue.say", {
-        targetActorId: "yuukei",
-        payload: { text: "このwindowだけです" }
-      })
-    );
-
-    const yuukeiEntries = bubbleActorEntriesForActor(next, "yuukei");
-    const anotherEntries = bubbleActorEntriesForActor(next, "another");
-
-    expect(yuukeiEntries).toHaveLength(1);
-    expect(yuukeiEntries[0]?.[0]).toBe("yuukei");
-    expect(yuukeiEntries[0]?.[1].bubble).toBe("このwindowだけです");
-    expect(anotherEntries).toEqual([]);
   });
 
   it("uses payload speakerId for dialogue.say when target actorId is missing", () => {

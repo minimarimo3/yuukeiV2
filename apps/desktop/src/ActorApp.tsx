@@ -13,12 +13,13 @@ import {
   type VRMAnimation
 } from "@pixiv/three-vrm-animation";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
-import type { ActorSnapshot, ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
+import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
   type AvatarGesturePokeInput,
   type ActorSurfaceAsset,
   type ActorSurfaceRendererAsset,
+  type StageAnchor,
   type YuukeiClient
 } from "./yuukeiClient";
 import {
@@ -29,8 +30,6 @@ import {
   type HitZoneCandidate,
   type ResolvedActorHitZone
 } from "./actorHitZones";
-import { ActorBubbleLayer } from "./ActorBubbleLayer";
-import type { ActorBubbleAnchor } from "./actorBubbleLayout";
 
 type ActorAppProps = {
   actorId?: string | null;
@@ -52,7 +51,7 @@ type LoadedActor = {
 type VrmStageProps = {
   assets: ActorSurfaceAsset[];
   snapshot: ResidentSnapshot | null;
-  onBubbleAnchorsChange(anchors: Record<string, ActorBubbleAnchor>): void;
+  onStageAnchorReport(actorId: string, anchor: StageAnchor): Promise<void>;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
 };
@@ -65,9 +64,6 @@ export function ActorApp({
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
   const [status, setStatus] = useState<string | null>(null);
-  const [bubbleAnchors, setBubbleAnchors] = useState<
-    Record<string, ActorBubbleAnchor>
-  >({});
 
   useEffect(() => {
     let disposed = false;
@@ -114,10 +110,6 @@ export function ActorApp({
     () => actorSurfaceAssetsForActor(assets, activeActorId),
     [assets, activeActorId]
   );
-  const bubbleActors = useMemo(
-    () => bubbleActorEntriesForActor(snapshot, activeActorId),
-    [snapshot, activeActorId]
-  );
   const visibleStatus = status ?? (activeActorId ? null : "actorId is missing");
   const setClickThrough = useCallback(
     (passthrough: boolean) => client.setActorWindowClickThrough(passthrough),
@@ -129,11 +121,11 @@ export function ActorApp({
     },
     [client]
   );
-  const updateBubbleAnchors = useCallback(
-    (anchors: Record<string, ActorBubbleAnchor>) => {
-      setBubbleAnchors(anchors);
+  const reportStageAnchor = useCallback(
+    async (reportedActorId: string, anchor: StageAnchor) => {
+      await client.reportActorStageAnchor(reportedActorId, anchor);
     },
-    []
+    [client]
   );
 
   return (
@@ -141,11 +133,10 @@ export function ActorApp({
       <VrmStage
         assets={actorAssets}
         snapshot={snapshot}
-        onBubbleAnchorsChange={updateBubbleAnchors}
+        onStageAnchorReport={reportStageAnchor}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
       />
-      <ActorBubbleLayer actors={bubbleActors} anchors={bubbleAnchors} />
       {visibleStatus ? (
         <p className="actor-status" data-actor-solid="true" role="alert">
           {visibleStatus}
@@ -158,7 +149,7 @@ export function ActorApp({
 function VrmStage({
   assets,
   snapshot,
-  onBubbleAnchorsChange,
+  onStageAnchorReport,
   onHitTestChange,
   onAvatarGesturePoke
 }: VrmStageProps) {
@@ -212,7 +203,6 @@ function VrmStage({
     const loadedActors = new Map<string, LoadedActor>();
     const clock = new THREE.Clock();
     const semanticRaycaster = new THREE.Raycaster();
-    onBubbleAnchorsChange({});
 
     function resize() {
       const width = Math.max(checkedStageElement.clientWidth, 1);
@@ -272,12 +262,12 @@ function VrmStage({
         loaded.mixer.update(delta);
         loaded.vrm.update(delta);
       }
-      publishBubbleAnchors();
+      publishStageAnchors();
       renderer.render(scene, camera);
       animationFrame = window.requestAnimationFrame(animate);
     }
 
-    function publishBubbleAnchors() {
+    function publishStageAnchors() {
       const anchors = projectActorMouthAnchors(
         renderer.domElement,
         camera,
@@ -286,7 +276,11 @@ function VrmStage({
       const signature = anchorSignature(anchors);
       if (signature === lastAnchorSignature) return;
       lastAnchorSignature = signature;
-      onBubbleAnchorsChange(anchors);
+      for (const [reportedActorId, anchor] of Object.entries(anchors)) {
+        void onStageAnchorReport(reportedActorId, anchor).catch((error) => {
+          console.warn("Failed to report actor stage anchor", error);
+        });
+      }
     }
 
     async function updateClickThrough() {
@@ -341,7 +335,7 @@ function VrmStage({
       }
       renderer.dispose();
     };
-  }, [assets, onAvatarGesturePoke, onBubbleAnchorsChange, onHitTestChange]);
+  }, [assets, onAvatarGesturePoke, onHitTestChange, onStageAnchorReport]);
 
   return (
     <div className="actor-stage" ref={containerRef}>
@@ -651,9 +645,9 @@ function projectActorMouthAnchors(
   canvas: HTMLCanvasElement,
   camera: THREE.PerspectiveCamera,
   loadedActors: Map<string, LoadedActor>
-): Record<string, ActorBubbleAnchor> {
+): Record<string, StageAnchor> {
   const rect = canvas.getBoundingClientRect();
-  const anchors: Record<string, ActorBubbleAnchor> = {};
+  const anchors: Record<string, StageAnchor> = {};
   camera.updateMatrixWorld();
 
   for (const loaded of loadedActors.values()) {
@@ -685,7 +679,7 @@ function projectWorldPosition(
   worldPosition: THREE.Vector3,
   camera: THREE.PerspectiveCamera,
   rect: DOMRect
-): ActorBubbleAnchor {
+): StageAnchor {
   if (rect.width <= 0 || rect.height <= 0) {
     return { x: 0, y: 0, visible: false };
   }
@@ -712,7 +706,7 @@ function projectWorldPosition(
   return { x, y, visible };
 }
 
-function anchorSignature(anchors: Record<string, ActorBubbleAnchor>): string {
+function anchorSignature(anchors: Record<string, StageAnchor>): string {
   return Object.entries(anchors)
     .map(([actorId, anchor]) => {
       return `${actorId}:${Math.round(anchor.x)}:${Math.round(anchor.y)}:${
@@ -748,15 +742,6 @@ export function actorSurfaceAssetsForActor(
 ): ActorSurfaceAsset[] {
   if (!actorId) return [];
   return assets.filter((asset) => asset.actorId === actorId && hasVrmRenderer(asset));
-}
-
-export function bubbleActorEntriesForActor(
-  snapshot: ResidentSnapshot | null,
-  actorId: string | null
-): Array<[string, ActorSnapshot]> {
-  if (!snapshot || !actorId) return [];
-  const actor = snapshot.actors[actorId];
-  return actor?.bubble ? [[actorId, actor]] : [];
 }
 
 export function normalizeMotionId(motion: string | undefined): string | null {

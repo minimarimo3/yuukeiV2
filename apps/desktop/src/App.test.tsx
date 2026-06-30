@@ -125,6 +125,14 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       actors: []
     })),
     setActorWindowClickThrough: vi.fn(async () => undefined),
+    setStageOverlayClickThrough: vi.fn(async () => undefined),
+    getDesktopStageState: vi.fn(async () => ({
+      monitors: [],
+      actors: [],
+      bubbles: []
+    })),
+    reportActorStageAnchor: vi.fn(async () => undefined),
+    dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
     sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
     sendAvatarGesturePoke: vi.fn(async () => [command("つつかれました", "cmd_4")]),
@@ -142,6 +150,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
+    onStageState: vi.fn(async () => () => undefined),
     ...overrides
   };
 }

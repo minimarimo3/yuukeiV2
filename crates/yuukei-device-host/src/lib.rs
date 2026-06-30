@@ -1003,6 +1003,11 @@ pub fn tauri_surface_session(device_id: &str) -> SurfaceSession {
             "avatar.expression".to_string(),
             "avatar.motion".to_string(),
             "avatar.gesture.poke".to_string(),
+            "actor.place".to_string(),
+            "screen.effect.start".to_string(),
+            "screen.effect.stop".to_string(),
+            "screen.dialogBurst.start".to_string(),
+            "screen.dialogBurst.clear".to_string(),
         ],
         presentation: SurfacePresentation {
             renderer: Some(SurfaceRenderer::Vrm),

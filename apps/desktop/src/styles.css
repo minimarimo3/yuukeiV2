@@ -41,7 +41,18 @@ body[data-surface="actor"] {
   background: transparent;
 }
 
+body[data-surface="stage-overlay"] {
+  overflow: hidden;
+  min-width: 1px;
+  min-height: 1px;
+  background: transparent;
+}
+
 body[data-surface="actor"] #root {
+  background: transparent;
+}
+
+body[data-surface="stage-overlay"] #root {
   background: transparent;
 }
 
@@ -147,6 +158,71 @@ input {
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
   border-left: 13px solid rgba(255, 255, 255, 0.96);
+}
+
+.stage-overlay-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.stage-overlay-layer {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+}
+
+.stage-bubble {
+  pointer-events: auto;
+  outline: none;
+}
+
+.stage-bubble:focus-visible {
+  border-color: rgba(37, 99, 235, 0.55);
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.16),
+    0 10px 24px rgba(16, 24, 40, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.stage-bubble--above .actor-bubble-tail,
+.stage-bubble--below .actor-bubble-tail {
+  left: 50%;
+  top: auto;
+  transform: translateX(-50%);
+}
+
+.stage-bubble--above .actor-bubble-tail {
+  bottom: -15px;
+  border-top: 16px solid rgba(23, 32, 51, 0.34);
+  border-right: 10px solid transparent;
+  border-left: 10px solid transparent;
+}
+
+.stage-bubble--above .actor-bubble-tail::after {
+  top: -17px;
+  left: 50%;
+  border-top: 13px solid rgba(255, 255, 255, 0.96);
+  border-right: 8px solid transparent;
+  border-left: 8px solid transparent;
+  transform: translateX(-50%);
+}
+
+.stage-bubble--below .actor-bubble-tail {
+  top: -15px;
+  border-right: 10px solid transparent;
+  border-bottom: 16px solid rgba(23, 32, 51, 0.34);
+  border-left: 10px solid transparent;
+}
+
+.stage-bubble--below .actor-bubble-tail::after {
+  top: 4px;
+  left: 50%;
+  border-right: 8px solid transparent;
+  border-bottom: 13px solid rgba(255, 255, 255, 0.96);
+  border-left: 8px solid transparent;
+  transform: translateX(-50%);
 }
 
 .actor-status {
