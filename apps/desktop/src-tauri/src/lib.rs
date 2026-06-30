@@ -267,28 +267,18 @@ pub fn run() {
             let asset_index = build_pack_asset_index(&runtime)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let asset_catalog = desktop_actor_surface_assets(&runtime);
-            tauri::async_runtime::block_on(async {
-                runtime
-                    .attach_surface(tauri_surface_session(runtime.device_id()))
-                    .await
-                    .map_err(to_message)?;
-                runtime.emit_app_startup().await.map_err(to_message)?;
-                Ok::<(), String>(())
-            })
-            .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             configure_app_menu(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let command_forwarder = spawn_command_forwarder(runtime.home(), app.handle().clone());
-            let presence_loop = runtime.spawn_presence_loop();
             let power_observer = PowerObserver::new(runtime.clone());
             app.manage(AppState {
                 env,
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 command_forwarder: Mutex::new(Some(command_forwarder)),
-                presence_loop: Mutex::new(Some(presence_loop)),
+                presence_loop: Mutex::new(None),
                 power_observer: Mutex::new(Some(power_observer)),
             });
             sync_actor_windows(app.handle(), &asset_catalog)
