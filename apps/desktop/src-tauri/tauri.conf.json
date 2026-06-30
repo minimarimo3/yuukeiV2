@@ -13,18 +13,6 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "actor",
-        "title": "Yuukei",
-        "width": 760,
-        "height": 620,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "shadow": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true
-      },
-      {
         "label": "settings",
         "title": "Yuukei Settings",
         "width": 760,

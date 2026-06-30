@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
-import { applyCommandHint, expressionPresetFor, normalizeMotionId } from "./ActorApp";
+import {
+  actorIdFromLocation,
+  actorSurfaceAssetsForActor,
+  applyCommandHint,
+  bubbleActorEntriesForActor,
+  expressionPresetFor,
+  normalizeMotionId
+} from "./ActorApp";
 import {
   autoHitZoneDefinitions,
   buildAvatarGesturePokePayload,
@@ -12,6 +19,7 @@ import {
   chooseBubbleSide,
   computeBubblePlacement
 } from "./actorBubbleLayout";
+import type { ActorSurfaceAsset } from "./yuukeiClient";
 
 describe("ActorApp renderer helpers", () => {
   it("normalizes authored motion aliases to renderer motion ids", () => {
@@ -25,6 +33,27 @@ describe("ActorApp renderer helpers", () => {
     expect(expressionPresetFor("笑顔")).toBe("happy");
     expect(expressionPresetFor("angry")).toBe("angry");
     expect(expressionPresetFor("neutral")).toBeNull();
+  });
+
+  it("reads the actorId query parameter as the actor window contract", () => {
+    expect(actorIdFromLocation("?actorId=yuukei")).toBe("yuukei");
+    expect(actorIdFromLocation("?actorId=actor%2Fwith%2Fslash")).toBe(
+      "actor/with/slash"
+    );
+    expect(actorIdFromLocation("?view=settings")).toBeNull();
+  });
+
+  it("selects only the requested renderable actor asset", () => {
+    const selected = actorSurfaceAssetsForActor(
+      [
+        actorAsset("yuukei", true),
+        actorAsset("headless", false),
+        actorAsset("another", true)
+      ],
+      "another"
+    );
+
+    expect(selected.map((asset) => asset.actorId)).toEqual(["another"]);
   });
 
   it("builds baseline humanoid hit zones from available VRM bones", () => {
@@ -164,6 +193,24 @@ describe("ActorApp renderer helpers", () => {
     expect(next?.actors.another?.bubble).toBeUndefined();
   });
 
+  it("exposes only the targeted actor bubble for an actor window", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("dialogue.say", {
+        targetActorId: "yuukei",
+        payload: { text: "このwindowだけです" }
+      })
+    );
+
+    const yuukeiEntries = bubbleActorEntriesForActor(next, "yuukei");
+    const anotherEntries = bubbleActorEntriesForActor(next, "another");
+
+    expect(yuukeiEntries).toHaveLength(1);
+    expect(yuukeiEntries[0]?.[0]).toBe("yuukei");
+    expect(yuukeiEntries[0]?.[1].bubble).toBe("このwindowだけです");
+    expect(anotherEntries).toEqual([]);
+  });
+
   it("uses payload speakerId for dialogue.say when target actorId is missing", () => {
     const next = applyCommandHint(
       snapshotFixture(),
@@ -192,6 +239,21 @@ function hitZone(
     shape: "auto",
     events,
     priority
+  };
+}
+
+function actorAsset(actorId: string, renderable: boolean): ActorSurfaceAsset {
+  return {
+    actorId,
+    displayName: actorId,
+    renderer: renderable
+      ? {
+          kind: "vrm",
+          modelUrl: `yuukei-pack://localhost/actors/${actorId}/model`,
+          motions: {},
+          hitZones: []
+        }
+      : undefined
   };
 }
 

@@ -33,6 +33,7 @@ import { ActorBubbleLayer } from "./ActorBubbleLayer";
 import type { ActorBubbleAnchor } from "./actorBubbleLayout";
 
 type ActorAppProps = {
+  actorId?: string | null;
   client?: YuukeiClient;
 };
 
@@ -56,7 +57,11 @@ type VrmStageProps = {
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
 };
 
-export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
+export function ActorApp({
+  actorId,
+  client = tauriYuukeiClient
+}: ActorAppProps) {
+  const activeActorId = useMemo(() => actorId ?? actorIdFromLocation(), [actorId]);
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -79,12 +84,12 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
         unlisteners.push(await client.onAssetsChanged((catalog) => {
           setAssets(catalog.actors);
         }));
-        const [attached, catalog] = await Promise.all([
-          client.attachSurface(),
+        const [initialSnapshot, catalog] = await Promise.all([
+          client.getSnapshot(),
           client.getActorSurfaceAssets()
         ]);
         if (!disposed) {
-          setSnapshot(attached);
+          setSnapshot(initialSnapshot);
           setAssets(catalog.actors);
           setStatus(null);
         }
@@ -105,11 +110,15 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
     };
   }, [client]);
 
-  const bubbleActors = useMemo(() => {
-    return Object.entries(snapshot?.actors ?? {}).filter((entry): entry is [string, ActorSnapshot] => {
-      return Boolean(entry[1]?.bubble);
-    });
-  }, [snapshot]);
+  const actorAssets = useMemo(
+    () => actorSurfaceAssetsForActor(assets, activeActorId),
+    [assets, activeActorId]
+  );
+  const bubbleActors = useMemo(
+    () => bubbleActorEntriesForActor(snapshot, activeActorId),
+    [snapshot, activeActorId]
+  );
+  const visibleStatus = status ?? (activeActorId ? null : "actorId is missing");
   const setClickThrough = useCallback(
     (passthrough: boolean) => client.setActorWindowClickThrough(passthrough),
     [client]
@@ -130,16 +139,16 @@ export function ActorApp({ client = tauriYuukeiClient }: ActorAppProps) {
   return (
     <main className="actor-shell" aria-label="Yuukei actor surface">
       <VrmStage
-        assets={assets}
+        assets={actorAssets}
         snapshot={snapshot}
         onBubbleAnchorsChange={updateBubbleAnchors}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
       />
       <ActorBubbleLayer actors={bubbleActors} anchors={bubbleAnchors} />
-      {status ? (
+      {visibleStatus ? (
         <p className="actor-status" data-actor-solid="true" role="alert">
-          {status}
+          {visibleStatus}
         </p>
       ) : null}
     </main>
@@ -219,7 +228,7 @@ function VrmStage({
       const modelLoader = new GLTFLoader();
       modelLoader.register((parser) => new VRMLoaderPlugin(parser));
 
-      for (const [index, asset] of vrmAssets.entries()) {
+      for (const asset of vrmAssets) {
         if (disposed) return;
         const gltf = await modelLoader.loadAsync(asset.renderer.modelUrl);
         const vrm = gltf.userData.vrm as VRM | undefined;
@@ -227,7 +236,7 @@ function VrmStage({
 
         VRMUtils.rotateVRM0(vrm);
         vrm.scene.name = `actor-${asset.actorId}`;
-        vrm.scene.position.x = (index - (vrmAssets.length - 1) / 2) * 1.05;
+        vrm.scene.position.set(0, 0, 0);
         actorRoot.add(vrm.scene);
         const boneNodes = humanoidBoneNodes(vrm);
         const hitZones = mergeHitZoneDefinitions(
@@ -726,6 +735,28 @@ function hasVrmRenderer(
   asset: ActorSurfaceAsset
 ): asset is ActorSurfaceAsset & { renderer: ActorSurfaceRendererAsset } {
   return asset.renderer?.kind === "vrm";
+}
+
+export function actorIdFromLocation(search = window.location.search): string | null {
+  const actorId = new URLSearchParams(search).get("actorId");
+  return actorId && actorId.length > 0 ? actorId : null;
+}
+
+export function actorSurfaceAssetsForActor(
+  assets: ActorSurfaceAsset[],
+  actorId: string | null
+): ActorSurfaceAsset[] {
+  if (!actorId) return [];
+  return assets.filter((asset) => asset.actorId === actorId && hasVrmRenderer(asset));
+}
+
+export function bubbleActorEntriesForActor(
+  snapshot: ResidentSnapshot | null,
+  actorId: string | null
+): Array<[string, ActorSnapshot]> {
+  if (!snapshot || !actorId) return [];
+  const actor = snapshot.actors[actorId];
+  return actor?.bubble ? [[actorId, actor]] : [];
 }
 
 export function normalizeMotionId(motion: string | undefined): string | null {

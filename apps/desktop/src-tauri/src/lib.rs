@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -10,7 +10,8 @@ use tauri::{
     http::{Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, UriSchemeContext, WindowEvent,
+    AppHandle, Emitter, Manager, State, UriSchemeContext, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tokio::sync::Mutex;
 use yuukei_device_host::{
@@ -88,6 +89,9 @@ impl From<DesktopAvatarGesturePoke> for AvatarGesturePoke {
 }
 
 const PACK_ASSET_SCHEME: &str = "yuukei-pack";
+const ACTOR_WINDOW_LABEL_PREFIX: &str = "actor-";
+const ACTOR_WINDOW_WIDTH: f64 = 420.0;
+const ACTOR_WINDOW_HEIGHT: f64 = 560.0;
 const MENU_SETTINGS_ID: &str = "settings";
 const MENU_TOGGLE_CHARACTER_ID: &str = "toggle-character";
 const MENU_QUIT_ID: &str = "quit";
@@ -137,10 +141,7 @@ async fn get_actor_surface_assets(
 }
 
 #[tauri::command]
-fn set_actor_window_click_through(app: AppHandle, passthrough: bool) -> Result<(), String> {
-    let window = app
-        .get_webview_window("actor")
-        .ok_or_else(|| "actor window is not available".to_string())?;
+fn set_actor_window_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
     window
         .set_ignore_cursor_events(passthrough)
         .map_err(to_message)
@@ -265,20 +266,33 @@ pub fn run() {
             println!("Yuukei app log: {}", runtime.paths().app_log_path.display());
             let asset_index = build_pack_asset_index(&runtime)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            let asset_catalog = desktop_actor_surface_assets(&runtime);
+            tauri::async_runtime::block_on(async {
+                runtime
+                    .attach_surface(tauri_surface_session(runtime.device_id()))
+                    .await
+                    .map_err(to_message)?;
+                runtime.emit_app_startup().await.map_err(to_message)?;
+                Ok::<(), String>(())
+            })
+            .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             configure_app_menu(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let command_forwarder = spawn_command_forwarder(runtime.home(), app.handle().clone());
+            let presence_loop = runtime.spawn_presence_loop();
             let power_observer = PowerObserver::new(runtime.clone());
             app.manage(AppState {
                 env,
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 command_forwarder: Mutex::new(Some(command_forwarder)),
-                presence_loop: Mutex::new(None),
+                presence_loop: Mutex::new(Some(presence_loop)),
                 power_observer: Mutex::new(Some(power_observer)),
             });
+            sync_actor_windows(app.handle(), &asset_catalog)
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -412,14 +426,23 @@ fn show_settings_window(app: &AppHandle) -> Result<(), String> {
 }
 
 fn toggle_actor_window(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("actor")
-        .ok_or_else(|| "actor window is not available".to_string())?;
-    if window.is_visible().map_err(to_message)? {
-        window.hide().map_err(to_message)
-    } else {
-        window.show().map_err(to_message)
+    let windows = actor_webview_windows(app);
+    if windows.is_empty() {
+        return Ok(());
     }
+    let any_visible = windows
+        .iter()
+        .any(|window| window.is_visible().unwrap_or(false));
+    if any_visible {
+        for window in windows {
+            window.hide().map_err(to_message)?;
+        }
+    } else {
+        for window in windows {
+            window.show().map_err(to_message)?;
+        }
+    }
+    Ok(())
 }
 
 fn pack_asset_protocol_response<R: tauri::Runtime>(
@@ -528,6 +551,132 @@ fn desktop_actor_surface_assets(runtime: &LocalYuukeiRuntime) -> DesktopActorSur
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActorWindowSpec {
+    actor_id: String,
+    display_name: String,
+    label: String,
+    index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActorWindowReconcile {
+    close_labels: Vec<String>,
+    create_specs: Vec<ActorWindowSpec>,
+}
+
+fn sync_actor_windows(
+    app: &AppHandle,
+    catalog: &DesktopActorSurfaceAssetCatalog,
+) -> Result<(), String> {
+    let existing_labels = app.webview_windows().into_keys().collect::<Vec<_>>();
+    let reconcile = reconcile_actor_windows(existing_labels, catalog);
+
+    for label in reconcile.close_labels {
+        if let Some(window) = app.get_webview_window(&label) {
+            window.close().map_err(to_message)?;
+        }
+    }
+
+    for spec in reconcile.create_specs {
+        create_actor_window(app, &spec)?;
+    }
+
+    Ok(())
+}
+
+fn create_actor_window(app: &AppHandle, spec: &ActorWindowSpec) -> Result<(), String> {
+    let (x, y) = actor_window_position(spec.index);
+    WebviewWindowBuilder::new(app, &spec.label, actor_window_url(&spec.actor_id))
+        .title(format!("Yuukei - {}", spec.display_name))
+        .inner_size(ACTOR_WINDOW_WIDTH, ACTOR_WINDOW_HEIGHT)
+        .position(x, y)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .build()
+        .map_err(to_message)?;
+    Ok(())
+}
+
+fn reconcile_actor_windows(
+    existing_labels: impl IntoIterator<Item = String>,
+    catalog: &DesktopActorSurfaceAssetCatalog,
+) -> ActorWindowReconcile {
+    let specs = actor_window_specs(catalog);
+    let desired_labels = specs
+        .iter()
+        .map(|spec| spec.label.clone())
+        .collect::<BTreeSet<_>>();
+    let existing_labels = existing_labels.into_iter().collect::<BTreeSet<_>>();
+    let close_labels = existing_labels
+        .iter()
+        .filter(|label| is_actor_window_label(label) && !desired_labels.contains(*label))
+        .cloned()
+        .collect();
+    let create_specs = specs
+        .into_iter()
+        .filter(|spec| !existing_labels.contains(&spec.label))
+        .collect();
+
+    ActorWindowReconcile {
+        close_labels,
+        create_specs,
+    }
+}
+
+fn actor_window_specs(catalog: &DesktopActorSurfaceAssetCatalog) -> Vec<ActorWindowSpec> {
+    catalog
+        .actors
+        .iter()
+        .filter(|actor| actor.renderer.is_some())
+        .enumerate()
+        .map(|(index, actor)| ActorWindowSpec {
+            actor_id: actor.actor_id.clone(),
+            display_name: actor.display_name.clone(),
+            label: actor_window_label(&actor.actor_id),
+            index,
+        })
+        .collect()
+}
+
+fn actor_webview_windows(app: &AppHandle) -> Vec<WebviewWindow> {
+    app.webview_windows()
+        .into_iter()
+        .filter_map(|(label, window)| {
+            if is_actor_window_label(&label) {
+                Some(window)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn actor_window_url(actor_id: &str) -> WebviewUrl {
+    WebviewUrl::App(format!("index.html?actorId={}", encode_path_segment(actor_id)).into())
+}
+
+fn actor_window_label(actor_id: &str) -> String {
+    let mut label = String::from(ACTOR_WINDOW_LABEL_PREFIX);
+    for byte in actor_id.as_bytes() {
+        label.push_str(&format!("{byte:02x}"));
+    }
+    label
+}
+
+fn is_actor_window_label(label: &str) -> bool {
+    label.starts_with(ACTOR_WINDOW_LABEL_PREFIX)
+}
+
+fn actor_window_position(index: usize) -> (f64, f64) {
+    (48.0 + index as f64 * 54.0, 96.0 + index as f64 * 36.0)
+}
+
 fn pack_asset_url(route: &str) -> String {
     format!("{PACK_ASSET_SCHEME}://localhost/{route}")
 }
@@ -605,6 +754,7 @@ async fn replace_runtime(
     }
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    sync_actor_windows(&app, &asset_catalog)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
 
@@ -672,6 +822,7 @@ async fn replace_runtime_snapshot(
     }
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    sync_actor_windows(&app, &asset_catalog)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
 
@@ -746,6 +897,68 @@ mod tests {
     }
 
     #[test]
+    fn actor_window_labels_hex_encode_actor_ids() {
+        assert_eq!(actor_window_label("yuukei"), "actor-7975756b6569");
+        assert_eq!(actor_window_label("partner"), "actor-706172746e6572");
+        assert_eq!(
+            actor_window_label("actor/with/slash"),
+            "actor-6163746f722f776974682f736c617368"
+        );
+    }
+
+    #[test]
+    fn actor_window_specs_include_only_renderable_actors() {
+        let catalog = DesktopActorSurfaceAssetCatalog {
+            world_pack_id: "world-test".to_string(),
+            actors: vec![
+                desktop_actor_asset("yuukei", true),
+                desktop_actor_asset("headless", false),
+                desktop_actor_asset("partner", true),
+            ],
+        };
+
+        let specs = actor_window_specs(&catalog);
+
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (&spec.actor_id, spec.index))
+                .collect::<Vec<_>>(),
+            vec![(&"yuukei".to_string(), 0), (&"partner".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn actor_window_reconcile_closes_stale_and_creates_missing_windows() {
+        let catalog = DesktopActorSurfaceAssetCatalog {
+            world_pack_id: "world-test".to_string(),
+            actors: vec![
+                desktop_actor_asset("yuukei", true),
+                desktop_actor_asset("partner", true),
+            ],
+        };
+
+        let reconcile = reconcile_actor_windows(
+            vec![
+                "settings".to_string(),
+                actor_window_label("yuukei"),
+                actor_window_label("old"),
+            ],
+            &catalog,
+        );
+
+        assert_eq!(reconcile.close_labels, vec![actor_window_label("old")]);
+        assert_eq!(
+            reconcile
+                .create_specs
+                .iter()
+                .map(|spec| spec.actor_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["partner"]
+        );
+    }
+
+    #[test]
     fn user_input_is_sent_as_conversation_text_event() {
         let event = build_conversation_text_event(
             DEFAULT_RESIDENT_ID,
@@ -786,5 +999,18 @@ mod tests {
         assert_eq!(event.actor_id.as_deref(), Some("yuukei"));
         assert_eq!(event.payload["hitZoneId"], json!("head"));
         assert_eq!(event.payload["hitZoneLabel"], json!("頭"));
+    }
+
+    fn desktop_actor_asset(actor_id: &str, renderable: bool) -> DesktopActorSurfaceAsset {
+        DesktopActorSurfaceAsset {
+            actor_id: actor_id.to_string(),
+            display_name: actor_id.to_string(),
+            renderer: renderable.then_some(DesktopActorSurfaceRendererAsset {
+                kind: "vrm",
+                model_url: format!("yuukei-pack://localhost/actors/{actor_id}/model"),
+                motions: HashMap::new(),
+                hit_zones: Vec::new(),
+            }),
+        }
     }
 }
