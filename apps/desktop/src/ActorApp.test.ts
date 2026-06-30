@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   actorIdFromLocation,
   actorSurfaceAssetsForActor,
   applyCommandHint,
   expressionPresetFor,
+  loadInitialActorSurfaceState,
   normalizeMotionId
 } from "./ActorApp";
 import {
@@ -18,7 +19,7 @@ import {
   chooseBubbleSide,
   computeBubblePlacement
 } from "./actorBubbleLayout";
-import type { ActorSurfaceAsset } from "./yuukeiClient";
+import type { ActorSurfaceAsset, YuukeiClient } from "./yuukeiClient";
 
 describe("ActorApp renderer helpers", () => {
   it("normalizes authored motion aliases to renderer motion ids", () => {
@@ -53,6 +54,48 @@ describe("ActorApp renderer helpers", () => {
     );
 
     expect(selected.map((asset) => asset.actorId)).toEqual(["another"]);
+  });
+
+  it("loads the initial actor state by attaching the surface", async () => {
+    const initialSnapshot = snapshotFixture();
+    const client = {
+      attachSurface: vi.fn(async () => initialSnapshot),
+      getSnapshot: vi.fn(async () => {
+        throw new Error("getSnapshot should not be used for actor bootstrap");
+      }),
+      getActorSurfaceAssets: vi.fn(async () => ({
+        worldPackId: "default-yuukei",
+        actors: [actorAsset("yuukei", true), actorAsset("headless", false)]
+      }))
+    } as unknown as YuukeiClient;
+
+    const initial = await loadInitialActorSurfaceState(client);
+
+    expect(client.attachSurface).toHaveBeenCalledTimes(1);
+    expect(client.getSnapshot).not.toHaveBeenCalled();
+    expect(initial.snapshot).toBe(initialSnapshot);
+    expect(initial.assets.map((asset) => asset.actorId)).toEqual([
+      "yuukei",
+      "headless"
+    ]);
+  });
+
+  it("surfaces actor bootstrap attach failures to the caller", async () => {
+    const client = {
+      attachSurface: vi.fn(async () => {
+        throw new Error("attach failed");
+      }),
+      getSnapshot: vi.fn(),
+      getActorSurfaceAssets: vi.fn(async () => ({
+        worldPackId: "default-yuukei",
+        actors: []
+      }))
+    } as unknown as YuukeiClient;
+
+    await expect(loadInitialActorSurfaceState(client)).rejects.toThrow(
+      "attach failed"
+    );
+    expect(client.getSnapshot).not.toHaveBeenCalled();
   });
 
   it("builds baseline humanoid hit zones from available VRM bones", () => {

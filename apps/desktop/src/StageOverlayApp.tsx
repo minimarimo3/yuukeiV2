@@ -189,17 +189,30 @@ function StageBubbleView({
 }) {
   const { ref } = useMeasuredBubbleSize(item.bubble.bubbleId, onSizeChange);
   const sideClass =
-    item.placement.side === "left" ? "actor-bubble--left" : "actor-bubble--right";
+    item.placement.side === "left"
+      ? "actor-bubble--left"
+      : item.placement.side === "right"
+        ? "actor-bubble--right"
+        : "";
+  const className = [
+    "actor-bubble",
+    "stage-bubble",
+    `stage-bubble--${item.placement.side}`,
+    sideClass
+  ]
+    .filter(Boolean)
+    .join(" ");
   const style = {
     left: `${item.placement.left}px`,
     top: `${item.placement.top}px`,
     "--actor-bubble-max-width": `${item.placement.maxWidth}px`,
-    "--actor-bubble-tail-top": `${item.placement.tailTop}px`
+    "--actor-bubble-tail-top": `${item.placement.tailTop}px`,
+    "--actor-bubble-tail-left": `${item.placement.tailLeft}px`
   } as CSSProperties;
 
   return (
     <p
-      className={`actor-bubble stage-bubble stage-bubble--${item.placement.side} ${sideClass}`}
+      className={className}
       data-actor-id={item.actor.actorId}
       data-stage-solid="true"
       onBlur={onBlur}
@@ -358,7 +371,10 @@ function computeRenderItems(
   );
   const monitorBounds = toLayoutRect(monitor.bounds);
   const actorObstacles = stageState.actors
-    .filter((actor) => actor.visible && intersectsViewport(toLayoutRect(actor.bounds), monitorBounds))
+    .filter(
+      (actor) =>
+        actor.visible && intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)
+    )
     .map((actor) => localRect(toLayoutRect(actor.bounds), monitorBounds));
   const occupied: StageRect[] = [...actorObstacles];
   const items: StageBubbleRenderItem[] = [];
@@ -367,7 +383,11 @@ function computeRenderItems(
     (a, b) => a.createdAtMs - b.createdAtMs
   )) {
     const actor = actorsById.get(bubble.actorId);
-    if (!actor || !actor.visible || !intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)) {
+    if (
+      !actor ||
+      !actor.visible ||
+      !intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)
+    ) {
       continue;
     }
     const anchor = localAnchorForActor(actor, monitor.bounds);

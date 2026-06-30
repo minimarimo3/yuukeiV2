@@ -80,13 +80,11 @@ export function ActorApp({
         unlisteners.push(await client.onAssetsChanged((catalog) => {
           setAssets(catalog.actors);
         }));
-        const [initialSnapshot, catalog] = await Promise.all([
-          client.getSnapshot(),
-          client.getActorSurfaceAssets()
-        ]);
+        const { snapshot: initialSnapshot, assets: initialAssets } =
+          await loadInitialActorSurfaceState(client);
         if (!disposed) {
           setSnapshot(initialSnapshot);
-          setAssets(catalog.actors);
+          setAssets(initialAssets);
           setStatus(null);
         }
       } catch (error) {
@@ -144,6 +142,20 @@ export function ActorApp({
       ) : null}
     </main>
   );
+}
+
+export async function loadInitialActorSurfaceState(client: YuukeiClient): Promise<{
+  snapshot: ResidentSnapshot;
+  assets: ActorSurfaceAsset[];
+}> {
+  const [snapshot, catalog] = await Promise.all([
+    client.attachSurface(),
+    client.getActorSurfaceAssets()
+  ]);
+  return {
+    snapshot,
+    assets: catalog.actors
+  };
 }
 
 function VrmStage({

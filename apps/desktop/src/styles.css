@@ -188,7 +188,7 @@ input {
 
 .stage-bubble--above .actor-bubble-tail,
 .stage-bubble--below .actor-bubble-tail {
-  left: 50%;
+  left: var(--actor-bubble-tail-left, 50%);
   top: auto;
   transform: translateX(-50%);
 }

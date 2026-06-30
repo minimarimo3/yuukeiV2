@@ -33,6 +33,7 @@ pub struct AppState {
     asset_index: RwLock<PackAssetIndex>,
     stage: Arc<DesktopStageManager>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    surface_attached: Mutex<bool>,
     presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
     power_observer: Mutex<Option<PowerObserver>>,
 }
@@ -101,8 +102,14 @@ async fn attach_surface(
     state: State<'_, AppState>,
 ) -> Result<ResidentSnapshot, String> {
     let runtime = state.runtime.lock().await.clone();
-    let session = tauri_surface_session(runtime.device_id());
-    runtime.attach_surface(session).await.map_err(to_message)?;
+    {
+        let mut surface_attached = state.surface_attached.lock().await;
+        if !*surface_attached {
+            let session = tauri_surface_session(runtime.device_id());
+            runtime.attach_surface(session).await.map_err(to_message)?;
+            *surface_attached = true;
+        }
+    }
     ensure_presence_loop(&state, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
@@ -317,6 +324,7 @@ pub fn run() {
                 asset_index: RwLock::new(asset_index),
                 stage: stage.clone(),
                 command_forwarder: Mutex::new(Some(command_forwarder)),
+                surface_attached: Mutex::new(false),
                 presence_loop: Mutex::new(None),
                 power_observer: Mutex::new(Some(power_observer)),
             });
@@ -481,11 +489,15 @@ fn toggle_actor_window(app: &AppHandle) -> Result<(), String> {
         .any(|window| window.is_visible().unwrap_or(false));
     if any_visible {
         for window in windows {
+            let label = window.label().to_string();
             window.hide().map_err(to_message)?;
+            state.stage.set_actor_window_visible(app, &label, false)?;
         }
     } else {
         for window in windows {
+            let label = window.label().to_string();
             window.show().map_err(to_message)?;
+            state.stage.set_actor_window_visible(app, &label, true)?;
         }
     }
     Ok(())
@@ -663,6 +675,10 @@ async fn replace_runtime(
         }
     }
     {
+        let mut surface_attached = state.surface_attached.lock().await;
+        *surface_attached = true;
+    }
+    {
         let mut presence_loop = state.presence_loop.lock().await;
         if let Some(previous) = presence_loop.replace(next_presence_loop) {
             previous.abort();
@@ -729,6 +745,10 @@ async fn replace_runtime_snapshot(
         if let Some(previous) = forwarder.replace(next_forwarder) {
             previous.abort();
         }
+    }
+    {
+        let mut surface_attached = state.surface_attached.lock().await;
+        *surface_attached = true;
     }
     {
         let mut presence_loop = state.presence_loop.lock().await;

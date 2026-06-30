@@ -30,6 +30,7 @@ export type StageBubblePlacement = {
   width: number;
   maxWidth: number;
   tailTop: number;
+  tailLeft: number;
   rect: StageRect;
 };
 
@@ -104,7 +105,8 @@ export function computeStageBubblePlacement(
     ...selected,
     width,
     maxWidth: width,
-    tailTop: clamp(anchor.y - selected.top, 20, Math.max(height - 20, 20))
+    tailTop: clamp(anchor.y - selected.top, 20, Math.max(height - 20, 20)),
+    tailLeft: clamp(anchor.x - selected.left, 20, Math.max(width - 20, 20))
   };
 }
 
@@ -242,6 +244,7 @@ function buildPlacement(
     width: size.width,
     maxWidth: size.width,
     tailTop: clamp(anchor.y - top, 20, Math.max(size.height - 20, 20)),
+    tailLeft: clamp(anchor.x - left, 20, Math.max(size.width - 20, 20)),
     rect: {
       x: left,
       y: top,

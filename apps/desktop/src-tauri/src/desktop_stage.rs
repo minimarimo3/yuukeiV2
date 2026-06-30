@@ -129,6 +129,7 @@ impl DesktopStageManager {
 
     pub fn emit_state(&self, app: &AppHandle) -> Result<(), String> {
         let snapshot = self.snapshot()?;
+        self.raise_overlay_windows(app, &snapshot.monitors)?;
         app.emit(STAGE_STATE_EVENT, &snapshot).map_err(to_message)
     }
 
@@ -148,24 +149,34 @@ impl DesktopStageManager {
             }
         }
 
-        let mut occupied = Vec::new();
-        let mut next_actors = BTreeMap::new();
+        let mut current_bounds = BTreeMap::new();
         for spec in &reconcile.desired_specs {
             if let Some(window) = app.get_webview_window(&spec.label) {
-                let bounds = window_bounds(&window)
-                    .unwrap_or_else(|_| place_actor_window(spec.index, &monitors, &occupied));
-                occupied.push(bounds.clone());
+                if let Ok(bounds) = window_bounds(&window) {
+                    current_bounds.insert(spec.actor_id.clone(), bounds);
+                }
+            }
+        }
+        let resolved_bounds =
+            resolve_actor_window_layout(&reconcile.desired_specs, &current_bounds, &monitors);
+        let mut next_actors = BTreeMap::new();
+        for spec in &reconcile.desired_specs {
+            let bounds = resolved_bounds
+                .get(&spec.actor_id)
+                .cloned()
+                .unwrap_or_else(|| place_actor_window(spec.index, &monitors, &[]));
+            if let Some(window) = app.get_webview_window(&spec.label) {
+                apply_actor_window_bounds(&window, &bounds)?;
+                let visible = window.is_visible().unwrap_or(true);
+                next_actors.insert(
+                    spec.actor_id.clone(),
+                    actor_from_spec(spec, bounds, visible),
+                );
+            } else {
+                create_actor_window(app, spec, &bounds)?;
                 next_actors.insert(spec.actor_id.clone(), actor_from_spec(spec, bounds, true));
             }
         }
-
-        for spec in &reconcile.create_specs {
-            let bounds = place_actor_window(spec.index, &monitors, &occupied);
-            create_actor_window(app, spec, &bounds)?;
-            occupied.push(bounds.clone());
-            next_actors.insert(spec.actor_id.clone(), actor_from_spec(spec, bounds, true));
-        }
-        self.raise_overlay_windows(app, &monitors)?;
 
         {
             let mut state = self
@@ -180,6 +191,21 @@ impl DesktopStageManager {
                 .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
         }
         self.emit_state(app)
+    }
+
+    pub fn set_actor_window_visible(
+        &self,
+        app: &AppHandle,
+        window_label: &str,
+        visible: bool,
+    ) -> Result<(), String> {
+        if !is_actor_window_label(window_label) {
+            return Ok(());
+        }
+        if self.set_actor_visibility_for_window(window_label, visible)? {
+            self.emit_state(app)?;
+        }
+        Ok(())
     }
 
     pub fn refresh_actor_window(
@@ -302,6 +328,25 @@ impl DesktopStageManager {
             .values()
             .find(|actor| actor.window_label == label)
             .map(|actor| actor.actor_id.clone()))
+    }
+
+    fn set_actor_visibility_for_window(&self, label: &str, visible: bool) -> Result<bool, String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        let Some(actor) = state
+            .actors
+            .values_mut()
+            .find(|actor| actor.window_label == label)
+        else {
+            return Ok(false);
+        };
+        if actor.visible == visible {
+            return Ok(false);
+        }
+        actor.visible = visible;
+        Ok(true)
     }
 
     fn sync_overlay_windows(
@@ -545,6 +590,87 @@ fn window_bounds(window: &WebviewWindow) -> Result<StageRect, String> {
     })
 }
 
+fn apply_actor_window_bounds(window: &WebviewWindow, bounds: &StageRect) -> Result<(), String> {
+    let current = window_bounds(window).ok();
+    if current
+        .as_ref()
+        .map(|rect| !same_position(rect, bounds))
+        .unwrap_or(true)
+    {
+        window
+            .set_position(LogicalPosition::new(bounds.x, bounds.y))
+            .map_err(to_message)?;
+    }
+    if current
+        .as_ref()
+        .map(|rect| !same_size(rect, bounds))
+        .unwrap_or(true)
+    {
+        window
+            .set_size(LogicalSize::new(bounds.width, bounds.height))
+            .map_err(to_message)?;
+    }
+    Ok(())
+}
+
+fn resolve_actor_window_layout(
+    specs: &[ActorWindowSpec],
+    current_bounds: &BTreeMap<String, StageRect>,
+    monitors: &[StageMonitor],
+) -> BTreeMap<String, StageRect> {
+    let mut occupied = Vec::new();
+    let mut resolved = BTreeMap::new();
+    for spec in specs {
+        let preferred = current_bounds
+            .get(&spec.actor_id)
+            .cloned()
+            .map(|bounds| normalize_actor_window_bounds(bounds, monitors))
+            .unwrap_or_else(|| place_actor_window(spec.index, monitors, &occupied));
+        let bounds = if overlaps_any(&preferred, &occupied) {
+            place_actor_window(spec.index, monitors, &occupied)
+        } else {
+            preferred
+        };
+        let bounds = normalize_actor_window_bounds(bounds, monitors);
+        occupied.push(bounds.clone());
+        resolved.insert(spec.actor_id.clone(), bounds);
+    }
+    resolved
+}
+
+fn normalize_actor_window_bounds(bounds: StageRect, monitors: &[StageMonitor]) -> StageRect {
+    let bounds = StageRect {
+        width: ACTOR_WINDOW_WIDTH,
+        height: ACTOR_WINDOW_HEIGHT,
+        ..bounds
+    };
+    let monitor = best_monitor_bounds_for_rect(&bounds, monitors);
+    clamp_rect_to_bounds(bounds, &monitor, ACTOR_WINDOW_MARGIN)
+}
+
+fn best_monitor_bounds_for_rect(rect: &StageRect, monitors: &[StageMonitor]) -> StageRect {
+    monitors
+        .iter()
+        .max_by(|a, b| {
+            let overlap_order = rect_overlap_area(rect, &a.bounds)
+                .partial_cmp(&rect_overlap_area(rect, &b.bounds))
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if overlap_order != std::cmp::Ordering::Equal {
+                return overlap_order;
+            }
+            center_distance_squared(rect, &b.bounds)
+                .partial_cmp(&center_distance_squared(rect, &a.bounds))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|monitor| monitor.bounds.clone())
+        .unwrap_or(StageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1280.0,
+            height: 800.0,
+        })
+}
+
 fn place_actor_window(
     index: usize,
     monitors: &[StageMonitor],
@@ -579,7 +705,10 @@ fn place_actor_window(
         return initial;
     }
 
-    for candidate in actor_grid_candidates(&monitor, &size) {
+    let candidates = actor_collision_candidates(&monitor, &size, occupied)
+        .into_iter()
+        .chain(actor_grid_candidates(&monitor, &size));
+    for candidate in candidates {
         if !overlaps_any(&candidate, occupied) {
             return candidate;
         }
@@ -622,6 +751,46 @@ fn actor_grid_candidates(monitor: &StageRect, size: &StageRect) -> Vec<StageRect
     candidates
 }
 
+fn actor_collision_candidates(
+    monitor: &StageRect,
+    size: &StageRect,
+    occupied: &[StageRect],
+) -> Vec<StageRect> {
+    let mut candidates = Vec::new();
+    for other in occupied {
+        let right = StageRect {
+            x: other.x + other.width + ACTOR_COLLISION_PADDING,
+            y: other.y,
+            width: size.width,
+            height: size.height,
+        };
+        let left = StageRect {
+            x: other.x - size.width - ACTOR_COLLISION_PADDING,
+            y: other.y,
+            width: size.width,
+            height: size.height,
+        };
+        let below = StageRect {
+            x: other.x,
+            y: other.y + other.height + ACTOR_COLLISION_PADDING,
+            width: size.width,
+            height: size.height,
+        };
+        let above = StageRect {
+            x: other.x,
+            y: other.y - size.height - ACTOR_COLLISION_PADDING,
+            width: size.width,
+            height: size.height,
+        };
+        candidates.extend(
+            [right, left, below, above]
+                .into_iter()
+                .map(|candidate| clamp_rect_to_bounds(candidate, monitor, ACTOR_WINDOW_MARGIN)),
+        );
+    }
+    candidates
+}
+
 fn clamp_rect_to_bounds(rect: StageRect, bounds: &StageRect, margin: f64) -> StageRect {
     let max_x = (bounds.x + bounds.width - rect.width - margin).max(bounds.x + margin);
     let max_y = (bounds.y + bounds.height - rect.height - margin).max(bounds.y + margin);
@@ -639,11 +808,33 @@ fn overlaps_any(rect: &StageRect, others: &[StageRect]) -> bool {
         .any(|other| rects_overlap(rect, other, ACTOR_COLLISION_PADDING))
 }
 
+fn rect_overlap_area(a: &StageRect, b: &StageRect) -> f64 {
+    let width = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let height = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    width.max(0.0) * height.max(0.0)
+}
+
 fn rects_overlap(a: &StageRect, b: &StageRect, padding: f64) -> bool {
     a.x < b.x + b.width + padding
         && a.x + a.width + padding > b.x
         && a.y < b.y + b.height + padding
         && a.y + a.height + padding > b.y
+}
+
+fn center_distance_squared(a: &StageRect, b: &StageRect) -> f64 {
+    let ax = a.x + a.width * 0.5;
+    let ay = a.y + a.height * 0.5;
+    let bx = b.x + b.width * 0.5;
+    let by = b.y + b.height * 0.5;
+    (ax - bx).powi(2) + (ay - by).powi(2)
+}
+
+fn same_position(a: &StageRect, b: &StageRect) -> bool {
+    (a.x - b.x).abs() <= 0.5 && (a.y - b.y).abs() <= 0.5
+}
+
+fn same_size(a: &StageRect, b: &StageRect) -> bool {
+    (a.width - b.width).abs() <= 0.5 && (a.height - b.height).abs() <= 0.5
 }
 
 fn default_actor_anchor(bounds: &StageRect) -> StageAnchor {
@@ -790,6 +981,161 @@ mod tests {
     }
 
     #[test]
+    fn actor_layout_resolves_overlapping_current_bounds() {
+        let monitors = vec![test_monitor(1000.0, 700.0)];
+        let specs = test_specs(&["yuukei", "partner"]);
+        let mut current_bounds = BTreeMap::new();
+        current_bounds.insert(
+            "yuukei".to_string(),
+            StageRect {
+                x: 80.0,
+                y: 80.0,
+                width: ACTOR_WINDOW_WIDTH,
+                height: ACTOR_WINDOW_HEIGHT,
+            },
+        );
+        current_bounds.insert(
+            "partner".to_string(),
+            StageRect {
+                x: 90.0,
+                y: 90.0,
+                width: ACTOR_WINDOW_WIDTH,
+                height: ACTOR_WINDOW_HEIGHT,
+            },
+        );
+
+        let resolved = resolve_actor_window_layout(&specs, &current_bounds, &monitors);
+        let first = resolved.get("yuukei").expect("yuukei bounds");
+        let second = resolved.get("partner").expect("partner bounds");
+
+        assert!(!rects_overlap(first, second, ACTOR_COLLISION_PADDING));
+    }
+
+    #[test]
+    fn actor_layout_spreads_three_or_four_actors_when_space_allows() {
+        let monitors = vec![test_monitor(1900.0, 700.0)];
+        let specs = test_specs(&["yuukei", "partner", "third", "fourth"]);
+        let mut current_bounds = BTreeMap::new();
+        for spec in &specs {
+            current_bounds.insert(
+                spec.actor_id.clone(),
+                StageRect {
+                    x: 64.0,
+                    y: 64.0,
+                    width: ACTOR_WINDOW_WIDTH,
+                    height: ACTOR_WINDOW_HEIGHT,
+                },
+            );
+        }
+
+        let resolved = resolve_actor_window_layout(&specs, &current_bounds, &monitors);
+        let bounds = specs
+            .iter()
+            .map(|spec| resolved.get(&spec.actor_id).expect("actor bounds"))
+            .collect::<Vec<_>>();
+
+        for (index, first) in bounds.iter().enumerate() {
+            for second in bounds.iter().skip(index + 1) {
+                assert!(!rects_overlap(first, second, ACTOR_COLLISION_PADDING));
+            }
+        }
+    }
+
+    #[test]
+    fn actor_layout_clamps_current_bounds_inside_monitor() {
+        let monitor = test_monitor(1000.0, 700.0);
+        let specs = test_specs(&["yuukei"]);
+        let mut current_bounds = BTreeMap::new();
+        current_bounds.insert(
+            "yuukei".to_string(),
+            StageRect {
+                x: 920.0,
+                y: 620.0,
+                width: ACTOR_WINDOW_WIDTH,
+                height: ACTOR_WINDOW_HEIGHT,
+            },
+        );
+
+        let resolved =
+            resolve_actor_window_layout(&specs, &current_bounds, std::slice::from_ref(&monitor));
+        let bounds = resolved.get("yuukei").expect("yuukei bounds");
+
+        assert!(bounds.x >= monitor.bounds.x + ACTOR_WINDOW_MARGIN);
+        assert!(bounds.y >= monitor.bounds.y + ACTOR_WINDOW_MARGIN);
+        assert!(
+            bounds.x + bounds.width
+                <= monitor.bounds.x + monitor.bounds.width - ACTOR_WINDOW_MARGIN + 0.5
+        );
+        assert!(
+            bounds.y + bounds.height
+                <= monitor.bounds.y + monitor.bounds.height - ACTOR_WINDOW_MARGIN + 0.5
+        );
+    }
+
+    #[test]
+    fn actor_layout_returns_best_effort_when_space_is_tight() {
+        let monitors = vec![test_monitor(460.0, 600.0)];
+        let specs = test_specs(&["yuukei", "partner", "third"]);
+
+        let resolved = resolve_actor_window_layout(&specs, &BTreeMap::new(), &monitors);
+
+        assert_eq!(resolved.len(), 3);
+        for bounds in resolved.values() {
+            assert!(bounds.x.is_finite());
+            assert!(bounds.y.is_finite());
+            assert_eq!(bounds.width, ACTOR_WINDOW_WIDTH);
+            assert_eq!(bounds.height, ACTOR_WINDOW_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn actor_visibility_updates_matching_stage_actor() {
+        let manager = DesktopStageManager::new();
+        let spec = test_specs(&["yuukei"]).remove(0);
+        {
+            let mut state = manager.state.write().expect("stage lock");
+            state.actors.insert(
+                spec.actor_id.clone(),
+                actor_from_spec(
+                    &spec,
+                    StageRect {
+                        x: 64.0,
+                        y: 64.0,
+                        width: ACTOR_WINDOW_WIDTH,
+                        height: ACTOR_WINDOW_HEIGHT,
+                    },
+                    true,
+                ),
+            );
+        }
+
+        assert!(manager
+            .set_actor_visibility_for_window(&spec.label, false)
+            .expect("hide visibility"));
+        assert!(
+            !manager
+                .snapshot()
+                .expect("snapshot")
+                .actors
+                .first()
+                .expect("actor")
+                .visible
+        );
+        assert!(manager
+            .set_actor_visibility_for_window(&spec.label, true)
+            .expect("show visibility"));
+        assert!(
+            manager
+                .snapshot()
+                .expect("snapshot")
+                .actors
+                .first()
+                .expect("actor")
+                .visible
+        );
+    }
+
+    #[test]
     fn command_actor_id_prefers_explicit_target() {
         let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
         command.target = Some(yuukei_protocol::CommandTarget {
@@ -825,5 +1171,33 @@ mod tests {
                 hit_zones: Vec::new(),
             }),
         }
+    }
+
+    fn test_monitor(width: f64, height: f64) -> StageMonitor {
+        StageMonitor {
+            id: "monitor-0".to_string(),
+            label: stage_overlay_window_label(0),
+            name: None,
+            bounds: StageRect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            },
+            scale_factor: 1.0,
+        }
+    }
+
+    fn test_specs(actor_ids: &[&str]) -> Vec<ActorWindowSpec> {
+        actor_ids
+            .iter()
+            .enumerate()
+            .map(|(index, actor_id)| ActorWindowSpec {
+                actor_id: (*actor_id).to_string(),
+                display_name: (*actor_id).to_string(),
+                label: actor_window_label(actor_id),
+                index,
+            })
+            .collect()
     }
 }

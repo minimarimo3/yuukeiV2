@@ -11,7 +11,125 @@ describe("StageOverlayApp", () => {
   it("renders stage bubbles from desktop stage state", async () => {
     render(<StageOverlayApp client={clientFixture(stageState())} monitorId="monitor-0" />);
 
-    expect(await screen.findByText("ここに出ます")).toBeInTheDocument();
+    const bubble = await screen.findByText("ここに出ます");
+
+    expect(bubble).toBeInTheDocument();
+    expect(bubble.closest(".stage-bubble")).toHaveClass(
+      "stage-bubble--right",
+      "actor-bubble--right"
+    );
+  });
+
+  it("does not render bubbles for hidden actors", async () => {
+    const client = clientFixture(stageState({}, { visible: false }));
+
+    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+
+    await waitFor(() => {
+      expect(client.getDesktopStageState).toHaveBeenCalled();
+    });
+    expect(screen.queryByText("ここに出ます")).not.toBeInTheDocument();
+  });
+
+  it("marks bubbles placed above the actor with the above side class", async () => {
+    render(
+      <StageOverlayApp
+        client={clientFixture(
+          stageState(
+            {},
+            {
+              bounds: {
+                x: 240,
+                y: 200,
+                width: 420,
+                height: 420
+              },
+              anchor: {
+                x: 450,
+                y: 360,
+                visible: true
+              }
+            }
+          )
+        )}
+        monitorId="monitor-0"
+      />
+    );
+
+    const bubble = await screen.findByText("ここに出ます");
+
+    expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--above");
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass(
+      "actor-bubble--right"
+    );
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass("actor-bubble--left");
+  });
+
+  it("marks bubbles placed below the actor with the below side class", async () => {
+    render(
+      <StageOverlayApp
+        client={clientFixture(
+          stageState(
+            {},
+            {
+              bounds: {
+                x: 240,
+                y: 20,
+                width: 420,
+                height: 420
+              },
+              anchor: {
+                x: 450,
+                y: 260,
+                visible: true
+              }
+            }
+          )
+        )}
+        monitorId="monitor-0"
+      />
+    );
+
+    const bubble = await screen.findByText("ここに出ます");
+
+    expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--below");
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass(
+      "actor-bubble--right"
+    );
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass("actor-bubble--left");
+  });
+
+  it("keeps the left side actor bubble class for left placements", async () => {
+    render(
+      <StageOverlayApp
+        client={clientFixture(
+          stageState(
+            {},
+            {
+              bounds: {
+                x: 420,
+                y: 72,
+                width: 420,
+                height: 560
+              },
+              anchor: {
+                x: 640,
+                y: 190,
+                visible: true
+              }
+            }
+          )
+        )}
+        monitorId="monitor-0"
+      />
+    );
+
+    const bubble = await screen.findByText("ここに出ます");
+
+    expect(bubble.closest(".stage-bubble")).toHaveClass(
+      "stage-bubble--left",
+      "actor-bubble--left"
+    );
   });
 
   it("dismisses expired bubbles through the stage manager", async () => {
@@ -59,9 +177,30 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
   };
 }
 
+type StageActorFixture = Partial<
+  Omit<DesktopStageState["actors"][number], "bounds" | "anchor">
+> & {
+  bounds?: Partial<DesktopStageState["actors"][number]["bounds"]>;
+  anchor?: Partial<DesktopStageState["actors"][number]["anchor"]>;
+};
+
 function stageState(
-  bubble: Partial<DesktopStageState["bubbles"][number]> = {}
+  bubble: Partial<DesktopStageState["bubbles"][number]> = {},
+  actor: StageActorFixture = {}
 ): DesktopStageState {
+  const bounds = {
+    x: 64,
+    y: 72,
+    width: 420,
+    height: 560,
+    ...actor.bounds
+  };
+  const anchor = {
+    x: 260,
+    y: 190,
+    visible: true,
+    ...actor.anchor
+  };
   return {
     monitors: [
       {
@@ -81,18 +220,10 @@ function stageState(
         actorId: "yuukei",
         displayName: "Yuukei",
         windowLabel: "actor-7975756b6569",
-        bounds: {
-          x: 64,
-          y: 72,
-          width: 420,
-          height: 560
-        },
-        anchor: {
-          x: 260,
-          y: 190,
-          visible: true
-        },
-        visible: true
+        ...actor,
+        bounds,
+        anchor,
+        visible: actor.visible ?? true
       }
     ],
     bubbles: [

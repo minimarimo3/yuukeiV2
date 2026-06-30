@@ -16,6 +16,7 @@ describe("stageBubbleLayout", () => {
     expect(placement.left).toBeGreaterThanOrEqual(16);
     expect(placement.left + placement.rect.width).toBeLessThanOrEqual(800 - 16);
     expect(placement.top).toBeGreaterThanOrEqual(16);
+    expect(placement.tailLeft).toBeLessThanOrEqual(placement.width - 20);
   });
 
   it("chooses a side that avoids an actor obstacle", () => {
@@ -49,5 +50,25 @@ describe("stageBubbleLayout", () => {
     );
 
     expect(rectsOverlap(first.rect, second.rect)).toBe(false);
+  });
+
+  it("tracks horizontal tail position for vertical placements", () => {
+    const placement = computeStageBubblePlacement(
+      { x: 450, y: 360, visible: true },
+      { width: 900, height: 640 },
+      { width: 260, height: 80 },
+      [
+        {
+          x: 240,
+          y: 200,
+          width: 420,
+          height: 420
+        }
+      ]
+    );
+
+    expect(placement.side).toBe("above");
+    expect(placement.tailLeft).toBeGreaterThanOrEqual(20);
+    expect(placement.tailLeft).toBeLessThanOrEqual(placement.width - 20);
   });
 });
