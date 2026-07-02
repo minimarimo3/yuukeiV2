@@ -558,12 +558,18 @@ input {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
-  align-items: center;
+  align-items: start;
   min-height: 54px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 12px;
   background: var(--panel-muted);
+}
+
+.extension-main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
 }
 
 .extension-toggle {
@@ -602,6 +608,47 @@ input {
 .extension-actions {
   display: flex;
   gap: 6px;
+}
+
+.extension-permissions {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.extension-permission-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.4fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #ffffff;
+  font-size: 11px;
+}
+
+.extension-permission-row dt {
+  color: #344054;
+  font-weight: 700;
+}
+
+.extension-permission-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.extension-permission-row.is-warning {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.extension-permission-row.is-warning dt,
+.extension-permission-row.is-warning dd {
+  color: #92400e;
 }
 
 .compact-button {
@@ -744,5 +791,9 @@ input {
 
   .extension-actions button {
     flex: 1;
+  }
+
+  .extension-permission-row {
+    grid-template-columns: 1fr;
   }
 }

@@ -5,9 +5,14 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use yuukei_extension::ProcessExtensionManifest;
+use yuukei_capability::{DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID, SPEECH_SYNTHESIS_CAPABILITY};
+use yuukei_extension::{
+    validate_extension_summary, ProcessExtensionManifest, ProcessHookExtension, YuukeiExtension,
+};
 use yuukei_protocol::{
-    now_timestamp, ExtensionHookPoint, ExtensionHookSubscription, ResidentSnapshot,
+    now_timestamp, ExtensionCapabilityDeclaration, ExtensionEventSubscription, ExtensionHookPoint,
+    ExtensionHookSubscription, ExtensionPermissions, ExtensionRuntimeKind, ExtensionSignalAlias,
+    ResidentSnapshot,
 };
 
 use crate::{DeviceHostError, Result};
@@ -22,6 +27,7 @@ pub const TRUSTED_CODE_NOTICE: &str = "Extensionは信頼したローカルコ�
 pub struct ExtensionSettingsState {
     pub installed: Vec<InstalledExtension>,
     pub hook_order: BTreeMap<ExtensionHookPoint, Vec<String>>,
+    pub capability_defaults: BTreeMap<String, String>,
     pub settings_path: PathBuf,
     pub extension_root: PathBuf,
     pub trusted_code_notice: String,
@@ -33,7 +39,13 @@ pub struct InstalledExtension {
     pub extension_id: String,
     pub display_name: String,
     pub enabled: bool,
+    pub runtime: ExtensionRuntimeKind,
+    pub permissions: ExtensionPermissions,
     pub hooks: Vec<ExtensionHookSubscription>,
+    pub event_subscriptions: Vec<ExtensionEventSubscription>,
+    pub emitted_events: Vec<String>,
+    pub capabilities: Vec<ExtensionCapabilityDeclaration>,
+    pub signal_aliases: Vec<ExtensionSignalAlias>,
     pub installed_path: PathBuf,
     pub manifest_path: PathBuf,
     pub installed_at: String,
@@ -57,6 +69,8 @@ struct StoredExtensionSettings {
     installed_extensions: Vec<StoredInstalledExtension>,
     #[serde(default)]
     hook_order: BTreeMap<ExtensionHookPoint, Vec<String>>,
+    #[serde(default)]
+    capability_defaults: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,7 +101,7 @@ pub(crate) struct ExtensionRuntimeLoadError {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ExtensionRuntimeEntry {
-    Ready(ExtensionRuntimeInstall),
+    Ready(Box<ExtensionRuntimeInstall>),
     Error(ExtensionRuntimeLoadError),
 }
 
@@ -115,6 +129,7 @@ impl ExtensionSettingsRegistry {
                 schema_version: EXTENSION_SETTINGS_SCHEMA_VERSION,
                 installed_extensions: Vec::new(),
                 hook_order: BTreeMap::new(),
+                capability_defaults: BTreeMap::new(),
             }
         };
         if stored.schema_version != EXTENSION_SETTINGS_SCHEMA_VERSION {
@@ -149,6 +164,7 @@ impl ExtensionSettingsRegistry {
         ExtensionSettingsState {
             installed,
             hook_order: self.stored.hook_order.clone(),
+            capability_defaults: self.stored.capability_defaults.clone(),
             settings_path: self.settings_path.clone(),
             extension_root: self.extension_root.clone(),
             trusted_code_notice: TRUSTED_CODE_NOTICE.to_string(),
@@ -296,19 +312,37 @@ impl ExtensionSettingsRegistry {
         Ok(self.state())
     }
 
+    pub fn set_capability_default(
+        &mut self,
+        capability: &str,
+        extension_id: &str,
+    ) -> Result<ExtensionSettingsState> {
+        validate_capability_name(capability)?;
+        validate_extension_id(extension_id)?;
+        self.validate_capability_default_target(capability, extension_id)?;
+        self.stored
+            .capability_defaults
+            .insert(capability.to_string(), extension_id.to_string());
+        self.normalize();
+        self.save()?;
+        Ok(self.state())
+    }
+
     pub(crate) fn runtime_entries(&self) -> Vec<ExtensionRuntimeEntry> {
         self.ordered_installed_extensions()
             .into_iter()
             .map(|stored| {
                 let manifest_path = self.manifest_path(&stored.extension_id);
                 match self.read_manifest_for(stored) {
-                    Ok(manifest) => ExtensionRuntimeEntry::Ready(ExtensionRuntimeInstall {
-                        extension_id: stored.extension_id.clone(),
-                        manifest,
-                        enabled: stored.enabled,
-                        install_dir: self.install_dir(&stored.extension_id),
-                        manifest_path,
-                    }),
+                    Ok(manifest) => {
+                        ExtensionRuntimeEntry::Ready(Box::new(ExtensionRuntimeInstall {
+                            extension_id: stored.extension_id.clone(),
+                            manifest,
+                            enabled: stored.enabled,
+                            install_dir: self.install_dir(&stored.extension_id),
+                            manifest_path,
+                        }))
+                    }
                     Err(error) => ExtensionRuntimeEntry::Error(ExtensionRuntimeLoadError {
                         extension_id: stored.extension_id.clone(),
                         manifest_path,
@@ -325,6 +359,10 @@ impl ExtensionSettingsRegistry {
             .get(hook_point)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn capability_defaults(&self) -> BTreeMap<String, String> {
+        self.stored.capability_defaults.clone()
     }
 
     fn normalize(&mut self) {
@@ -371,6 +409,33 @@ impl ExtensionSettingsRegistry {
             }
             self.stored.hook_order.insert(hook_point, next);
         }
+        let extension_capabilities = self
+            .stored
+            .installed_extensions
+            .iter()
+            .filter_map(|stored| {
+                self.read_manifest_for(stored).ok().map(|manifest| {
+                    (
+                        stored.extension_id.clone(),
+                        manifest
+                            .capabilities
+                            .into_iter()
+                            .map(|capability| capability.capability)
+                            .collect::<BTreeSet<_>>(),
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.stored
+            .capability_defaults
+            .retain(|capability, extension_id| {
+                if extension_id == DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID {
+                    return capability == SPEECH_SYNTHESIS_CAPABILITY;
+                }
+                extension_capabilities
+                    .get(extension_id)
+                    .is_some_and(|capabilities| capabilities.contains(capability))
+            });
     }
 
     fn append_manifest_hooks_to_order(&mut self, manifest: &ProcessExtensionManifest) {
@@ -425,7 +490,13 @@ impl ExtensionSettingsRegistry {
                 extension_id: stored.extension_id.clone(),
                 display_name: manifest.display_name,
                 enabled: stored.enabled,
+                runtime: manifest.runtime.unwrap_or(ExtensionRuntimeKind::Process),
+                permissions: manifest.permissions,
                 hooks: manifest.hooks,
+                event_subscriptions: manifest.event_subscriptions,
+                emitted_events: manifest.emitted_events,
+                capabilities: manifest.capabilities,
+                signal_aliases: manifest.signal_aliases,
                 installed_path: self.install_dir(&stored.extension_id),
                 manifest_path,
                 installed_at: stored.installed_at.clone(),
@@ -436,7 +507,13 @@ impl ExtensionSettingsRegistry {
                 extension_id: stored.extension_id.clone(),
                 display_name: stored.extension_id.clone(),
                 enabled: stored.enabled,
+                runtime: ExtensionRuntimeKind::Process,
+                permissions: ExtensionPermissions::default(),
                 hooks: Vec::new(),
+                event_subscriptions: Vec::new(),
+                emitted_events: Vec::new(),
+                capabilities: Vec::new(),
+                signal_aliases: Vec::new(),
                 installed_path: self.install_dir(&stored.extension_id),
                 manifest_path,
                 installed_at: stored.installed_at.clone(),
@@ -476,6 +553,42 @@ impl ExtensionSettingsRegistry {
         Ok(manifest)
     }
 
+    fn validate_capability_default_target(
+        &self,
+        capability: &str,
+        extension_id: &str,
+    ) -> Result<()> {
+        if extension_id == DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID {
+            if capability == SPEECH_SYNTHESIS_CAPABILITY {
+                return Ok(());
+            }
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "{DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID} only provides {SPEECH_SYNTHESIS_CAPABILITY}"
+            )));
+        }
+        let Some(stored) = self
+            .stored
+            .installed_extensions
+            .iter()
+            .find(|stored| stored.extension_id == extension_id)
+        else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "extension is not installed: {extension_id}"
+            )));
+        };
+        let manifest = self.read_manifest_for(stored)?;
+        if manifest
+            .capabilities
+            .iter()
+            .any(|declared| declared.capability == capability)
+        {
+            return Ok(());
+        }
+        Err(DeviceHostError::ExtensionSettings(format!(
+            "extension {extension_id} does not provide capability {capability}"
+        )))
+    }
+
     fn save(&self) -> Result<()> {
         if let Some(parent) = self.settings_path.parent() {
             fs::create_dir_all(parent)?;
@@ -500,12 +613,36 @@ fn validate_manifest(manifest: &ProcessExtensionManifest) -> Result<()> {
             manifest.schema_version
         )));
     }
-    if manifest.hooks.is_empty() {
+    if manifest.hooks.is_empty()
+        && manifest.event_subscriptions.is_empty()
+        && manifest.emitted_events.is_empty()
+        && manifest.capabilities.is_empty()
+        && manifest.signal_aliases.is_empty()
+    {
         return Err(DeviceHostError::ExtensionSettings(
-            "extension must declare at least one hook".to_string(),
+            "extension must declare at least one hook, event subscription, emitted event, capability, or signal alias".to_string(),
         ));
     }
+    if let Some(runtime) = &manifest.runtime {
+        if runtime != &ExtensionRuntimeKind::Process {
+            return Err(DeviceHostError::ExtensionSettings(
+                "process extension manifest may only declare runtime \"process\"".to_string(),
+            ));
+        }
+    }
     validate_extension_id(&manifest.id)?;
+    let summary = ProcessHookExtension::from_manifest(manifest.clone()).registration();
+    validate_extension_summary(&summary)
+        .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
+    Ok(())
+}
+
+fn validate_capability_name(capability: &str) -> Result<()> {
+    if capability.trim().is_empty() {
+        return Err(DeviceHostError::ExtensionSettings(
+            "capability name must not be empty".to_string(),
+        ));
+    }
     Ok(())
 }
 

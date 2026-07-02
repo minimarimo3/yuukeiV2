@@ -76,6 +76,48 @@ pub fn canonical_signal_id(signal: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SignalAliasTable {
+    aliases: BTreeMap<String, String>,
+}
+
+impl SignalAliasTable {
+    pub fn new(aliases: impl IntoIterator<Item = (String, String)>) -> Self {
+        let aliases = aliases
+            .into_iter()
+            .map(|(alias, canonical_id)| {
+                (alias.trim().to_string(), canonical_id.trim().to_string())
+            })
+            .filter(|(alias, canonical_id)| !alias.is_empty() && !canonical_id.is_empty())
+            .collect();
+        Self { aliases }
+    }
+
+    pub fn with_standard_and_donated(
+        aliases: impl IntoIterator<Item = ExtensionSignalAlias>,
+    ) -> Self {
+        let mut table = BTreeMap::new();
+        for alias in aliases {
+            table.insert(
+                alias.alias.trim().to_string(),
+                alias.signal.trim().to_string(),
+            );
+        }
+        Self::new(table)
+    }
+
+    pub fn canonicalize<'a>(&'a self, signal: &'a str) -> String {
+        let standard = canonical_signal_id(signal);
+        if standard != signal.trim() {
+            return standard.to_string();
+        }
+        self.aliases
+            .get(signal.trim())
+            .cloned()
+            .unwrap_or_else(|| signal.trim().to_string())
+    }
+}
+
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
 }
@@ -112,7 +154,7 @@ pub enum RetentionPolicy {
 pub struct Privacy {
     pub category: String,
     pub retention: RetentionPolicy,
-    pub provider_readable: bool,
+    pub extension_readable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -252,10 +294,76 @@ impl ExtensionHookSubscription {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum ExtensionRuntimeKind {
+    Process,
+    Bundled,
+    Wasm,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionPermissions {
+    #[serde(default)]
+    pub broad_event_subscription: bool,
+    #[serde(default)]
+    pub event_log_read: Option<ExtensionEventLogReadPermission>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionEventLogReadPermission {
+    #[serde(default)]
+    pub event_types: Vec<String>,
+    #[serde(default)]
+    pub privacy_categories: Vec<String>,
+    pub allow_payloads: bool,
+    pub allow_references: bool,
+    pub max_records: usize,
+    pub purpose: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionEventSubscription {
+    #[serde(default)]
+    pub event_types: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionCapabilityDeclaration {
+    pub capability: String,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionSignalAlias {
+    pub alias: String,
+    pub signal: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct ExtensionSummary {
     pub extension_id: String,
     pub display_name: String,
+    pub runtime: ExtensionRuntimeKind,
+    pub permissions: ExtensionPermissions,
     pub hooks: Vec<ExtensionHookSubscription>,
+    pub event_subscriptions: Vec<ExtensionEventSubscription>,
+    pub emitted_events: Vec<String>,
+    pub capabilities: Vec<ExtensionCapabilityDeclaration>,
+    pub signal_aliases: Vec<ExtensionSignalAlias>,
     pub location: ExecutionLocation,
     pub enabled: bool,
 }
@@ -287,6 +395,27 @@ pub struct ExtensionHookResult {
     pub action: ExtensionHookAction,
     #[ts(optional)]
     pub command: Option<RuntimeCommand>,
+    #[ts(type = "{ [key: string]: unknown }", optional)]
+    pub metadata: Option<JsonMap>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionEventInvocation {
+    pub id: String,
+    pub extension_id: String,
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub event: EventLogRecord,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionEventResult {
+    #[serde(default)]
+    pub proposed_events: Vec<RuntimeEvent>,
     #[ts(type = "{ [key: string]: unknown }", optional)]
     pub metadata: Option<JsonMap>,
 }
@@ -341,7 +470,7 @@ pub struct SurfaceSession {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
-pub enum ProviderHealth {
+pub enum ExtensionHealth {
     Unknown,
     Ready,
     Degraded,
@@ -360,11 +489,11 @@ pub enum ExecutionLocation {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
-pub struct CapabilityProviderSummary {
-    pub provider_id: String,
+pub struct CapabilityRouteSummary {
+    pub extension_id: String,
     pub capabilities: Vec<String>,
     pub location: ExecutionLocation,
-    pub health: ProviderHealth,
+    pub health: ExtensionHealth,
     pub enabled: bool,
 }
 
@@ -422,7 +551,7 @@ pub struct ResidentSnapshot {
     pub active_surface_id: Option<String>,
     pub actors: BTreeMap<String, ActorSnapshot>,
     pub surfaces: BTreeMap<String, SurfaceSession>,
-    pub capabilities: BTreeMap<String, CapabilityProviderSummary>,
+    pub capabilities: BTreeMap<String, CapabilityRouteSummary>,
     pub extensions: BTreeMap<String, ExtensionSummary>,
     pub recent_event_cursor: String,
 }

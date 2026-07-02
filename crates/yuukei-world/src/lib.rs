@@ -17,6 +17,7 @@ use yuukei_daihon::{
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
+    SignalAliasTable,
 };
 
 #[derive(Debug, Error)]
@@ -172,6 +173,14 @@ impl DaihonDispatchResult {
 #[async_trait]
 pub trait DaihonAdapter: Send + Sync {
     async fn load_world(&self, world: &WorldPack) -> Result<()>;
+    async fn load_world_with_signal_aliases(
+        &self,
+        world: &WorldPack,
+        aliases: &SignalAliasTable,
+    ) -> Result<()> {
+        let _ = aliases;
+        self.load_world(world).await
+    }
     async fn dispatch(
         &self,
         event: &RuntimeEvent,
@@ -200,6 +209,15 @@ struct LoadedDaihonScript {
 #[async_trait]
 impl DaihonAdapter for YuukeiDaihonAdapter {
     async fn load_world(&self, world: &WorldPack) -> Result<()> {
+        self.load_world_with_signal_aliases(world, &SignalAliasTable::default())
+            .await
+    }
+
+    async fn load_world_with_signal_aliases(
+        &self,
+        world: &WorldPack,
+        aliases: &SignalAliasTable,
+    ) -> Result<()> {
         world.validate()?;
         if !world.daihon.scripts.is_empty() && world.daihon.loaded_scripts.is_empty() {
             return Err(WorldError::Validation(
@@ -212,7 +230,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         for source in &world.daihon.loaded_scripts {
             let mut script = parse_script(&source.source)
                 .map_err(|diagnostics| WorldError::Daihon(format_diagnostics(&diagnostics)))?;
-            canonicalize_daihon_script_signals(&mut script);
+            canonicalize_daihon_script_signals(&mut script, aliases);
             let diagnostics = validate_script(&script, Some(&function_registry));
             if has_errors(&diagnostics) {
                 return Err(WorldError::Daihon(format_diagnostics(&diagnostics)));
@@ -242,10 +260,6 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         event: &RuntimeEvent,
         world: &WorldPack,
     ) -> Result<DaihonDispatchResult> {
-        if !world.allows_signal(&event.kind) {
-            return Ok(DaihonDispatchResult::default());
-        }
-
         let mut state = self.state.lock().await;
         if state.scripts.is_empty() {
             return Ok(DaihonDispatchResult::default());
@@ -428,11 +442,11 @@ fn script_accepts_event(script: &Script, event_kind: &str) -> bool {
         })
 }
 
-fn canonicalize_daihon_script_signals(script: &mut Script) {
-    script.event.name.value = canonical_signal_id(&script.event.name.value).to_string();
+fn canonicalize_daihon_script_signals(script: &mut Script, aliases: &SignalAliasTable) {
+    script.event.name.value = aliases.canonicalize(&script.event.name.value);
     for scene in &mut script.event.scenes {
         for signal in &mut scene.metadata.signals {
-            signal.name.value = canonical_signal_id(&signal.name.value).to_string();
+            signal.name.value = aliases.canonicalize(&signal.name.value);
         }
     }
 }
@@ -671,11 +685,15 @@ impl WorldPack {
     }
 
     pub fn allows_signal(&self, signal: &str) -> bool {
-        let signal = canonical_signal_id(signal);
+        self.allows_signal_with_aliases(signal, &SignalAliasTable::default())
+    }
+
+    pub fn allows_signal_with_aliases(&self, signal: &str, aliases: &SignalAliasTable) -> bool {
+        let signal = aliases.canonicalize(signal);
         self.signals
             .allow
             .iter()
-            .any(|allowed| canonical_signal_id(allowed) == signal)
+            .any(|allowed| aliases.canonicalize(allowed) == signal)
     }
 
     pub fn actor_map(&self) -> BTreeMap<String, ActorDefinition> {

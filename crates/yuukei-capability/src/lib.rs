@@ -8,26 +8,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use yuukei_protocol::{
-    CapabilityInvocation, CapabilityProviderSummary, ExecutionLocation, JsonMap, ProviderHealth,
+    CapabilityInvocation, CapabilityRouteSummary, ExecutionLocation, ExtensionHealth, JsonMap,
 };
+
+pub const SPEECH_SYNTHESIS_CAPABILITY: &str = "speech.synthesis";
+pub const DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID: &str = "yuukei.default-tts";
 
 #[derive(Debug, Error)]
 pub enum CapabilityError {
-    #[error("provider already registered: {0}")]
-    DuplicateProvider(String),
-    #[error("provider must declare at least one capability: {0}")]
+    #[error("capability extension already registered: {0}")]
+    DuplicateExtension(String),
+    #[error("capability extension must declare at least one capability: {0}")]
     EmptyCapabilities(String),
     #[error("unknown capability: {0}")]
     UnknownCapability(String),
-    #[error("provider is not healthy for capability: {0}")]
-    NoHealthyProvider(String),
-    #[error("missing permission {permission} for provider {provider_id}")]
+    #[error("no healthy extension for capability: {0}")]
+    NoHealthyExtension(String),
+    #[error("missing permission {permission} for capability extension {extension_id}")]
     MissingPermission {
-        provider_id: String,
+        extension_id: String,
         permission: String,
     },
-    #[error("provider invocation failed: {0}")]
-    Provider(String),
+    #[error("capability extension invocation failed: {0}")]
+    Extension(String),
 }
 
 pub type Result<T> = std::result::Result<T, CapabilityError>;
@@ -35,23 +38,23 @@ pub type Result<T> = std::result::Result<T, CapabilityError>;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderRegistration {
-    pub provider_id: String,
+    pub extension_id: String,
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub methods: Vec<String>,
     #[serde(default)]
     pub required_permissions: Vec<String>,
     pub location: ExecutionLocation,
-    pub health: ProviderHealth,
+    pub health: ExtensionHealth,
     pub enabled: bool,
     #[serde(default)]
     pub config_schema: JsonMap,
 }
 
 impl ProviderRegistration {
-    pub fn summary(&self) -> CapabilityProviderSummary {
-        CapabilityProviderSummary {
-            provider_id: self.provider_id.clone(),
+    pub fn summary(&self) -> CapabilityRouteSummary {
+        CapabilityRouteSummary {
+            extension_id: self.extension_id.clone(),
             capabilities: self.capabilities.clone(),
             location: self.location.clone(),
             health: self.health.clone(),
@@ -61,7 +64,7 @@ impl ProviderRegistration {
 
     fn is_healthy_for(&self, capability: &str) -> bool {
         self.enabled
-            && self.health == ProviderHealth::Ready
+            && self.health == ExtensionHealth::Ready
             && self
                 .capabilities
                 .iter()
@@ -73,7 +76,7 @@ impl ProviderRegistration {
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityResult {
     pub invocation_id: String,
-    pub provider_id: String,
+    pub extension_id: String,
     pub capability: String,
     pub output: JsonMap,
     #[serde(default)]
@@ -83,7 +86,7 @@ pub struct CapabilityResult {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventLogReadGrant {
-    pub provider_id: String,
+    pub extension_id: String,
     pub resident_id: String,
     #[serde(default)]
     pub event_types: Vec<String>,
@@ -125,38 +128,49 @@ impl CapabilityRouter {
     {
         let registration = provider.registration();
         if registration.capabilities.is_empty() {
-            return Err(CapabilityError::EmptyCapabilities(registration.provider_id));
+            return Err(CapabilityError::EmptyCapabilities(
+                registration.extension_id,
+            ));
         }
-        if self.providers.contains_key(&registration.provider_id) {
-            return Err(CapabilityError::DuplicateProvider(registration.provider_id));
+        if self.providers.contains_key(&registration.extension_id) {
+            return Err(CapabilityError::DuplicateExtension(
+                registration.extension_id,
+            ));
         }
+        let extension_id = registration.extension_id.clone();
+        let capabilities = registration.capabilities.clone();
         self.providers
-            .insert(registration.provider_id.clone(), Arc::new(provider));
+            .insert(extension_id.clone(), Arc::new(provider));
         self.registrations
-            .insert(registration.provider_id.clone(), registration);
+            .insert(extension_id.clone(), registration);
+        for capability in capabilities {
+            self.defaults
+                .entry(capability)
+                .or_insert_with(|| extension_id.clone());
+        }
         Ok(())
     }
 
     pub fn grant_permission(
         &mut self,
-        provider_id: impl Into<String>,
+        extension_id: impl Into<String>,
         permission: impl Into<String>,
     ) {
         self.permission_grants
-            .entry(provider_id.into())
+            .entry(extension_id.into())
             .or_default()
             .insert(permission.into());
     }
 
-    pub fn set_default_provider(
+    pub fn set_default_extension(
         &mut self,
         capability: impl Into<String>,
-        provider_id: impl Into<String>,
+        extension_id: impl Into<String>,
     ) {
-        self.defaults.insert(capability.into(), provider_id.into());
+        self.defaults.insert(capability.into(), extension_id.into());
     }
 
-    pub fn summaries(&self) -> BTreeMap<String, CapabilityProviderSummary> {
+    pub fn summaries(&self) -> BTreeMap<String, CapabilityRouteSummary> {
         self.registrations
             .iter()
             .map(|(id, registration)| (id.clone(), registration.summary()))
@@ -170,27 +184,27 @@ impl CapabilityRouter {
     }
 
     pub async fn invoke(&self, invocation: CapabilityInvocation) -> Result<CapabilityResult> {
-        let provider_id = self.select_provider(&invocation.capability)?;
+        let extension_id = self.select_provider(&invocation.capability)?;
         let registration = self
             .registrations
-            .get(&provider_id)
+            .get(&extension_id)
             .ok_or_else(|| CapabilityError::UnknownCapability(invocation.capability.clone()))?;
         self.ensure_permissions(registration)?;
         let provider = self
             .providers
-            .get(&provider_id)
+            .get(&extension_id)
             .ok_or_else(|| CapabilityError::UnknownCapability(invocation.capability.clone()))?;
         provider.invoke(invocation).await
     }
 
     fn select_provider(&self, capability: &str) -> Result<String> {
-        if let Some(provider_id) = self.defaults.get(capability) {
+        if let Some(extension_id) = self.defaults.get(capability) {
             if self
                 .registrations
-                .get(provider_id)
+                .get(extension_id)
                 .is_some_and(|registration| registration.is_healthy_for(capability))
             {
-                return Ok(provider_id.clone());
+                return Ok(extension_id.clone());
             }
         }
 
@@ -203,24 +217,24 @@ impl CapabilityRouter {
             {
                 found_capability = true;
                 if registration.is_healthy_for(capability) {
-                    return Ok(registration.provider_id.clone());
+                    return Ok(registration.extension_id.clone());
                 }
             }
         }
 
         if found_capability {
-            Err(CapabilityError::NoHealthyProvider(capability.to_string()))
+            Err(CapabilityError::NoHealthyExtension(capability.to_string()))
         } else {
             Err(CapabilityError::UnknownCapability(capability.to_string()))
         }
     }
 
     fn ensure_permissions(&self, registration: &ProviderRegistration) -> Result<()> {
-        let grants = self.permission_grants.get(&registration.provider_id);
+        let grants = self.permission_grants.get(&registration.extension_id);
         for permission in &registration.required_permissions {
             if !grants.is_some_and(|grants| grants.contains(permission)) {
                 return Err(CapabilityError::MissingPermission {
-                    provider_id: registration.provider_id.clone(),
+                    extension_id: registration.extension_id.clone(),
                     permission: permission.clone(),
                 });
             }
@@ -236,12 +250,12 @@ pub struct StubSpeechSynthesisProvider;
 impl CapabilityProvider for StubSpeechSynthesisProvider {
     fn registration(&self) -> ProviderRegistration {
         ProviderRegistration {
-            provider_id: "stub-speech".to_string(),
-            capabilities: vec!["speech.synthesis".to_string()],
+            extension_id: DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID.to_string(),
+            capabilities: vec![SPEECH_SYNTHESIS_CAPABILITY.to_string()],
             methods: vec!["synthesize".to_string()],
             required_permissions: Vec::new(),
             location: ExecutionLocation::ResidentHome,
-            health: ProviderHealth::Ready,
+            health: ExtensionHealth::Ready,
             enabled: true,
             config_schema: JsonMap::new(),
         }
@@ -262,12 +276,12 @@ impl CapabilityProvider for StubSpeechSynthesisProvider {
 
         Ok(CapabilityResult {
             invocation_id: invocation.id,
-            provider_id: "stub-speech".to_string(),
-            capability: "speech.synthesis".to_string(),
+            extension_id: DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID.to_string(),
+            capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
             output: JsonMap::from([
                 (
                     "speechRef".to_string(),
-                    json!(format!("stub-speech://{display_command_id}")),
+                    json!(format!("yuukei-default-tts://{display_command_id}")),
                 ),
                 ("durationMs".to_string(), json!(duration_ms)),
                 (
@@ -307,8 +321,8 @@ mod tests {
             })
             .await?;
 
-        assert_eq!(result.provider_id, "stub-speech");
-        assert_eq!(result.output["speechRef"], "stub-speech://cmd_1");
+        assert_eq!(result.extension_id, "yuukei.default-tts");
+        assert_eq!(result.output["speechRef"], "yuukei-default-tts://cmd_1");
         Ok(())
     }
 
@@ -338,12 +352,12 @@ mod tests {
     impl CapabilityProvider for PermissionedProvider {
         fn registration(&self) -> ProviderRegistration {
             ProviderRegistration {
-                provider_id: "memory-provider".to_string(),
+                extension_id: "memory-extension".to_string(),
                 capabilities: vec!["memory.retrieve".to_string()],
                 methods: vec!["retrieve".to_string()],
                 required_permissions: vec!["event-log:read".to_string()],
                 location: ExecutionLocation::ResidentHome,
-                health: ProviderHealth::Ready,
+                health: ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
             }
@@ -352,7 +366,7 @@ mod tests {
         async fn invoke(&self, invocation: CapabilityInvocation) -> Result<CapabilityResult> {
             Ok(CapabilityResult {
                 invocation_id: invocation.id,
-                provider_id: "memory-provider".to_string(),
+                extension_id: "memory-extension".to_string(),
                 capability: "memory.retrieve".to_string(),
                 output: JsonMap::new(),
                 metadata: JsonMap::new(),
@@ -376,8 +390,62 @@ mod tests {
         let error = router.invoke(invocation.clone()).await.unwrap_err();
         assert!(matches!(error, CapabilityError::MissingPermission { .. }));
 
-        router.grant_permission("memory-provider", "event-log:read");
+        router.grant_permission("memory-extension", "event-log:read");
         router.invoke(invocation).await?;
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct UserSpeechExtension;
+
+    #[async_trait]
+    impl CapabilityProvider for UserSpeechExtension {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "user.custom-tts".to_string(),
+                capabilities: vec!["speech.synthesis".to_string()],
+                methods: vec!["synthesize".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(&self, invocation: CapabilityInvocation) -> Result<CapabilityResult> {
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "user.custom-tts".to_string(),
+                capability: "speech.synthesis".to_string(),
+                output: JsonMap::from([("speechRef".to_string(), json!("user-tts://cmd_1"))]),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn router_can_switch_capability_between_default_and_user_extension() -> Result<()> {
+        let mut router = CapabilityRouter::new();
+        router.register(StubSpeechSynthesisProvider)?;
+        router.register(UserSpeechExtension)?;
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: "speech.synthesis".to_string(),
+            method: "synthesize".to_string(),
+            resident_id: "resident-default".to_string(),
+            actor_id: None,
+            input: JsonMap::from([("displayCommandId".to_string(), json!("cmd_1"))]),
+            context: None,
+        };
+
+        let default_result = router.invoke(invocation.clone()).await?;
+        assert_eq!(default_result.extension_id, "yuukei.default-tts");
+
+        router.set_default_extension("speech.synthesis", "user.custom-tts");
+        let user_result = router.invoke(invocation).await?;
+        assert_eq!(user_result.extension_id, "user.custom-tts");
+        assert_eq!(user_result.output["speechRef"], "user-tts://cmd_1");
         Ok(())
     }
 }

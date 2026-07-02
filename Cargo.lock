@@ -5050,6 +5050,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "yuukei-capability",
  "yuukei-event-log",
  "yuukei-extension",
  "yuukei-protocol",
@@ -5078,6 +5079,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "yuukei-capability",
  "yuukei-protocol",
 ]
 
@@ -5097,6 +5099,8 @@ dependencies = [
 name = "yuukei-resident-home"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",

@@ -36,7 +36,7 @@ pub struct EventLogQuery {
     pub kind: Option<String>,
     pub after_sequence: Option<i64>,
     pub limit: Option<usize>,
-    pub provider_readable_only: bool,
+    pub extension_readable_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -242,7 +242,7 @@ impl EventLog {
             kind: selector.kind.clone(),
             after_sequence: None,
             limit: None,
-            provider_readable_only: false,
+            extension_readable_only: false,
         };
         let mut matching = self.read(query)?.records;
         if !selector.ids.is_empty() {
@@ -327,15 +327,15 @@ fn matches_query(record: &EventLogRecord, query: &EventLogQuery) -> bool {
     {
         return false;
     }
-    if query.provider_readable_only && !provider_readable(record.privacy.as_ref()) {
+    if query.extension_readable_only && !extension_readable(record.privacy.as_ref()) {
         return false;
     }
     true
 }
 
-fn provider_readable(privacy: Option<&Privacy>) -> bool {
+fn extension_readable(privacy: Option<&Privacy>) -> bool {
     privacy
-        .map(|privacy| privacy.provider_readable)
+        .map(|privacy| privacy.extension_readable)
         .unwrap_or(true)
 }
 
@@ -398,14 +398,14 @@ mod tests {
     }
 
     #[test]
-    fn read_filters_by_kind_resident_cursor_and_provider_readable() -> Result<()> {
+    fn read_filters_by_kind_resident_cursor_and_extension_readable() -> Result<()> {
         let log = EventLog::in_memory()?;
         log.append(record("evt_1", "conversation.text"))?;
         let mut private = record("evt_2", "device.secret");
         private.privacy = Some(Privacy {
             category: "device".to_string(),
             retention: RetentionPolicy::Short,
-            provider_readable: false,
+            extension_readable: false,
         });
         log.append(private)?;
 
@@ -414,7 +414,7 @@ mod tests {
             kind: None,
             after_sequence: Some(0),
             limit: Some(10),
-            provider_readable_only: true,
+            extension_readable_only: true,
         })?;
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records[0].id, "evt_1");

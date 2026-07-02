@@ -79,6 +79,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   const orderedBeforeCommandEmitExtensions = useMemo(() => {
     return orderExtensionsForHook(
+      (extensionState?.installed ?? []).filter(subscribesToBeforeCommandEmit),
+      extensionState?.hookOrder.beforeCommandEmit ?? []
+    );
+  }, [extensionState]);
+  const orderedExtensions = useMemo(() => {
+    return orderExtensionsForHook(
       extensionState?.installed ?? [],
       extensionState?.hookOrder.beforeCommandEmit ?? []
     );
@@ -254,60 +260,98 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               <p className="settings-error">{extensionError}</p>
             ) : null}
             <div className="extension-list">
-              {orderedBeforeCommandEmitExtensions.map((extension, index) => (
-                <article className="extension-row" key={extension.extensionId}>
-                  <label className="extension-toggle">
-                    <input
-                      type="checkbox"
-                      aria-label={`${extension.displayName} ${extension.extensionId}`}
-                      checked={extension.enabled}
-                      disabled={changingExtensions}
-                      onChange={(event) =>
-                        toggleExtension(
-                          extension.extensionId,
-                          event.currentTarget.checked
-                        )
-                      }
-                    />
-                    <span>
-                      <strong>{extension.displayName}</strong>
-                      <small>{extension.extensionId}</small>
-                    </span>
-                  </label>
-                  {extension.lastLoadError ? (
-                    <p className="settings-error">{extension.lastLoadError}</p>
-                  ) : null}
-                  <div className="extension-actions">
-                    <button
-                      type="button"
-                      className="secondary-button compact-button"
-                      disabled={changingExtensions || index === 0}
-                      onClick={() => moveExtension(extension.extensionId, -1)}
-                    >
-                      上
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button compact-button"
-                      disabled={
-                        changingExtensions ||
-                        index === orderedBeforeCommandEmitExtensions.length - 1
-                      }
-                      onClick={() => moveExtension(extension.extensionId, 1)}
-                    >
-                      下
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button compact-button"
-                      disabled={changingExtensions}
-                      onClick={() => uninstallExtension(extension.extensionId)}
-                    >
-                      削除
-                    </button>
-                  </div>
-                </article>
-              ))}
+              {orderedExtensions.map((extension) => {
+                const hookIndex =
+                  orderedBeforeCommandEmitExtensions.findIndex(
+                    (candidate) =>
+                      candidate.extensionId === extension.extensionId
+                  );
+                const canReorderHook = hookIndex >= 0;
+                const permissionRows = extensionPermissionRows(extension);
+                return (
+                  <article
+                    className="extension-row"
+                    key={extension.extensionId}
+                  >
+                    <div className="extension-main">
+                      <label className="extension-toggle">
+                        <input
+                          type="checkbox"
+                          aria-label={`${extension.displayName} ${extension.extensionId}`}
+                          checked={extension.enabled}
+                          disabled={changingExtensions}
+                          onChange={(event) =>
+                            toggleExtension(
+                              extension.extensionId,
+                              event.currentTarget.checked
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{extension.displayName}</strong>
+                          <small>{extension.extensionId}</small>
+                        </span>
+                      </label>
+                      {permissionRows.length > 0 ? (
+                        <dl className="extension-permissions">
+                          {permissionRows.map((row) => (
+                            <div
+                              className={[
+                                "extension-permission-row",
+                                row.warning ? "is-warning" : ""
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                              key={row.label}
+                            >
+                              <dt>{row.label}</dt>
+                              <dd>{row.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : null}
+                    </div>
+                    {extension.lastLoadError ? (
+                      <p className="settings-error">
+                        {extension.lastLoadError}
+                      </p>
+                    ) : null}
+                    <div className="extension-actions">
+                      <button
+                        type="button"
+                        className="secondary-button compact-button"
+                        disabled={
+                          changingExtensions || !canReorderHook || hookIndex === 0
+                        }
+                        onClick={() => moveExtension(extension.extensionId, -1)}
+                      >
+                        上
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button compact-button"
+                        disabled={
+                          changingExtensions ||
+                          !canReorderHook ||
+                          hookIndex ===
+                            orderedBeforeCommandEmitExtensions.length - 1
+                        }
+                        onClick={() => moveExtension(extension.extensionId, 1)}
+                      >
+                        下
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button compact-button"
+                        disabled={changingExtensions}
+                        onClick={() => uninstallExtension(extension.extensionId)}
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           </div>
           <div className="settings-actions">
@@ -403,4 +447,60 @@ function orderExtensionsForHook(
     }
   }
   return ordered;
+}
+
+function subscribesToBeforeCommandEmit(extension: InstalledExtension): boolean {
+  return extension.hooks.some((hook) => hook.hookPoint === "beforeCommandEmit");
+}
+
+type ExtensionPermissionRow = {
+  label: string;
+  value: string;
+  warning?: boolean;
+};
+
+function extensionPermissionRows(
+  extension: InstalledExtension
+): ExtensionPermissionRow[] {
+  const rows: ExtensionPermissionRow[] = [];
+  const broadEventSubscription =
+    extension.permissions.broadEventSubscription ||
+    extension.eventSubscriptions.some((subscription) =>
+      subscription.eventTypes.some((eventType) => eventType.trim() === "*")
+    );
+
+  if (broadEventSubscription) {
+    rows.push({
+      label: "全イベント購読",
+      value: "全イベントを受け取ります",
+      warning: true
+    });
+  }
+  if (extension.permissions.eventLogRead) {
+    const permission = extension.permissions.eventLogRead;
+    rows.push({
+      label: "event log読み出し",
+      value: `${joinOrAll(permission.eventTypes)} / max ${permission.maxRecords}`
+    });
+  }
+  if (extension.capabilities.length > 0) {
+    rows.push({
+      label: "capability提供",
+      value: extension.capabilities
+        .map((capability) => capability.capability)
+        .join(", ")
+    });
+  }
+  if (extension.emittedEvents.length > 0) {
+    rows.push({
+      label: "発行イベント",
+      value: extension.emittedEvents.join(", ")
+    });
+  }
+
+  return rows;
+}
+
+function joinOrAll(values: string[]): string {
+  return values.length > 0 ? values.join(", ") : "*";
 }

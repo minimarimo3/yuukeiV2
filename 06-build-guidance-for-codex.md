@@ -61,14 +61,14 @@ Device Hostはローカル端末の感覚器と能力ホストである。
 
 - Resident Homeへ接続する。
 - Surfaceを登録する。
-- ローカルCapability Providerを登録する。
-- ローカルTrusted Hook Extensionを登録する。
+- ローカルExtensionを登録する。
+- Extensionがmanifestで宣言したcapability、hook、event購読、event発行、signal aliasをResident Homeへ登録する。
 - 端末のpresence、生活時計tick、実idle、起動、終了をRuntimeEventとして送る。
 - ユーザーが選んだWorld Packディレクトリをローカル設定に保存し、選択されたPack installに対応するResident Home起動設定を作る。
 
 OS観測は段階的に増やす。Finder/Explorer、ファイル、通知、スマホセンサーなどは、すべてDevice Host側の拡張として扱う。
 
-Trusted Hook Extensionは最初は `beforeCommandEmit` だけでよい。外部プロセス型Extensionは、Device Hostが設定画面で選ばれたフォルダを `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーし、`manifest.json` と `YUUKEI_DATA_DIR/settings/extensions.json` を読んでResident Homeへ公開protocol hookとして登録する。ExtensionにCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さない。v1では信頼済みローカルコードとして扱い、OS sandboxを仕様として約束しない。
+Extensionは最初は `beforeCommandEmit` だけでもよいが、同じmanifestモデルでcapability提供、`onEventAppended`、RuntimeEvent発行、Daihon signal alias寄贈を扱う。外部プロセス型Extensionは、Device Hostが設定画面で選ばれたフォルダを `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーし、`manifest.json` と `YUUKEI_DATA_DIR/settings/extensions.json` を読んでResident Homeへ公開protocol Extensionとして登録する。ExtensionにCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さない。v1では信頼済みローカルコードとして扱い、manifest permissionsは宣言とユーザー同意であり、OS sandboxを仕様として約束しない。
 
 World Pack選択UIはDevice Hostに置く。ただし、active World Packの解釈、required capability確認、Packごとのresident/event-log分離はResident Home起動境界の責務として扱う。Surface Clientは `ResidentSnapshot.worldPackId` を表示してよいが、Pack選択や人格継続性を所有しない。
 
@@ -83,27 +83,26 @@ Daihonはsidecarまたはservice境界として接続する。
 
 Daihonなしでも最小Resident Homeは起動できるようにする。ただし、製品のキャラクターらしさはDaihonで作る。
 
-Daihon作者向けの標準日本語合図名は、YuukeiのWorld/Daihon境界でcanonical RuntimeEvent typeへ解決する。Daihon coreにYuukei固有signal辞書を焼き込まず、event logやHook Extensionへは `device.wake` などのcanonical IDだけを流す。
+Daihon作者向けの標準日本語合図名は、YuukeiのWorld/Daihon境界でcanonical RuntimeEvent typeへ解決する。Extensionがmanifestで寄贈したsignal aliasも同じ境界で解決する。Daihon coreにYuukei固有signal辞書を焼き込まず、event logやExtensionへは `device.wake` や `ext.<extensionId>.*` などのcanonical IDだけを流す。
 
 OSのsleep/wake、生活時計tick、時間帯変化、実idleなどの観測はDevice Hostで行う。Resident Homeは受け取った `RuntimeEvent` を記録してDaihonへ渡すだけにし、Tauri、AppKit、OS通知APIを内部へ入れない。
 
-### 6. Official Capability Providers
+### 6. Official Default Extensions
 
-最後に公式Providerを足す。
+最後に公式同梱のDefault Extensionを足す。
 
 - `yuukei-intelligence`: `dialogue.generate`, `memory.index`, `memory.retrieve`。
 - `yuukei-tts`: `speech.synthesis`。
 - `yuukei-stt`: `speech.recognition`。
 
-これらは公式同梱でよいが、Coreではない。無効化、差し替え、別Provider選択ができるようにする。
+これらはデフォルトで同梱・有効化されてよいが、Coreではない。無効化、差し替え、同じcapabilityを提供する別Extension選択ができるようにする。
 
 ## Decision Rules
 
 - 迷ったら、住人の継続性をResident Homeへ置く。
 - 迷ったら、端末固有の感覚器と権限をDevice Hostへ置く。
 - 迷ったら、表示と演出をSurface Clientへ置く。
-- 迷ったら、AI、TTS、STT、記憶検索をCapability Providerへ置く。
-- 迷ったら、任意のmessage加工や外部アプリ連携の入口をTrusted Hook Extensionへ置く。
+- 迷ったら、AI、TTS、STT、記憶検索、message加工、外部アプリ連携の入口をExtensionへ置く。
 - 迷ったら、出来事のsource of truthをcanonical event logへ置く。
 - 迷ったら、World Packはデータと台本に寄せる。
 - 迷ったら、Coreへ特定の研究成果やAI方式を入れない。
@@ -112,12 +111,12 @@ OSのsleep/wake、生活時計tick、時間帯変化、実idleなどの観測は
 
 - チャットUIを中心に作り始める。
 - LLMの品質を製品の中心に置く。
-- Memory Providerの内部形式をCore schemaに固定する。
+- Memory Extensionの内部形式をCore schemaに固定する。
 - Surfaceが人格や長期状態を持つ。
 - Device HostのOS APIをResident Homeへ漏らす。
 - Extension同士を直接つなぐ。
-- Hook ExtensionをCore内部関数名やmutable内部状態に結びつける。
-- World Packから特定Providerを直接呼ぶ。
+- ExtensionをCore内部関数名やmutable内部状態に結びつける。
+- World Packから特定Extensionを直接呼ぶ。
 - event logを後回しにする。
 - 既存MVPの単一runtime構造をそのまま拡張する。
 
@@ -132,11 +131,11 @@ OSのsleep/wake、生活時計tick、時間帯変化、実idleなどの観測は
 5. RuntimeEventがevent logへ保存される。
 6. 仮Daihonまたは最小Daihonが `dialogue.say` を返す。
 7. Surfaceが発話を表示する。
-8. 公式ではない簡易TTS Providerがあれば音声化する。
+8. 公式ではない簡易TTS Extensionがあれば音声化する。
 
 この縦切りでは、canonical event logとは別にアプリ動作ログもJSONLで保存する。event logは住人の生活史のsource of truthであり、アプリ動作ログは起動、Surface attach、入力、エラー、書き出しなどの実装検証に使う。
 
-この縦切りで、通信境界、event log、Surfaceの受動性、Providerの交換可能性を確認する。
+この縦切りで、通信境界、event log、Surfaceの受動性、Extensionの交換可能性を確認する。
 
 ## Documentation Discipline
 
@@ -145,7 +144,7 @@ OSのsleep/wake、生活時計tick、時間帯変化、実idleなどの観測は
 - 体験原則なら `01-concept.md`。
 - 構造なら `02-architecture.md`。
 - messageやRPCなら `03-protocols.md`。
-- event logや記憶Providerなら `04-event-log-and-memory.md`。
+- event logやMemory Extensionなら `04-event-log-and-memory.md`。
 - World PackやDaihonなら `05-world-pack-and-daihon.md`。
 
 仕様がどこにも入らない場合、その仕様はYuukeiの中核から外れている可能性が高い。

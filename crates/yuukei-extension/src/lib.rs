@@ -14,17 +14,36 @@ use tokio::{
     process::Command,
     time::{timeout, Duration},
 };
+use yuukei_capability::{CapabilityProvider, CapabilityResult, ProviderRegistration};
 use yuukei_protocol::{
-    new_id, ExecutionLocation, ExtensionHookAction, ExtensionHookInvocation, ExtensionHookPoint,
-    ExtensionHookResult, ExtensionHookSubscription, ExtensionSummary, JsonMap, RuntimeCommand,
+    new_id, CapabilityInvocation, EventLogRecord, ExecutionLocation,
+    ExtensionCapabilityDeclaration, ExtensionEventInvocation, ExtensionEventLogReadPermission,
+    ExtensionEventResult, ExtensionEventSubscription, ExtensionHealth, ExtensionHookAction,
+    ExtensionHookInvocation, ExtensionHookPoint, ExtensionHookResult, ExtensionHookSubscription,
+    ExtensionPermissions, ExtensionRuntimeKind, ExtensionSignalAlias, ExtensionSummary, JsonMap,
+    RuntimeCommand,
 };
 
 #[derive(Debug, Error)]
 pub enum ExtensionError {
     #[error("extension already registered: {0}")]
     DuplicateExtension(String),
-    #[error("extension must declare at least one hook: {0}")]
-    EmptyHooks(String),
+    #[error("extension must declare at least one hook, event subscription, emitted event, capability, or signal alias: {0}")]
+    EmptyDeclaration(String),
+    #[error("extension {0} must explicitly declare broadEventSubscription permission to subscribe to all event types")]
+    MissingBroadEventPermission(String),
+    #[error("extension {extension_id} signal alias points outside its event namespace: {signal}")]
+    InvalidSignalAliasNamespace {
+        extension_id: String,
+        signal: String,
+    },
+    #[error(
+        "extension {extension_id} signal alias target is not declared in emittedEvents: {signal}"
+    )]
+    SignalAliasNotEmitted {
+        extension_id: String,
+        signal: String,
+    },
     #[error("replaceCommand result must include command")]
     MissingReplacementCommand,
     #[error("extension {extension_id} attempted to replace immutable command field {field}")]
@@ -48,6 +67,12 @@ pub type Result<T> = std::result::Result<T, ExtensionError>;
 pub trait YuukeiExtension: Send + Sync {
     fn registration(&self) -> ExtensionSummary;
     async fn invoke(&self, invocation: ExtensionHookInvocation) -> Result<ExtensionHookResult>;
+    async fn on_event_appended(
+        &self,
+        _invocation: ExtensionEventInvocation,
+    ) -> Result<ExtensionEventResult> {
+        Ok(ExtensionEventResult::default())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -68,9 +93,21 @@ pub struct ExtensionHookReport {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionEventReport {
+    pub invocation: ExtensionEventInvocation,
+    pub result: ExtensionEventResult,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionPipelineResult {
     pub command: RuntimeCommand,
     pub reports: Vec<ExtensionHookReport>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionEventPipelineResult {
+    pub reports: Vec<ExtensionEventReport>,
 }
 
 impl ExtensionRegistry {
@@ -83,8 +120,14 @@ impl ExtensionRegistry {
         E: YuukeiExtension + 'static,
     {
         let registration = extension.registration();
-        if registration.hooks.is_empty() {
-            return Err(ExtensionError::EmptyHooks(registration.extension_id));
+        validate_extension_summary(&registration)?;
+        if registration.hooks.is_empty()
+            && registration.event_subscriptions.is_empty()
+            && registration.emitted_events.is_empty()
+            && registration.capabilities.is_empty()
+            && registration.signal_aliases.is_empty()
+        {
+            return Err(ExtensionError::EmptyDeclaration(registration.extension_id));
         }
         if self.extensions.contains_key(&registration.extension_id) {
             return Err(ExtensionError::DuplicateExtension(
@@ -112,6 +155,47 @@ impl ExtensionRegistry {
 
     pub fn summaries(&self) -> BTreeMap<String, ExtensionSummary> {
         self.registrations.clone()
+    }
+
+    pub fn capability_declarations(&self) -> Vec<(String, ExtensionCapabilityDeclaration)> {
+        self.registrations
+            .values()
+            .filter(|registration| registration.enabled)
+            .flat_map(|registration| {
+                registration
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .map(|capability| (registration.extension_id.clone(), capability))
+            })
+            .collect()
+    }
+
+    pub fn event_log_read_permission(
+        &self,
+        extension_id: &str,
+    ) -> Option<ExtensionEventLogReadPermission> {
+        self.registrations
+            .get(extension_id)
+            .filter(|registration| registration.enabled)
+            .and_then(|registration| registration.permissions.event_log_read.clone())
+    }
+
+    pub fn signal_aliases(&self) -> Vec<ExtensionSignalAlias> {
+        self.registrations
+            .values()
+            .filter(|registration| registration.enabled)
+            .flat_map(|registration| registration.signal_aliases.clone())
+            .collect()
+    }
+
+    pub fn can_emit_event(&self, extension_id: &str, event_type: &str) -> bool {
+        self.registrations
+            .get(extension_id)
+            .filter(|registration| registration.enabled)
+            .is_some_and(|registration| {
+                event_type_matches(&registration.emitted_events, event_type)
+            })
     }
 
     pub async fn apply_before_command_emit(
@@ -174,6 +258,57 @@ impl ExtensionRegistry {
         Ok(ExtensionPipelineResult { command, reports })
     }
 
+    pub async fn notify_event_appended(
+        &self,
+        event: EventLogRecord,
+        context: ExtensionEventContext,
+    ) -> Result<ExtensionEventPipelineResult> {
+        let mut reports = Vec::new();
+
+        for extension_id in self.registrations.keys() {
+            let Some(registration) = self.registrations.get(extension_id) else {
+                continue;
+            };
+            if !registration.enabled
+                || is_self_emitted_event(&event, extension_id)
+                || !matches_on_event_appended(registration, &event.kind)
+            {
+                continue;
+            }
+            let Some(extension) = self.extensions.get(extension_id) else {
+                continue;
+            };
+
+            let invocation = ExtensionEventInvocation {
+                id: new_id("ext_evt"),
+                extension_id: extension_id.clone(),
+                resident_id: event.resident_id.clone(),
+                world_pack_id: context.world_pack_id.clone(),
+                event: event.clone(),
+            };
+            let (result, error) = match extension.on_event_appended(invocation.clone()).await {
+                Ok(result) => (result, None),
+                Err(error) => (
+                    ExtensionEventResult {
+                        proposed_events: Vec::new(),
+                        metadata: Some(JsonMap::from([(
+                            "error".to_string(),
+                            json!(error.to_string()),
+                        )])),
+                    },
+                    Some(error.to_string()),
+                ),
+            };
+            reports.push(ExtensionEventReport {
+                invocation,
+                result,
+                error,
+            });
+        }
+
+        Ok(ExtensionEventPipelineResult { reports })
+    }
+
     fn ordered_extension_ids(&self, hook_point: &ExtensionHookPoint) -> Vec<&String> {
         let mut seen = BTreeSet::new();
         let mut ordered = Vec::new();
@@ -194,8 +329,26 @@ impl ExtensionRegistry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionEventContext {
+    pub world_pack_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionCommandContext {
     pub world_pack_id: String,
+}
+
+pub fn event_type_matches(patterns: &[String], event_type: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return event_type.starts_with(prefix);
+        }
+        pattern == event_type
+    })
 }
 
 fn matches_before_command_emit(registration: &ExtensionSummary, command_kind: &str) -> bool {
@@ -203,6 +356,54 @@ fn matches_before_command_emit(registration: &ExtensionSummary, command_kind: &s
         .hooks
         .iter()
         .any(|hook| hook.matches_command(&ExtensionHookPoint::BeforeCommandEmit, command_kind))
+}
+
+fn matches_on_event_appended(registration: &ExtensionSummary, event_kind: &str) -> bool {
+    registration
+        .event_subscriptions
+        .iter()
+        .any(|subscription| event_type_matches(&subscription.event_types, event_kind))
+}
+
+pub fn validate_extension_summary(registration: &ExtensionSummary) -> Result<()> {
+    let subscribes_all = registration.event_subscriptions.iter().any(|subscription| {
+        subscription
+            .event_types
+            .iter()
+            .any(|event_type| event_type.trim() == "*")
+    });
+    if subscribes_all && !registration.permissions.broad_event_subscription {
+        return Err(ExtensionError::MissingBroadEventPermission(
+            registration.extension_id.clone(),
+        ));
+    }
+    let required_prefix = format!("ext.{}.", registration.extension_id);
+    for alias in &registration.signal_aliases {
+        if !alias.signal.starts_with(&required_prefix) {
+            return Err(ExtensionError::InvalidSignalAliasNamespace {
+                extension_id: registration.extension_id.clone(),
+                signal: alias.signal.clone(),
+            });
+        }
+        if !event_type_matches(&registration.emitted_events, &alias.signal) {
+            return Err(ExtensionError::SignalAliasNotEmitted {
+                extension_id: registration.extension_id.clone(),
+                signal: alias.signal.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_self_emitted_event(event: &EventLogRecord, extension_id: &str) -> bool {
+    event.source == "extension"
+        && event
+            .payload
+            .get("yuukeiExtension")
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("extensionId"))
+            .and_then(Value::as_str)
+            .is_some_and(|source_extension_id| source_extension_id == extension_id)
 }
 
 fn apply_hook_result(
@@ -275,10 +476,16 @@ impl YuukeiExtension for DialogueSuffixExtension {
         ExtensionSummary {
             extension_id: self.extension_id.clone(),
             display_name: self.display_name.clone(),
+            runtime: ExtensionRuntimeKind::Bundled,
+            permissions: ExtensionPermissions::default(),
             hooks: vec![ExtensionHookSubscription {
                 hook_point: ExtensionHookPoint::BeforeCommandEmit,
                 command_types: vec!["dialogue.say".to_string()],
             }],
+            event_subscriptions: Vec::new(),
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
             location: ExecutionLocation::ResidentHome,
             enabled: true,
         }
@@ -317,7 +524,20 @@ pub struct ProcessExtensionManifest {
     pub schema_version: u32,
     pub id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub runtime: Option<ExtensionRuntimeKind>,
+    #[serde(default)]
+    pub permissions: ExtensionPermissions,
+    #[serde(default)]
     pub hooks: Vec<ExtensionHookSubscription>,
+    #[serde(default)]
+    pub event_subscriptions: Vec<ExtensionEventSubscription>,
+    #[serde(default)]
+    pub emitted_events: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<ExtensionCapabilityDeclaration>,
+    #[serde(default)]
+    pub signal_aliases: Vec<ExtensionSignalAlias>,
     pub process: ProcessCommandSpec,
 }
 
@@ -368,7 +588,13 @@ impl YuukeiExtension for ProcessHookExtension {
         ExtensionSummary {
             extension_id: self.manifest.id.clone(),
             display_name: self.manifest.display_name.clone(),
+            runtime: ExtensionRuntimeKind::Process,
+            permissions: self.manifest.permissions.clone(),
             hooks: self.manifest.hooks.clone(),
+            event_subscriptions: self.manifest.event_subscriptions.clone(),
+            emitted_events: self.manifest.emitted_events.clone(),
+            capabilities: self.manifest.capabilities.clone(),
+            signal_aliases: self.manifest.signal_aliases.clone(),
             location: ExecutionLocation::DeviceHost,
             enabled: self.enabled,
         }
@@ -407,9 +633,96 @@ impl YuukeiExtension for ProcessHookExtension {
         let result = serde_json::from_slice(&output.stdout)?;
         Ok(result)
     }
+
+    async fn on_event_appended(
+        &self,
+        invocation: ExtensionEventInvocation,
+    ) -> Result<ExtensionEventResult> {
+        let output = self.run_process(&invocation).await?;
+        let result = serde_json::from_slice(&output)?;
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl CapabilityProvider for ProcessHookExtension {
+    fn registration(&self) -> ProviderRegistration {
+        let mut methods = BTreeSet::new();
+        let mut required_permissions = BTreeSet::new();
+        for capability in &self.manifest.capabilities {
+            methods.extend(capability.methods.iter().cloned());
+            required_permissions.extend(capability.required_permissions.iter().cloned());
+        }
+        ProviderRegistration {
+            extension_id: self.manifest.id.clone(),
+            capabilities: self
+                .manifest
+                .capabilities
+                .iter()
+                .map(|capability| capability.capability.clone())
+                .collect(),
+            methods: methods.into_iter().collect(),
+            required_permissions: required_permissions.into_iter().collect(),
+            location: ExecutionLocation::DeviceHost,
+            health: if self.enabled {
+                ExtensionHealth::Ready
+            } else {
+                ExtensionHealth::Unavailable
+            },
+            enabled: self.enabled,
+            config_schema: JsonMap::new(),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        invocation: CapabilityInvocation,
+    ) -> yuukei_capability::Result<CapabilityResult> {
+        let output = self
+            .run_process(&invocation)
+            .await
+            .map_err(|error| yuukei_capability::CapabilityError::Extension(error.to_string()))?;
+        serde_json::from_slice(&output)
+            .map_err(|error| yuukei_capability::CapabilityError::Extension(error.to_string()))
+    }
 }
 
 impl ProcessHookExtension {
+    async fn run_process<T>(&self, invocation: &T) -> Result<Vec<u8>>
+    where
+        T: Serialize + ?Sized,
+    {
+        let command_path = self.resolved_command_path();
+        let mut command = Command::new(command_path);
+        command.args(&self.manifest.process.args);
+        command.kill_on_drop(true);
+        if let Some(cwd) = self.resolved_cwd() {
+            command.current_dir(cwd);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&serde_json::to_vec(invocation)?).await?;
+            stdin.write_all(b"\n").await?;
+        }
+
+        let timeout_ms = self.manifest.process.timeout_ms.unwrap_or(5_000);
+        let output = timeout(Duration::from_millis(timeout_ms), child.wait_with_output())
+            .await
+            .map_err(|_| ExtensionError::ProcessTimeout { timeout_ms })??;
+        if !output.status.success() {
+            return Err(ExtensionError::ProcessExit {
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(output.stdout)
+    }
+
     fn resolved_command_path(&self) -> PathBuf {
         let command = PathBuf::from(&self.manifest.process.command);
         if command.is_absolute() || command.components().count() == 1 {
@@ -561,10 +874,16 @@ mod tests {
             schema_version: 1,
             id: "disabled-process".to_string(),
             display_name: "Disabled Process".to_string(),
+            runtime: None,
+            permissions: ExtensionPermissions::default(),
             hooks: vec![ExtensionHookSubscription {
                 hook_point: ExtensionHookPoint::BeforeCommandEmit,
                 command_types: vec!["dialogue.say".to_string()],
             }],
+            event_subscriptions: Vec::new(),
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
             process: ProcessCommandSpec {
                 command: "missing-extension-command".to_string(),
                 args: Vec::new(),
@@ -603,10 +922,16 @@ mod tests {
                 ExtensionSummary {
                     extension_id: "bad".to_string(),
                     display_name: "Bad".to_string(),
+                    runtime: ExtensionRuntimeKind::Bundled,
+                    permissions: ExtensionPermissions::default(),
                     hooks: vec![ExtensionHookSubscription {
                         hook_point: ExtensionHookPoint::BeforeCommandEmit,
                         command_types: Vec::new(),
                     }],
+                    event_subscriptions: Vec::new(),
+                    emitted_events: Vec::new(),
+                    capabilities: Vec::new(),
+                    signal_aliases: Vec::new(),
                     location: ExecutionLocation::ResidentHome,
                     enabled: true,
                 }
@@ -646,5 +971,57 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("immutable command field id")));
         Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_signal_alias_outside_extension_namespace() {
+        let summary = ExtensionSummary {
+            extension_id: "activity".to_string(),
+            display_name: "Activity".to_string(),
+            runtime: ExtensionRuntimeKind::Bundled,
+            permissions: ExtensionPermissions::default(),
+            hooks: Vec::new(),
+            event_subscriptions: Vec::new(),
+            emitted_events: vec!["ext.activity.*".to_string()],
+            capabilities: Vec::new(),
+            signal_aliases: vec![ExtensionSignalAlias {
+                alias: "会話_別名".to_string(),
+                signal: "conversation.text".to_string(),
+            }],
+            location: ExecutionLocation::ResidentHome,
+            enabled: true,
+        };
+
+        let error = validate_extension_summary(&summary).unwrap_err();
+        assert!(matches!(
+            error,
+            ExtensionError::InvalidSignalAliasNamespace { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_signal_alias_not_declared_in_emitted_events() {
+        let summary = ExtensionSummary {
+            extension_id: "activity".to_string(),
+            display_name: "Activity".to_string(),
+            runtime: ExtensionRuntimeKind::Bundled,
+            permissions: ExtensionPermissions::default(),
+            hooks: Vec::new(),
+            event_subscriptions: Vec::new(),
+            emitted_events: vec!["ext.activity.other".to_string()],
+            capabilities: Vec::new(),
+            signal_aliases: vec![ExtensionSignalAlias {
+                alias: "活動時間_開始".to_string(),
+                signal: "ext.activity.active-period.start".to_string(),
+            }],
+            location: ExecutionLocation::ResidentHome,
+            enabled: true,
+        };
+
+        let error = validate_extension_summary(&summary).unwrap_err();
+        assert!(matches!(
+            error,
+            ExtensionError::SignalAliasNotEmitted { .. }
+        ));
     }
 }

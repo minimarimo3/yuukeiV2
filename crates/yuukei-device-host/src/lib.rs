@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use yuukei_capability::CapabilityRouter;
 use yuukei_event_log::{EventLog, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
@@ -21,6 +22,7 @@ use yuukei_protocol::{
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{
     ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, WorldError, WorldPack,
+    YuukeiDaihonAdapter,
 };
 
 mod extension_settings;
@@ -390,6 +392,27 @@ impl LocalYuukeiRuntime {
         registry.set_hook_order(hook_point, extension_ids)
     }
 
+    pub fn set_capability_default(
+        capability: &str,
+        extension_id: &str,
+    ) -> Result<ExtensionSettingsState> {
+        Self::set_capability_default_in(
+            LocalRuntimeEnvironment::default_local(),
+            capability,
+            extension_id,
+        )
+    }
+
+    pub fn set_capability_default_in(
+        env: LocalRuntimeEnvironment,
+        capability: &str,
+        extension_id: &str,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.set_capability_default(capability, extension_id)
+    }
+
     pub async fn open(config: LocalRuntimeConfig) -> Result<Self> {
         let install = WorldPackInstall {
             install_id: config.install_id.clone(),
@@ -448,7 +471,17 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
-        let home = match ResidentHome::new(&config.resident_id, world, event_log).await {
+        let extension_settings = config.extension_settings_registry()?;
+        let capabilities = build_extension_capability_router(&extension_settings, &logger)?;
+        let home = match ResidentHome::with_parts(
+            &config.resident_id,
+            world,
+            event_log,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await
+        {
             Ok(home) => Arc::new(home),
             Err(error) => {
                 let _ = logger.record(
@@ -459,8 +492,8 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
-        let extension_settings = config.extension_settings_registry()?;
-        let loaded_extensions = load_trusted_extensions(&extension_settings, &home, &logger)?;
+        let loaded_extensions =
+            load_trusted_extensions(&extension_settings, &home, &logger).await?;
 
         logger.record(
             "runtime.open.ready",
@@ -1270,7 +1303,7 @@ fn error_payload(stage: &str, error: &dyn std::fmt::Display) -> JsonMap {
     ])
 }
 
-fn load_trusted_extensions(
+async fn load_trusted_extensions(
     extension_settings: &ExtensionSettingsRegistry,
     home: &ResidentHome,
     logger: &AppLogger,
@@ -1286,7 +1319,8 @@ fn load_trusted_extensions(
                     install.manifest,
                     install.install_dir,
                     install.enabled,
-                ))?;
+                ))
+                .await?;
                 loaded += 1;
                 logger.record(
                     "extension.load.ready",
@@ -1319,6 +1353,47 @@ fn load_trusted_extensions(
     }
     home.set_extension_hook_order(ExtensionHookPoint::BeforeCommandEmit, hook_order)?;
     Ok(loaded)
+}
+
+fn build_extension_capability_router(
+    extension_settings: &ExtensionSettingsRegistry,
+    logger: &AppLogger,
+) -> Result<CapabilityRouter> {
+    let mut router = CapabilityRouter::new();
+    for entry in extension_settings.runtime_entries() {
+        match entry {
+            ExtensionRuntimeEntry::Ready(install) => {
+                if install.manifest.capabilities.is_empty() {
+                    continue;
+                }
+                router
+                    .register(ProcessHookExtension::from_installed_manifest(
+                        install.manifest,
+                        install.install_dir,
+                        install.enabled,
+                    ))
+                    .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
+            }
+            ExtensionRuntimeEntry::Error(error) => {
+                logger.record(
+                    "extension.load.error",
+                    "device-host",
+                    JsonMap::from([
+                        ("extensionId".to_string(), json!(error.extension_id)),
+                        (
+                            "manifestPath".to_string(),
+                            json!(display_path(&error.manifest_path)),
+                        ),
+                        ("message".to_string(), json!(error.message)),
+                    ]),
+                )?;
+            }
+        }
+    }
+    for (capability, extension_id) in extension_settings.capability_defaults() {
+        router.set_default_extension(capability, extension_id);
+    }
+    Ok(router)
 }
 
 fn display_path(path: impl AsRef<Path>) -> String {
@@ -1896,6 +1971,124 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn extension_capability_defaults_persist_and_apply_before_home_start() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &["dialogue.generate"],
+        )?;
+        let source = workspace.path().join("downloads").join("user-tts");
+        write_capability_extension_source(
+            &source,
+            "user-tts",
+            "User TTS",
+            &["speech.synthesis", "dialogue.generate"],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "こんにちは")
+            .await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["extensionId"] == json!("user-tts")
+        }));
+
+        let state = LocalYuukeiRuntime::set_capability_default_in(
+            env.clone(),
+            "speech.synthesis",
+            "yuukei.default-tts",
+        )?;
+        assert_eq!(
+            state.capability_defaults.get("speech.synthesis"),
+            Some(&"yuukei.default-tts".to_string())
+        );
+        let reopened = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
+        let commands = reopened
+            .send_conversation_text(CLI_SURFACE_ID, "もう一度")
+            .await?;
+        assert!(commands.iter().any(|command| command
+            .payload
+            .get("speechRef")
+            .and_then(Value::as_str)
+            .is_some_and(|speech_ref| speech_ref.starts_with("yuukei-default-tts://"))));
+
+        let state = LocalYuukeiRuntime::set_capability_default_in(
+            env.clone(),
+            "speech.synthesis",
+            "user-tts",
+        )?;
+        assert_eq!(
+            state.capability_defaults.get("speech.synthesis"),
+            Some(&"user-tts".to_string())
+        );
+        let raw_settings =
+            fs::read_to_string(data.path().join("settings").join("extensions.json"))?;
+        assert!(raw_settings.contains("\"capabilityDefaults\""));
+        assert!(raw_settings.contains("\"user-tts\""));
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = reopened
+            .send_conversation_text(CLI_SURFACE_ID, "さらに")
+            .await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        Ok(())
+    }
+
+    #[test]
+    fn process_extension_manifest_rejects_non_process_runtime() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let source = workspace.path().join("downloads").join("bad-runtime");
+        write_extension_source(&source, "bad-runtime", "Bad Runtime", "にゃ")?;
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+        manifest["runtime"] = json!("wasm");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+        let env = test_env(workspace.path(), data.path());
+        let error = LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+        assert!(error.to_string().contains("runtime"));
+        assert!(error.to_string().contains("process"));
+        Ok(())
+    }
+
+    #[test]
+    fn process_extension_manifest_rejects_cross_namespace_signal_alias() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let source = workspace.path().join("downloads").join("bad-alias");
+        write_extension_source(&source, "bad-alias", "Bad Alias", "にゃ")?;
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+        manifest["emittedEvents"] = json!(["ext.bad-alias.allowed"]);
+        manifest["signalAliases"] = json!([
+            { "alias": "会話_偽装", "signal": "conversation.text" }
+        ]);
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+        let env = test_env(workspace.path(), data.path());
+        let error = LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+        assert!(error.to_string().contains("signal alias"));
+        Ok(())
+    }
+
     fn test_env(workspace_root: &Path, data_dir: &Path) -> LocalRuntimeEnvironment {
         LocalRuntimeEnvironment {
             workspace_root: workspace_root.to_path_buf(),
@@ -2224,6 +2417,51 @@ const command = input.command;
 command.payload.text = String(command.payload.text ?? "") + suffix;
 process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
 "#,
+        )?;
+        Ok(())
+    }
+
+    fn write_capability_extension_source(
+        root: &Path,
+        id: &str,
+        display_name: &str,
+        capabilities: &[&str],
+    ) -> Result<()> {
+        fs::create_dir_all(root)?;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": id,
+                "displayName": display_name,
+                "capabilities": capabilities.iter().map(|capability| json!({
+                    "capability": capability,
+                    "methods": ["invoke"]
+                })).collect::<Vec<_>>(),
+                "process": {
+                    "command": "node",
+                    "args": ["capability.js"]
+                }
+            }))?,
+        )?;
+        fs::write(
+            root.join("capability.js"),
+            format!(
+                r#"
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const output = input.capability === "speech.synthesis"
+  ? {{ speechRef: "user-tts://cmd_1" }}
+  : {{}};
+process.stdout.write(JSON.stringify({{
+  invocationId: input.id,
+  extensionId: "{id}",
+  capability: input.capability,
+  output,
+  metadata: {{}}
+}}));
+"#
+            ),
         )?;
         Ok(())
     }

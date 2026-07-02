@@ -2,8 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
+  ExtensionCapabilityDeclaration,
+  ExtensionEventSubscription,
   ExtensionHookPoint,
   ExtensionHookSubscription,
+  ExtensionPermissions,
+  ExtensionRuntimeKind,
+  ExtensionSignalAlias,
   ResidentSnapshot,
   RuntimeCommand
 } from "@yuukei/protocol";
@@ -39,7 +44,13 @@ export type InstalledExtension = {
   extensionId: string;
   displayName: string;
   enabled: boolean;
+  runtime: ExtensionRuntimeKind;
+  permissions: ExtensionPermissions;
   hooks: ExtensionHookSubscription[];
+  eventSubscriptions: ExtensionEventSubscription[];
+  emittedEvents: string[];
+  capabilities: ExtensionCapabilityDeclaration[];
+  signalAliases: ExtensionSignalAlias[];
   installedPath: string;
   manifestPath: string;
   installedAt: string;
@@ -50,6 +61,7 @@ export type InstalledExtension = {
 export type ExtensionSettingsState = {
   installed: InstalledExtension[];
   hookOrder: Partial<Record<ExtensionHookPoint, string[]>>;
+  capabilityDefaults: Record<string, string>;
   settingsPath: string;
   extensionRoot: string;
   trustedCodeNotice: string;

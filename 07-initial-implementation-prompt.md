@@ -27,10 +27,10 @@
 
 - Yuukeiは、ユーザーのデジタル生活圏に住むUI内生活者のためのplatformです。
 - `Resident Home` は住人の継続性、canonical event log、capability routing、surface protocolを持つ中核です。
-- `Device Host` は端末ごとのOS観測、ローカル権限、ローカルprovider起動、Surface管理を担当します。
+- `Device Host` は端末ごとのOS観測、ローカル権限、ローカルExtension起動、Surface管理を担当します。
 - `Surface Client` は身体と演出です。人格、長期状態、capability選択を持たせないでください。
-- `Capability Provider` はLLM、TTS、STT、Memory、Embeddingなどの交換可能な能力です。公式同梱providerもCoreではありません。
-- Coreが持つのは「記録」です。記憶DB、要約、facts、episodes、embedding index、独自バイナリ形式はproviderが作る派生物です。
+- `Extension` はLLM、TTS、STT、Memory、Embedding、message hook、event購読/発行などをmanifest権限で宣言する交換可能な単位です。公式同梱ExtensionもCoreではありません。
+- Coreが持つのは「記録」です。記憶DB、要約、facts、episodes、embedding index、独自バイナリ形式はExtensionが作る派生物です。
 - Daihonは作者が意図した生活イベントを実行する層です。AIは台本の代替ではなく余白を埋めるcapabilityです。
 
 今回のゴール:
@@ -73,8 +73,8 @@
    - `presence`、`device`、ユーザー入力の最小RuntimeEvent送信
    - TauriやOS APIはここに閉じ込める
 
-5. Minimal Capability Provider Stub
-   - provider登録の最小schema
+5. Minimal Default Extension Stub
+   - Extension登録とcapability宣言の最小schema
    - `speech.synthesis` stubが、Daihon由来の文でも将来のLLM由来の文でも同じ入力を受け取れる形
    - 今回は本格TTSやLLMは不要。交換可能な境界だけ作る
 
@@ -96,16 +96,16 @@
   - `05-world-pack-and-daihon.md` を読み、World Pack最小schema、signal allowlist、Daihon Host adapter境界を設計・実装する。
   - 出力: 仮adapter、本物Daihon Hostへ差し替えられるinterface、サンプルWorld Pack。
 
-- Subagent E: Capability Provider Boundary
-  - `03-protocols.md` と `04-event-log-and-memory.md` を読み、provider registryとstub providerを実装する。
-  - 出力: provider登録、capability invocation、`speech.synthesis` stub、将来のMemory/LLM providerがevent logを読むための権限境界メモ。
+- Subagent E: Extension Capability Boundary
+  - `03-protocols.md` と `04-event-log-and-memory.md` を読み、Extension manifestとcapability route、stub Extensionを実装する。
+  - 出力: Extension登録、capability invocation、`speech.synthesis` stub、将来のMemory/LLM Extensionがevent logを読むための権限境界メモ。
 
 サブエージェント間のルール:
 
 - 同じファイルを複数サブエージェントが同時編集しないようにしてください。
 - 共通型はSubagent Aが作り、他のサブエージェントはそれに合わせてください。
 - 迷ったら新しい互換層を作らず、メインエージェントに境界判断を戻してください。
-- Provider同士を直接つなげないでください。CompositionはResident Homeのcapability routerを通してください。
+- Extension同士を直接つなげないでください。CompositionはResident Homeのcapability routerを通してください。
 - Device HostのOS APIやTauri handleをResident Homeに入れないでください。
 - Surface Clientに人格、記憶、Daihon実行、capability選択を持たせないでください。
 
@@ -122,7 +122,7 @@
 - Device Host/Surface側から送った入力がResident Homeへ届く。
 - EventLogRecordに `id`, `type`, `timestamp`, `source`, `residentId`, `payload`, `causality` を持たせる。
 - SurfaceSessionで `surfaceId`, `deviceId`, `kind`, `active`, `capabilities`, `presentation` を扱う。
-- CapabilityInvocationがprovider registryを通る。
+- CapabilityInvocationがExtension capability routeを通る。
 - Tauri型、WebView、window handle、OS APIがResident Homeに入っていない。
 - Memory/LLM/TTSがCore固定実装になっていない。
 
@@ -146,6 +146,6 @@
 
 このプロンプトは、最初の実装を「全部入りアプリ」ではなく、境界が壊れていない縦切りに絞るためのもの。
 
-最初から本格的なLLM、TTS、Memory DB、VRM描画まで入れようとすると、境界が曖昧になりやすい。初回は、`conversation.text` から `dialogue.say` までが通ること、Surfaceが受動的であること、event logがsource of truthであること、Capability Providerが差し替え可能であることを優先する。
+最初から本格的なLLM、TTS、Memory DB、VRM描画まで入れようとすると、境界が曖昧になりやすい。初回は、`conversation.text` から `dialogue.say` までが通ること、Surfaceが受動的であること、event logがsource of truthであること、Extensionが差し替え可能であることを優先する。
 
 サブエージェントを使う場合も、最初の共通protocolだけはメインエージェントが握る。ここが揺れると全員が似たような型を別々に作ってしまう。

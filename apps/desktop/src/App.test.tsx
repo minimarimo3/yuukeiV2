@@ -85,6 +85,7 @@ function extensionSettings(
     hookOrder: {
       beforeCommandEmit: installed.map((extension) => extension.extensionId)
     },
+    capabilityDefaults: {},
     settingsPath: "/tmp/yuukei-v2/settings/extensions.json",
     extensionRoot: "/tmp/yuukei-v2/extensions",
     trustedCodeNotice:
@@ -101,12 +102,18 @@ function installedExtension(
     extensionId,
     displayName,
     enabled,
+    runtime: "process",
+    permissions: { broadEventSubscription: false, eventLogRead: null },
     hooks: [
       {
         hookPoint: "beforeCommandEmit",
         commandTypes: ["dialogue.say"]
       }
     ],
+    eventSubscriptions: [],
+    emittedEvents: [],
+    capabilities: [],
+    signalAliases: [],
     installedPath: `/tmp/yuukei-v2/extensions/${extensionId}`,
     manifestPath: `/tmp/yuukei-v2/extensions/${extensionId}/manifest.json`,
     installedAt: "2026-06-25T00:00:00.000Z",
@@ -333,5 +340,47 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.uninstallExtension).toHaveBeenCalledWith("nya-suffix");
     });
+  });
+
+  it("shows Extension permission rows with a broad subscription warning", async () => {
+    const watcher = {
+      ...installedExtension("watcher", "Watcher"),
+      permissions: {
+        broadEventSubscription: true,
+        eventLogRead: {
+          eventTypes: ["conversation.*"],
+          privacyCategories: [],
+          allowPayloads: true,
+          allowReferences: false,
+          maxRecords: 50,
+          purpose: "rebuild"
+        }
+      },
+      eventSubscriptions: [{ eventTypes: ["*"] }],
+      emittedEvents: ["ext.watcher.activity"],
+      capabilities: [
+        {
+          capability: "memory.retrieve",
+          methods: ["retrieve"],
+          requiredPermissions: []
+        }
+      ]
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([watcher]))
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    expect(await screen.findByText("Watcher")).toBeInTheDocument();
+    expect(screen.getByText("全イベント購読")).toBeInTheDocument();
+    expect(screen.getByText("全イベントを受け取ります")).toBeInTheDocument();
+    expect(screen.getByText("event log読み出し")).toBeInTheDocument();
+    expect(screen.getByText("conversation.* / max 50")).toBeInTheDocument();
+    expect(screen.getByText("capability提供")).toBeInTheDocument();
+    expect(screen.getByText("memory.retrieve")).toBeInTheDocument();
+    expect(screen.getByText("発行イベント")).toBeInTheDocument();
+    expect(screen.getByText("ext.watcher.activity")).toBeInTheDocument();
   });
 });
