@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
     DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, InMemorySceneHistory,
-    InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script, Span,
-    SystemEvent, ValidationMode,
+    InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script, Span, Spanned,
+    Stmt, SystemEvent, ValidationMode,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -58,6 +58,8 @@ pub struct WorldPack {
 pub struct ActorDefinition {
     pub id: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_aliases: Vec<String>,
     #[serde(default)]
     pub profile: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,12 +227,14 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             ));
         }
 
+        let speaker_aliases = world.speaker_resolution_table()?;
         let function_registry = yuukei_function_registry();
         let mut scripts = Vec::new();
         for source in &world.daihon.loaded_scripts {
             let mut script = parse_script(&source.source)
                 .map_err(|diagnostics| WorldError::Daihon(format_diagnostics(&diagnostics)))?;
             canonicalize_daihon_script_signals(&mut script, aliases);
+            canonicalize_daihon_script_speakers(&mut script, &speaker_aliases, &source.path)?;
             let diagnostics = validate_script(&script, Some(&function_registry));
             if has_errors(&diagnostics) {
                 return Err(WorldError::Daihon(format_diagnostics(&diagnostics)));
@@ -451,6 +455,60 @@ fn canonicalize_daihon_script_signals(script: &mut Script, aliases: &SignalAlias
     }
 }
 
+fn canonicalize_daihon_script_speakers(
+    script: &mut Script,
+    speakers: &BTreeMap<String, String>,
+    path: &str,
+) -> Result<()> {
+    for scene in &mut script.event.scenes {
+        if let Some(speaker) = &mut scene.metadata.speaker {
+            canonicalize_speaker(speaker, speakers, path)?;
+        }
+        canonicalize_statement_speakers(&mut scene.statements, speakers, path)?;
+    }
+    Ok(())
+}
+
+fn canonicalize_statement_speakers(
+    statements: &mut [Stmt],
+    speakers: &BTreeMap<String, String>,
+    path: &str,
+) -> Result<()> {
+    for statement in statements {
+        match statement {
+            Stmt::SpeakerDisplay { speaker, .. } => {
+                canonicalize_speaker(speaker, speakers, path)?;
+            }
+            Stmt::Conditional(block) => {
+                for branch in &mut block.branches {
+                    canonicalize_statement_speakers(&mut branch.statements, speakers, path)?;
+                }
+                if let Some(else_branch) = &mut block.else_branch {
+                    canonicalize_statement_speakers(else_branch, speakers, path)?;
+                }
+            }
+            Stmt::Display(_) | Stmt::Assignment(_) | Stmt::Jump(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_speaker(
+    speaker: &mut Spanned<String>,
+    speakers: &BTreeMap<String, String>,
+    path: &str,
+) -> Result<()> {
+    let key = speaker.value.trim();
+    let Some(actor_id) = speakers.get(key) else {
+        return Err(WorldError::Daihon(format!(
+            "unknown Daihon speaker in {path} at {}:{}: {}",
+            speaker.span.line, speaker.span.column, speaker.value
+        )));
+    };
+    speaker.value = actor_id.clone();
+    Ok(())
+}
+
 fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
     let mut inputs = vec![
         ("合図".to_string(), DaihonValue::String(event.kind.clone())),
@@ -662,6 +720,7 @@ impl WorldPack {
                 validate_hit_zones(&actor.id, &renderer.hit_zones)?;
             }
         }
+        self.validate_speaker_aliases(&actor_ids)?;
         if !actor_ids.contains(&self.default_actor_id) {
             return Err(WorldError::Validation(format!(
                 "defaultActorId is not declared: {}",
@@ -682,6 +741,44 @@ impl WorldPack {
         }
 
         Ok(())
+    }
+
+    fn validate_speaker_aliases(&self, actor_ids: &BTreeSet<String>) -> Result<()> {
+        let mut aliases = BTreeMap::new();
+        for actor in &self.actors {
+            for alias in &actor.speaker_aliases {
+                require_non_empty("actor.speakerAliases", alias)?;
+                let alias = alias.trim();
+                if actor_ids.contains(alias) {
+                    return Err(WorldError::Validation(format!(
+                        "speaker alias collides with actor id: {alias}"
+                    )));
+                }
+                if let Some(existing_actor_id) = aliases.insert(alias.to_string(), actor.id.clone())
+                {
+                    return Err(WorldError::Validation(format!(
+                        "duplicate speaker alias: {alias} ({existing_actor_id}, {})",
+                        actor.id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn speaker_resolution_table(&self) -> Result<BTreeMap<String, String>> {
+        let mut table = BTreeMap::new();
+        for actor in &self.actors {
+            require_non_empty("actor.id", &actor.id)?;
+            table.insert(actor.id.trim().to_string(), actor.id.clone());
+        }
+        for actor in &self.actors {
+            for alias in &actor.speaker_aliases {
+                require_non_empty("actor.speakerAliases", alias)?;
+                table.insert(alias.trim().to_string(), actor.id.clone());
+            }
+        }
+        Ok(table)
     }
 
     pub fn allows_signal(&self, signal: &str) -> bool {
@@ -820,6 +917,7 @@ mod tests {
             actors: vec![ActorDefinition {
                 id: "yuukei".to_string(),
                 display_name: "Yuukei".to_string(),
+                speaker_aliases: Vec::new(),
                 profile: JsonMap::new(),
                 renderer: None,
             }],
@@ -869,6 +967,53 @@ mod tests {
         world.signals.allow = vec!["会話_入力".to_string(), "conversation.text".to_string()];
         let error = world.validate().expect_err("duplicate canonical signal");
         assert!(error.to_string().contains("conversation.text"));
+    }
+
+    #[test]
+    fn validates_speaker_aliases() {
+        let mut world = pack();
+        world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
+        assert!(world.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_speaker_alias() {
+        let mut world = pack();
+        world.actors[0].speaker_aliases = vec![" ".to_string()];
+        let error = world.validate().expect_err("empty alias should fail");
+        assert!(error.to_string().contains("actor.speakerAliases"));
+    }
+
+    #[test]
+    fn rejects_speaker_alias_that_collides_with_actor_id() {
+        let mut world = pack();
+        world.actors.push(ActorDefinition {
+            id: "partner".to_string(),
+            display_name: "Partner".to_string(),
+            speaker_aliases: Vec::new(),
+            profile: JsonMap::new(),
+            renderer: None,
+        });
+        world.actors[0].speaker_aliases = vec!["partner".to_string()];
+        let error = world
+            .validate()
+            .expect_err("actor id collision should fail");
+        assert!(error.to_string().contains("collides with actor id"));
+    }
+
+    #[test]
+    fn rejects_duplicate_speaker_aliases() {
+        let mut world = pack();
+        world.actors.push(ActorDefinition {
+            id: "partner".to_string(),
+            display_name: "Partner".to_string(),
+            speaker_aliases: vec!["ゆ".to_string()],
+            profile: JsonMap::new(),
+            renderer: None,
+        });
+        world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
+        let error = world.validate().expect_err("duplicate alias should fail");
+        assert!(error.to_string().contains("duplicate speaker alias"));
     }
 
     #[test]
@@ -1136,6 +1281,137 @@ mod tests {
         assert_eq!(result.commands[0].payload["text"], "top-level alias");
         assert_eq!(result.executed_scenes[0].event_name, "conversation.text");
         assert_eq!(result.executed_scenes[0].scene_name, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_resolves_daihon_speaker_aliases() -> Result<()> {
+        let mut world = pack();
+        world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
+        world.actors.push(ActorDefinition {
+            id: "partner".to_string(),
+            display_name: "Partner".to_string(),
+            speaker_aliases: vec!["パ".to_string()],
+            profile: JsonMap::new(),
+            renderer: None,
+        });
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: ゆ
+＜表情 笑顔＞
+パ: ＜動作 歩く＞「次は私です。」
+※（入力#ユーザー発言 = 「こんにちは」）なら:
+ゆ: 「戻りました。」
+おわり
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_speaker_alias".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 4);
+        assert_eq!(
+            result.commands[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("yuukei")
+        );
+        assert_eq!(result.commands[0].payload["speakerId"], "yuukei");
+        assert_eq!(
+            result.commands[1]
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("partner")
+        );
+        assert_eq!(result.commands[1].payload["speakerId"], "partner");
+        assert_eq!(result.commands[2].payload["text"], "次は私です。");
+        assert_eq!(result.commands[2].payload["speakerId"], "partner");
+        assert_eq!(result.commands[3].payload["text"], "戻りました。");
+        assert_eq!(result.commands[3].payload["speakerId"], "yuukei");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_rejects_unknown_daihon_speaker() -> Result<()> {
+        let mut world = pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: だれ
+「届きません。」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        let error = adapter
+            .load_world(&world)
+            .await
+            .expect_err("unknown speaker should fail");
+        assert!(error.to_string().contains("unknown Daihon speaker"));
+        assert!(error.to_string().contains("だれ"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_sample_dispatches_pat_dialogue_from_other_actor() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        assert!(world.allows_signal("avatar.gesture.pat"));
+
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut yuukei_pat = RuntimeEvent::new("avatar.gesture.pat", "surface", "resident-default");
+        yuukei_pat.id = "evt_pat_yuukei".to_string();
+        yuukei_pat.actor_id = Some("yuukei".to_string());
+        yuukei_pat
+            .payload
+            .insert("hitZoneId".to_string(), json!("head"));
+        let result = adapter.dispatch(&yuukei_pat, &world).await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("partner dialogue");
+        assert_eq!(dialogue.payload["speakerId"], "partner");
+        assert_eq!(
+            dialogue
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("partner")
+        );
+
+        let mut partner_pat =
+            RuntimeEvent::new("avatar.gesture.pat", "surface", "resident-default");
+        partner_pat.id = "evt_pat_partner".to_string();
+        partner_pat.actor_id = Some("partner".to_string());
+        partner_pat
+            .payload
+            .insert("hitZoneId".to_string(), json!("head"));
+        let result = adapter.dispatch(&partner_pat, &world).await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("yuukei dialogue");
+        assert_eq!(dialogue.payload["speakerId"], "yuukei");
+        assert_eq!(
+            dialogue
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("yuukei")
+        );
         Ok(())
     }
 

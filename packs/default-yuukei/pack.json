@@ -7,6 +7,7 @@
     {
       "id": "yuukei",
       "displayName": "Yuukei",
+      "speakerAliases": ["ゆ"],
       "profile": {
         "role": "UI resident",
         "speechStyle": "short and present"
@@ -34,6 +35,7 @@
     {
       "id": "partner",
       "displayName": "Partner",
+      "speakerAliases": ["パ"],
       "profile": {
         "role": "UI resident",
         "speechStyle": "quiet and observant"
@@ -44,7 +46,18 @@
         "motions": {
           "walk": "motion/walk.vrma",
           "歩く": "motion/walk.vrma"
-        }
+        },
+        "hitZones": [
+          {
+            "id": "head",
+            "label": "頭",
+            "source": "humanoidBone",
+            "bones": ["head"],
+            "shape": "auto",
+            "events": ["avatar.gesture.poke", "avatar.gesture.pat"],
+            "priority": 40
+          }
+        ]
       }
     }
   ],
@@ -57,7 +70,8 @@
       "device.sleep.before",
       "device.wake",
       "surface.attach",
-      "avatar.gesture.poke"
+      "avatar.gesture.poke",
+      "avatar.gesture.pat"
     ]
   },
   "capabilities": {

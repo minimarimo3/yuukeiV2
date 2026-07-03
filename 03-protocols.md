@@ -130,6 +130,8 @@ RuntimeCommandはSurfaceにとっての描画命令であり、長期状態のso
 
 `dialogue.say` は、表示テキスト、話者、口調、emotion、任意の `speechRef` を持てる。音声そのものをcommandへ埋め込まず、音声、viseme、文字単位または句単位のtimingは `speech.synthesis` の結果として参照する。
 
+Daihon作者がWorld Packの `speakerAliases` を使って短く書いた場合も、RuntimeCommandに出る話者はcanonical actor IDへ正規化する。SurfaceやExtensionは `ゆ` や `パ` のような台本上の短縮名を解釈せず、`target.actorId` と `payload.speakerId` のcanonical actor IDだけを扱う。
+
 ## Extensions
 
 Extensionは、Core内部関数ではなく公開protocol messageを対象にする。能力提供、message変換、event log購読、RuntimeEvent発行、Daihon signal alias寄贈は、単一のmanifestモデルで宣言する。権限ゼロまたは少数権限のExtensionが軽量な修整層になり、多数の権限を宣言するExtensionがフル拡張になる。

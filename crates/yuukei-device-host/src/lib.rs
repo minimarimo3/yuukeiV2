@@ -1850,6 +1850,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_selection_rejects_invalid_speaker_alias_without_saving() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let external_root = workspace.path().join("external-pack");
+        write_pack(&external_root, "external-yuukei", "External Yuukei", &[])?;
+        let pack_path = external_root.join("pack.json");
+        let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&pack_path)?)?;
+        manifest["actors"][0]["speakerAliases"] = json!(["ゆ", "ゆ"]);
+        fs::write(&pack_path, serde_json::to_string_pretty(&manifest)?)?;
+        let env = test_env(workspace.path(), data.path());
+
+        let error =
+            match LocalYuukeiRuntime::select_world_pack_directory_in(env.clone(), &external_root)
+                .await
+            {
+                Ok(_) => panic!("invalid speaker alias should reject the world pack"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("duplicate speaker alias"));
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
+        assert_eq!(reopened.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
+        assert!(!reopened.world_pack_status().fallback_active);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn extension_install_copies_folder_and_persists_settings() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;

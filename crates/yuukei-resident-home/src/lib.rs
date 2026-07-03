@@ -1025,6 +1025,7 @@ mod tests {
             actors: vec![ActorDefinition {
                 id: "yuukei".to_string(),
                 display_name: "Yuukei".to_string(),
+                speaker_aliases: Vec::new(),
                 profile: JsonMap::new(),
                 renderer: None,
             }],
@@ -1258,6 +1259,55 @@ mod tests {
             snapshot.actors["yuukei"].bubble.as_deref(),
             Some("聞こえています。こんにちは")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speaker_alias_dialogue_updates_canonical_actor_snapshot() -> Result<()> {
+        let mut world = world_pack();
+        world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
+        world.actors.push(ActorDefinition {
+            id: "partner".to_string(),
+            display_name: "Partner".to_string(),
+            speaker_aliases: vec!["パ".to_string()],
+            profile: JsonMap::new(),
+            renderer: None,
+        });
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: ゆ
+パ: 「短い名で話します。」
+"#
+        .to_string();
+        let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_speaker_alias".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(
+            dialogue
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("partner")
+        );
+        assert_eq!(dialogue.payload["speakerId"], "partner");
+
+        let snapshot = home.snapshot()?;
+        assert_eq!(
+            snapshot.actors["partner"].bubble.as_deref(),
+            Some("短い名で話します。")
+        );
+        assert!(snapshot.actors["yuukei"].bubble.is_none());
         Ok(())
     }
 
