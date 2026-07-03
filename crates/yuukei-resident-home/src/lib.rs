@@ -21,7 +21,10 @@ use yuukei_protocol::{
     JsonMap, NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
     SurfaceSession,
 };
-use yuukei_world::{DaihonAdapter, WorldError, WorldPack, YuukeiDaihonAdapter};
+use yuukei_world::{
+    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, WorldError, WorldPack,
+    YuukeiDaihonAdapter,
+};
 
 #[derive(Debug, Error)]
 pub enum ResidentHomeError {
@@ -47,6 +50,21 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 
+impl ResidentHomeError {
+    pub fn daihon_report(&self) -> Option<&DaihonDiagnosticReport> {
+        match self {
+            Self::World(error) => error.daihon_report(),
+            Self::EventLog(_)
+            | Self::Capability(_)
+            | Self::Extension(_)
+            | Self::EventLogReadDenied(_)
+            | Self::MissingRequiredCapabilities(_)
+            | Self::PoisonedLock
+            | Self::Serialization(_) => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ResidentHome {
     event_log: EventLog,
@@ -65,6 +83,7 @@ struct HomeState {
     actors: BTreeMap<String, ActorSnapshot>,
     surfaces: BTreeMap<String, SurfaceSession>,
     recent_event_cursor: i64,
+    daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
 }
 
 impl ResidentHome {
@@ -163,6 +182,7 @@ impl ResidentHome {
                 actors,
                 surfaces: BTreeMap::new(),
                 recent_event_cursor: 0,
+                daihon_diagnostics: Vec::new(),
             })),
             command_tx,
         })
@@ -174,6 +194,14 @@ impl ResidentHome {
 
     pub fn subscribe_commands(&self) -> broadcast::Receiver<RuntimeCommand> {
         self.command_tx.subscribe()
+    }
+
+    pub fn daihon_diagnostics(&self) -> Result<Vec<DaihonDiagnosticEntry>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        Ok(state.daihon_diagnostics.clone())
     }
 
     pub fn snapshot(&self) -> Result<ResidentSnapshot> {
@@ -573,7 +601,15 @@ impl ResidentHome {
             return Ok(Vec::new());
         }
 
-        let result = self.daihon.dispatch(&event, &self.world_pack).await?;
+        let result = match self.daihon.dispatch(&event, &self.world_pack).await {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(report) = error.daihon_report() {
+                    self.record_daihon_report(report)?;
+                }
+                return Err(error.into());
+            }
+        };
         if !result.is_empty() {
             let result_payload = serde_json::to_value(&result)?;
             let result_record = NewEventLogRecord {
@@ -626,10 +662,19 @@ impl ResidentHome {
 
     async fn reload_daihon_signal_aliases(&self) -> Result<()> {
         let aliases = self.extension_signal_alias_table()?;
-        self.daihon
+        match self
+            .daihon
             .load_world_with_signal_aliases(&self.world_pack, &aliases)
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Some(report) = error.daihon_report() {
+                    self.record_daihon_report(report)?;
+                }
+                Err(error.into())
+            }
+        }
     }
 
     fn extension_signal_alias_table(&self) -> Result<SignalAliasTable> {
@@ -647,6 +692,22 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?;
         state.recent_event_cursor = sequence;
+        Ok(())
+    }
+
+    fn record_daihon_report(&self, report: &DaihonDiagnosticReport) -> Result<()> {
+        let occurred_at = yuukei_protocol::now_timestamp();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        state.daihon_diagnostics.extend(
+            report
+                .diagnostics
+                .iter()
+                .cloned()
+                .map(|entry| entry.with_occurred_at(occurred_at.clone())),
+        );
         Ok(())
     }
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use yuukei_world::WorldPack;
+use yuukei_world::{DaihonDiagnosticEntry, WorldPack};
 
 use crate::{display_path, LocalRuntimeConfig, Result, DEFAULT_DEVICE_ID, DEFAULT_RESIDENT_ID};
 
@@ -40,6 +40,8 @@ pub struct WorldPackSelectionState {
     pub fallback_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_load_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
     pub settings_path: PathBuf,
 }
 
@@ -233,6 +235,7 @@ impl WorldPackRegistry {
             installs: self.stored.installs.clone(),
             fallback_active,
             last_load_error,
+            daihon_diagnostics: Vec::new(),
             settings_path: self.settings_path.clone(),
         }
     }

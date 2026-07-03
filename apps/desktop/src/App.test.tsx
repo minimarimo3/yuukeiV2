@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import { App } from "./App";
 import type {
+  DaihonDiagnosticEntry,
   ExtensionSettingsState,
   WorldPackSelectionState,
   YuukeiClient
@@ -73,7 +74,25 @@ function worldPackStatus(
     installs: [],
     fallbackActive,
     lastLoadError: fallbackActive ? "pack.json is missing" : undefined,
+    daihonDiagnostics: [],
     settingsPath: "/tmp/yuukei-v2/settings/world-packs.json"
+  };
+}
+
+function daihonDiagnostic(
+  index: number,
+  overrides: Partial<DaihonDiagnosticEntry> = {}
+): DaihonDiagnosticEntry {
+  return {
+    phase: "loadValidate",
+    severity: "error",
+    code: `E-DHN-${index}`,
+    message: `Daihon diagnostic ${index}`,
+    scriptPath: "scripts/desktop_reactions.daihon",
+    line: index,
+    column: 1,
+    occurredAt: `2026-06-25T00:00:0${index}.000Z`,
+    ...overrides
   };
 }
 
@@ -156,6 +175,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
+    onWorldPackStatus: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined),
     ...overrides
@@ -261,6 +281,54 @@ describe("App", () => {
 
     expect(await screen.findByText("pack.json is missing")).toBeInTheDocument();
     expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
+  });
+
+  it("shows up to four Daihon diagnostics until expanded", async () => {
+    const status = {
+      ...worldPackStatus(),
+      daihonDiagnostics: [1, 2, 3, 4, 5].map((index) =>
+        daihonDiagnostic(index)
+      )
+    };
+    const client = clientFixture({
+      getWorldPackStatus: vi.fn(async () => status)
+    });
+
+    render(<App client={client} />);
+
+    expect(await screen.findByText("Daihon エラー 5件")).toBeInTheDocument();
+    expect(screen.getByText("Daihon diagnostic 1")).toBeInTheDocument();
+    expect(screen.getByText("Daihon diagnostic 4")).toBeInTheDocument();
+    expect(screen.queryByText("Daihon diagnostic 5")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "すべて表示" }));
+
+    expect(screen.getByText("Daihon diagnostic 5")).toBeInTheDocument();
+  });
+
+  it("refreshes World Pack diagnostics after a failed selection", async () => {
+    const brokenStatus = {
+      ...worldPackStatus(),
+      daihonDiagnostics: [daihonDiagnostic(1)]
+    };
+    const client = clientFixture({
+      getWorldPackStatus: vi
+        .fn()
+        .mockResolvedValueOnce(worldPackStatus())
+        .mockResolvedValueOnce(brokenStatus),
+      openWorldPackDirectory: vi.fn(async () => "/Users/example/broken-pack"),
+      selectWorldPackDirectory: vi.fn(async () => {
+        throw new Error("Daihon load failed");
+      })
+    });
+
+    render(<App client={client} />);
+
+    await screen.findByText("Default Yuukei");
+    await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
+
+    expect(await screen.findByText("Daihon load failed")).toBeInTheDocument();
+    expect(await screen.findByText("Daihon diagnostic 1")).toBeInTheDocument();
   });
 
   it("installs an Extension directory and refreshes extension state", async () => {

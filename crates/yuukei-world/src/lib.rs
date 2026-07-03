@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
     DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, InMemorySceneHistory,
-    InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script, Span, Spanned,
-    Stmt, SystemEvent, ValidationMode,
+    InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script,
+    Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -29,10 +29,129 @@ pub enum WorldError {
     #[error("world pack validation error: {0}")]
     Validation(String),
     #[error("daihon error: {0}")]
-    Daihon(String),
+    Daihon(DaihonDiagnosticReport),
 }
 
 pub type Result<T> = std::result::Result<T, WorldError>;
+
+impl WorldError {
+    pub fn daihon_report(&self) -> Option<&DaihonDiagnosticReport> {
+        match self {
+            Self::Daihon(report) => Some(report),
+            Self::Io(_) | Self::Json(_) | Self::Validation(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DaihonDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DaihonDiagnosticPhase {
+    LoadParse,
+    LoadValidate,
+    LoadSpeaker,
+    RuntimeValidate,
+    RuntimeExecute,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaihonDiagnosticEntry {
+    pub phase: DaihonDiagnosticPhase,
+    pub severity: DaihonDiagnosticSeverity,
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_pack_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
+}
+
+impl DaihonDiagnosticEntry {
+    pub fn with_occurred_at(mut self, occurred_at: impl Into<String>) -> Self {
+        self.occurred_at = Some(occurred_at.into());
+        self
+    }
+
+    pub fn with_pack_context(
+        mut self,
+        install_id: impl Into<String>,
+        world_pack_id: impl Into<String>,
+        pack_root: impl Into<String>,
+    ) -> Self {
+        self.install_id = Some(install_id.into());
+        self.world_pack_id = Some(world_pack_id.into());
+        self.pack_root = Some(pack_root.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaihonDiagnosticReport {
+    pub diagnostics: Vec<DaihonDiagnosticEntry>,
+}
+
+impl DaihonDiagnosticReport {
+    pub fn new(diagnostics: Vec<DaihonDiagnosticEntry>) -> Self {
+        Self { diagnostics }
+    }
+
+    pub fn single(diagnostic: DaihonDiagnosticEntry) -> Self {
+        Self::new(vec![diagnostic])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+}
+
+impl fmt::Display for DaihonDiagnosticReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some(first) = self.diagnostics.first() else {
+            return formatter.write_str("unknown Daihon diagnostic");
+        };
+        let location = match (first.line, first.column) {
+            (Some(line), Some(column)) => format!(" at {line}:{column}"),
+            _ => String::new(),
+        };
+        if self.diagnostics.len() == 1 {
+            write!(formatter, "{}{}: {}", first.code, location, first.message)
+        } else {
+            write!(
+                formatter,
+                "{} Daihon diagnostics; first: {}{}: {}",
+                self.diagnostics.len(),
+                first.code,
+                location,
+                first.message
+            )
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,13 +350,24 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         let function_registry = yuukei_function_registry();
         let mut scripts = Vec::new();
         for source in &world.daihon.loaded_scripts {
-            let mut script = parse_script(&source.source)
-                .map_err(|diagnostics| WorldError::Daihon(format_diagnostics(&diagnostics)))?;
+            let mut script = parse_script(&source.source).map_err(|diagnostics| {
+                WorldError::Daihon(diagnostic_report(
+                    &diagnostics,
+                    DaihonDiagnosticPhase::LoadParse,
+                    Some(&source.path),
+                    None,
+                ))
+            })?;
             canonicalize_daihon_script_signals(&mut script, aliases);
             canonicalize_daihon_script_speakers(&mut script, &speaker_aliases, &source.path)?;
             let diagnostics = validate_script(&script, Some(&function_registry));
             if has_errors(&diagnostics) {
-                return Err(WorldError::Daihon(format_diagnostics(&diagnostics)));
+                return Err(WorldError::Daihon(diagnostic_report(
+                    &diagnostics,
+                    DaihonDiagnosticPhase::LoadValidate,
+                    Some(&source.path),
+                    None,
+                )));
             }
             scripts.push(LoadedDaihonScript {
                 path: source.path.clone(),
@@ -300,9 +430,21 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             let run = interpreter
                 .run_script(&loaded.script)
                 .await
-                .map_err(|error| WorldError::Daihon(error.to_string()))?;
+                .map_err(|error| {
+                    WorldError::Daihon(diagnostic_report(
+                        std::slice::from_ref(error.diagnostic.as_ref()),
+                        DaihonDiagnosticPhase::RuntimeExecute,
+                        Some(&loaded.path),
+                        Some(event),
+                    ))
+                })?;
             if has_errors(&run.diagnostics) {
-                return Err(WorldError::Daihon(format_diagnostics(&run.diagnostics)));
+                return Err(WorldError::Daihon(diagnostic_report(
+                    &run.diagnostics,
+                    DaihonDiagnosticPhase::RuntimeValidate,
+                    Some(&loaded.path),
+                    Some(event),
+                )));
             }
             if let Some(scene) = run.selected_scene {
                 executed_scenes.push(ExecutedScene {
@@ -500,9 +642,29 @@ fn canonicalize_speaker(
 ) -> Result<()> {
     let key = speaker.value.trim();
     let Some(actor_id) = speakers.get(key) else {
-        return Err(WorldError::Daihon(format!(
-            "unknown Daihon speaker in {path} at {}:{}: {}",
-            speaker.span.line, speaker.span.column, speaker.value
+        return Err(WorldError::Daihon(DaihonDiagnosticReport::single(
+            DaihonDiagnosticEntry {
+                phase: DaihonDiagnosticPhase::LoadSpeaker,
+                severity: DaihonDiagnosticSeverity::Error,
+                code: "E-YUKEI-DHN-SPEAKER-001".to_string(),
+                message: format!(
+                    "unknown Daihon speaker in {path} at {}:{}: {}",
+                    speaker.span.line, speaker.span.column, speaker.value
+                ),
+                script_path: Some(path.to_string()),
+                line: Some(speaker.span.line),
+                column: Some(speaker.span.column),
+                help: Some(
+                    "話者名をactor IDにするか、pack.jsonのactors[].speakerAliasesへ追加してください。"
+                        .to_string(),
+                ),
+                occurred_at: None,
+                install_id: None,
+                world_pack_id: None,
+                pack_root: None,
+                source_event_type: None,
+                source_event_id: None,
+            },
         )));
     };
     speaker.value = actor_id.clone();
@@ -655,22 +817,47 @@ fn yuukei_function_registry() -> FunctionRegistry {
     registry
 }
 
-fn format_diagnostics(diagnostics: &[DaihonDiagnostic]) -> String {
-    if diagnostics.is_empty() {
-        return "unknown Daihon diagnostic".to_string();
+fn diagnostic_report(
+    diagnostics: &[DaihonDiagnostic],
+    phase: DaihonDiagnosticPhase,
+    script_path: Option<&str>,
+    source_event: Option<&RuntimeEvent>,
+) -> DaihonDiagnosticReport {
+    DaihonDiagnosticReport::new(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic_entry(diagnostic, phase, script_path, source_event))
+            .collect(),
+    )
+}
+
+fn diagnostic_entry(
+    diagnostic: &DaihonDiagnostic,
+    phase: DaihonDiagnosticPhase,
+    script_path: Option<&str>,
+    source_event: Option<&RuntimeEvent>,
+) -> DaihonDiagnosticEntry {
+    let location = diagnostic.labels.first().map(|label| label.span);
+    DaihonDiagnosticEntry {
+        phase,
+        severity: match &diagnostic.severity {
+            DaihonSeverity::Error => DaihonDiagnosticSeverity::Error,
+            DaihonSeverity::Warning => DaihonDiagnosticSeverity::Warning,
+            DaihonSeverity::Info => DaihonDiagnosticSeverity::Info,
+        },
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+        script_path: script_path.map(ToOwned::to_owned),
+        line: location.map(|span| span.line),
+        column: location.map(|span| span.column),
+        help: diagnostic.help.clone(),
+        occurred_at: None,
+        install_id: None,
+        world_pack_id: None,
+        pack_root: None,
+        source_event_type: source_event.map(|event| event.kind.clone()),
+        source_event_id: source_event.map(|event| event.id.clone()),
     }
-    diagnostics
-        .iter()
-        .map(|diagnostic| {
-            let location = diagnostic
-                .labels
-                .first()
-                .map(|label| format!(" at {}:{}", label.span.line, label.span.column))
-                .unwrap_or_default();
-            format!("{}{}: {}", diagnostic.code, location, diagnostic.message)
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 impl WorldPack {
@@ -1358,6 +1545,17 @@ mod tests {
             .expect_err("unknown speaker should fail");
         assert!(error.to_string().contains("unknown Daihon speaker"));
         assert!(error.to_string().contains("だれ"));
+        let report = error.daihon_report().expect("structured Daihon report");
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].phase,
+            DaihonDiagnosticPhase::LoadSpeaker
+        );
+        assert_eq!(
+            report.diagnostics[0].script_path.as_deref(),
+            Some("scripts/reactions.daihon")
+        );
+        assert_eq!(report.diagnostics[0].line, Some(5));
         Ok(())
     }
 

@@ -287,6 +287,25 @@ fn print_world_pack_status(status: &WorldPackSelectionState) {
             status.last_load_error.as_deref().unwrap_or("unknown error")
         );
     }
+    let diagnostics = &status.daihon_diagnostics;
+    if diagnostics.is_empty() {
+        return;
+    }
+    println!("Daihon errors: {}", diagnostics.len());
+    for diagnostic in diagnostics.iter().take(4) {
+        println!(
+            "  - {} / {} / {}",
+            diagnostic.code,
+            diagnostic.script_path.as_deref().unwrap_or("unknown"),
+            diagnostic.message
+        );
+        if let (Some(line), Some(column)) = (diagnostic.line, diagnostic.column) {
+            println!("    at {line}:{column}");
+        }
+    }
+    if diagnostics.len() > 4 {
+        println!("  ... {} more", diagnostics.len() - 4);
+    }
 }
 
 fn print_snapshot_summary(snapshot: &ResidentSnapshot) {

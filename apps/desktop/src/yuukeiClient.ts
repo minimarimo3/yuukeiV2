@@ -25,6 +25,32 @@ export type WorldPackInstall = {
   lastLoadError?: string;
 };
 
+export type DaihonDiagnosticSeverity = "error" | "warning" | "info";
+
+export type DaihonDiagnosticPhase =
+  | "loadParse"
+  | "loadValidate"
+  | "loadSpeaker"
+  | "runtimeValidate"
+  | "runtimeExecute";
+
+export type DaihonDiagnosticEntry = {
+  phase: DaihonDiagnosticPhase;
+  severity: DaihonDiagnosticSeverity;
+  code: string;
+  message: string;
+  scriptPath?: string;
+  line?: number;
+  column?: number;
+  help?: string;
+  occurredAt?: string;
+  installId?: string;
+  worldPackId?: string;
+  packRoot?: string;
+  sourceEventType?: string;
+  sourceEventId?: string;
+};
+
 export type WorldPackSelectionState = {
   configuredInstallId: string;
   runningInstallId: string;
@@ -32,6 +58,7 @@ export type WorldPackSelectionState = {
   installs: WorldPackInstall[];
   fallbackActive: boolean;
   lastLoadError?: string;
+  daihonDiagnostics: DaihonDiagnosticEntry[];
   settingsPath: string;
 };
 
@@ -193,6 +220,9 @@ export type YuukeiClient = {
   ): Promise<ExtensionSettingsChangeResult>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
+  onWorldPackStatus(
+    callback: (status: WorldPackSelectionState) => void
+  ): Promise<() => void>;
   onAssetsChanged(
     callback: (catalog: ActorSurfaceAssetCatalog) => void
   ): Promise<() => void>;
@@ -269,6 +299,15 @@ export const tauriYuukeiClient: YuukeiClient = {
     const unlisten = await listen<ResidentSnapshot>("yuukei-snapshot", (event) => {
       callback(event.payload);
     });
+    return unlisten;
+  },
+  onWorldPackStatus: async (callback) => {
+    const unlisten = await listen<WorldPackSelectionState>(
+      "yuukei-world-pack-status",
+      (event) => {
+        callback(event.payload);
+      }
+    );
     return unlisten;
   },
   onAssetsChanged: async (callback) => {

@@ -492,6 +492,112 @@ input {
   line-height: 1.4;
 }
 
+.daihon-diagnostics {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  max-width: 860px;
+}
+
+.daihon-diagnostics-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.daihon-diagnostics-head h3 {
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.daihon-diagnostics-head button {
+  min-width: 82px;
+  height: 30px;
+  border: 1px solid #fecdca;
+  border-radius: var(--radius);
+  padding: 0 10px;
+  background: #fff5f5;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.daihon-diagnostic-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.daihon-diagnostic-row {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid #fecdca;
+  border-radius: var(--radius);
+  padding: 10px 11px;
+  background: #fffafa;
+}
+
+.daihon-diagnostic-row strong {
+  color: #7a271a;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.daihon-diagnostic-row small,
+.daihon-diagnostic-row p {
+  margin: 0;
+  color: #912018;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.daihon-diagnostic-row.is-warning {
+  border-color: #fedf89;
+  background: #fffbeb;
+}
+
+.daihon-diagnostic-row.is-warning strong,
+.daihon-diagnostic-row.is-warning small,
+.daihon-diagnostic-row.is-warning p {
+  color: #92400e;
+}
+
+.daihon-diagnostic-row.is-info {
+  border-color: #b9e6fe;
+  background: #f0f9ff;
+}
+
+.daihon-diagnostic-row.is-info strong,
+.daihon-diagnostic-row.is-info small,
+.daihon-diagnostic-row.is-info p {
+  color: #175cd3;
+}
+
+.daihon-diagnostic-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.daihon-diagnostic-meta span {
+  overflow-wrap: anywhere;
+}
+
 .settings-note {
   max-width: 820px;
   margin: 9px 0 0;

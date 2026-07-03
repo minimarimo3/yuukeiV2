@@ -105,12 +105,11 @@ async fn attach_surface(
     {
         let mut surface_attached = state.surface_attached.lock().await;
         if !*surface_attached {
-            let session = tauri_surface_session(runtime.device_id());
-            runtime.attach_surface(session).await.map_err(to_message)?;
+            attach_tauri_surface_or_status(&app, &runtime).await?;
             *surface_attached = true;
         }
     }
-    ensure_presence_loop(&state, &runtime).await?;
+    ensure_presence_loop(&app, &state, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.emit_state(&app)?;
@@ -202,10 +201,16 @@ async fn send_conversation_text(
     text: String,
 ) -> Result<Vec<RuntimeCommand>, String> {
     let runtime = state.runtime.lock().await.clone();
-    let commands = runtime
+    let commands = match runtime
         .send_conversation_text(TAURI_SURFACE_ID, &text)
         .await
-        .map_err(to_message)?;
+    {
+        Ok(commands) => commands,
+        Err(error) => {
+            emit_world_pack_status(&app, &runtime.world_pack_status())?;
+            return Err(to_message(error));
+        }
+    };
     let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     Ok(commands)
@@ -218,10 +223,16 @@ async fn send_avatar_gesture_poke(
     gesture: DesktopAvatarGesturePoke,
 ) -> Result<Vec<RuntimeCommand>, String> {
     let runtime = state.runtime.lock().await.clone();
-    let commands = runtime
+    let commands = match runtime
         .send_avatar_gesture_poke(TAURI_SURFACE_ID, gesture.into())
         .await
-        .map_err(to_message)?;
+    {
+        Ok(commands) => commands,
+        Err(error) => {
+            emit_world_pack_status(&app, &runtime.world_pack_status())?;
+            return Err(to_message(error));
+        }
+    };
     let snapshot = runtime.snapshot().map_err(to_message)?;
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     Ok(commands)
@@ -233,10 +244,16 @@ async fn select_world_pack_directory(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<WorldPackSwitchResult, String> {
-    let runtime = LocalYuukeiRuntime::select_world_pack_directory_in(state.env.clone(), path)
-        .await
-        .map_err(to_message)?;
-    replace_runtime(app, state, runtime).await
+    match LocalYuukeiRuntime::select_world_pack_directory_in(state.env.clone(), &path).await {
+        Ok(runtime) => replace_runtime(app, state, runtime).await,
+        Err(error) => {
+            let current = state.runtime.lock().await.clone();
+            let _ = current
+                .record_session_daihon_diagnostics_from_error(&error, Some(Path::new(&path)));
+            emit_world_pack_status(&app, &current.world_pack_status())?;
+            Err(to_message(error))
+        }
+    }
 }
 
 #[tauri::command]
@@ -646,11 +663,8 @@ async fn replace_runtime(
 ) -> Result<WorldPackSwitchResult, String> {
     let asset_index = build_pack_asset_index(&runtime)?;
     let asset_catalog = desktop_actor_surface_assets(&runtime);
-    runtime
-        .attach_surface(tauri_surface_session(runtime.device_id()))
-        .await
-        .map_err(to_message)?;
-    runtime.emit_app_startup().await.map_err(to_message)?;
+    attach_tauri_surface_or_status(&app, &runtime).await?;
+    emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
     let next_presence_loop = runtime.spawn_presence_loop();
@@ -693,6 +707,7 @@ async fn replace_runtime(
     state.stage.sync_surfaces(&app, &asset_catalog)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
+    emit_world_pack_status(&app, &status)?;
 
     Ok(WorldPackSwitchResult { status, snapshot })
 }
@@ -719,15 +734,13 @@ async fn replace_runtime_snapshot(
 ) -> Result<ResidentSnapshot, String> {
     let asset_index = build_pack_asset_index(&runtime)?;
     let asset_catalog = desktop_actor_surface_assets(&runtime);
-    runtime
-        .attach_surface(tauri_surface_session(runtime.device_id()))
-        .await
-        .map_err(to_message)?;
-    runtime.emit_app_startup().await.map_err(to_message)?;
+    attach_tauri_surface_or_status(&app, &runtime).await?;
+    emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
     let next_presence_loop = runtime.spawn_presence_loop();
     let next_power_observer = PowerObserver::new(runtime.clone());
+    let status = runtime.world_pack_status();
 
     {
         let mut current = state.runtime.lock().await;
@@ -765,20 +778,58 @@ async fn replace_runtime_snapshot(
     state.stage.sync_surfaces(&app, &asset_catalog)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
+    emit_world_pack_status(&app, &status)?;
 
     Ok(snapshot)
 }
 
 async fn ensure_presence_loop(
+    app: &AppHandle,
     state: &State<'_, AppState>,
     runtime: &LocalYuukeiRuntime,
 ) -> Result<(), String> {
-    runtime.emit_app_startup().await.map_err(to_message)?;
+    emit_app_startup_or_status(app, runtime).await?;
     let mut presence_loop = state.presence_loop.lock().await;
     if presence_loop.is_none() {
         *presence_loop = Some(runtime.spawn_presence_loop());
     }
     Ok(())
+}
+
+async fn attach_tauri_surface_or_status(
+    app: &AppHandle,
+    runtime: &LocalYuukeiRuntime,
+) -> Result<(), String> {
+    match runtime
+        .attach_surface(tauri_surface_session(runtime.device_id()))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.daihon_report().is_some() => {
+            emit_world_pack_status(app, &runtime.world_pack_status())?;
+            Ok(())
+        }
+        Err(error) => Err(to_message(error)),
+    }
+}
+
+async fn emit_app_startup_or_status(
+    app: &AppHandle,
+    runtime: &LocalYuukeiRuntime,
+) -> Result<(), String> {
+    match runtime.emit_app_startup().await {
+        Ok(_) => Ok(()),
+        Err(error) if error.daihon_report().is_some() => {
+            emit_world_pack_status(app, &runtime.world_pack_status())?;
+            Ok(())
+        }
+        Err(error) => Err(to_message(error)),
+    }
+}
+
+fn emit_world_pack_status(app: &AppHandle, status: &WorldPackSelectionState) -> Result<(), String> {
+    app.emit("yuukei-world-pack-status", status)
+        .map_err(to_message)
 }
 
 fn spawn_command_forwarder(

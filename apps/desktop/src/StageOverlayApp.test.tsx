@@ -172,6 +172,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
+    onWorldPackStatus: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined)
   };

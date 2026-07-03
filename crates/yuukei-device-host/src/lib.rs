@@ -21,8 +21,8 @@ use yuukei_protocol::{
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{
-    ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, WorldError, WorldPack,
-    YuukeiDaihonAdapter,
+    ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, DaihonDiagnosticEntry, WorldError,
+    WorldPack, YuukeiDaihonAdapter,
 };
 
 mod extension_settings;
@@ -61,9 +61,27 @@ pub enum DeviceHostError {
     ExtensionSettings(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
+    #[error("Daihon diagnostic state lock is poisoned")]
+    DaihonDiagnosticState,
 }
 
 pub type Result<T> = std::result::Result<T, DeviceHostError>;
+
+impl DeviceHostError {
+    pub fn daihon_report(&self) -> Option<&yuukei_world::DaihonDiagnosticReport> {
+        match self {
+            Self::ResidentHome(error) => error.daihon_report(),
+            Self::World(error) => error.daihon_report(),
+            Self::Io(_)
+            | Self::Json(_)
+            | Self::EventLog(_)
+            | Self::AppLog(_)
+            | Self::ExtensionSettings(_)
+            | Self::PresenceState
+            | Self::DaihonDiagnosticState => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimePaths {
@@ -229,6 +247,7 @@ pub struct LocalYuukeiRuntime {
     world_pack_status: WorldPackSelectionState,
     actor_surface_assets: ActorSurfaceAssetCatalog,
     presence_state: Arc<Mutex<PresenceState>>,
+    session_daihon_diagnostics: Arc<Mutex<Vec<DaihonDiagnosticEntry>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -273,9 +292,12 @@ impl LocalYuukeiRuntime {
         {
             Ok(runtime) => Ok(runtime),
             Err(error) if requested_install.install_id != DEFAULT_WORLD_PACK_INSTALL_ID => {
+                let daihon_diagnostics =
+                    diagnostics_from_error_for_install(&error, &requested_install);
                 registry.mark_load_error(&requested_install.install_id, error.to_string())?;
                 let default_install = registry.default_install()?;
-                let status = registry.selection_state(&default_install, true);
+                let mut status = registry.selection_state(&default_install, true);
+                status.daihon_diagnostics = daihon_diagnostics;
                 Self::open_with_status(registry.config_for_install(&default_install), status).await
             }
             Err(error) => Err(error),
@@ -430,6 +452,7 @@ impl LocalYuukeiRuntime {
             installs: vec![install],
             fallback_active: false,
             last_load_error: None,
+            daihon_diagnostics: Vec::new(),
             settings_path: config.data_dir.join("settings").join("world-packs.json"),
         };
         Self::open_with_status(config, status).await
@@ -437,7 +460,7 @@ impl LocalYuukeiRuntime {
 
     async fn open_with_status(
         config: LocalRuntimeConfig,
-        world_pack_status: WorldPackSelectionState,
+        mut world_pack_status: WorldPackSelectionState,
     ) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
         fs::create_dir_all(&config.extension_root)?;
@@ -446,11 +469,31 @@ impl LocalYuukeiRuntime {
         }
         let logger = AppLogger::open(&config.app_log_path)?;
         let paths = config.paths();
+        let initial_session_daihon_diagnostics =
+            std::mem::take(&mut world_pack_status.daihon_diagnostics);
+        if !initial_session_daihon_diagnostics.is_empty() {
+            let _ = record_daihon_diagnostics_to_app_log(
+                &logger,
+                "world-pack.fallback-load",
+                &initial_session_daihon_diagnostics,
+            );
+        }
         logger.record("runtime.open.request", "device-host", paths_payload(&paths))?;
 
         let world = match WorldPack::load_from_dir(&config.world_root) {
             Ok(world) => world,
             Err(error) => {
+                if let Some(report) = error.daihon_report() {
+                    let diagnostics = diagnostics_for_install(
+                        &world_pack_status.active_install,
+                        report.diagnostics.clone(),
+                    );
+                    let _ = record_daihon_diagnostics_to_app_log(
+                        &logger,
+                        "world-pack.load",
+                        &diagnostics,
+                    );
+                }
                 let _ = logger.record(
                     "runtime.open.error",
                     "device-host",
@@ -484,6 +527,17 @@ impl LocalYuukeiRuntime {
         {
             Ok(home) => Arc::new(home),
             Err(error) => {
+                if let Some(report) = error.daihon_report() {
+                    let diagnostics = diagnostics_for_install(
+                        &world_pack_status.active_install,
+                        report.diagnostics.clone(),
+                    );
+                    let _ = record_daihon_diagnostics_to_app_log(
+                        &logger,
+                        "resident-home.load",
+                        &diagnostics,
+                    );
+                }
                 let _ = logger.record(
                     "runtime.open.error",
                     "device-host",
@@ -531,6 +585,7 @@ impl LocalYuukeiRuntime {
             world_pack_status,
             actor_surface_assets,
             presence_state: Arc::new(Mutex::new(PresenceState::default())),
+            session_daihon_diagnostics: Arc::new(Mutex::new(initial_session_daihon_diagnostics)),
         };
         runtime.record_world_pack_activated().await?;
         Ok(runtime)
@@ -565,7 +620,9 @@ impl LocalYuukeiRuntime {
     }
 
     pub fn world_pack_status(&self) -> WorldPackSelectionState {
-        self.world_pack_status.clone()
+        let mut status = self.world_pack_status.clone();
+        status.daihon_diagnostics = self.session_daihon_diagnostics();
+        status
     }
 
     pub fn actor_surface_assets(&self) -> ActorSurfaceAssetCatalog {
@@ -575,6 +632,36 @@ impl LocalYuukeiRuntime {
     pub fn extension_settings(&self) -> Result<ExtensionSettingsState> {
         ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
             .map(|registry| registry.state())
+    }
+
+    pub fn record_session_daihon_diagnostics_from_error(
+        &self,
+        error: &DeviceHostError,
+        pack_root: Option<&Path>,
+    ) -> Result<usize> {
+        let Some(report) = error.daihon_report() else {
+            return Ok(0);
+        };
+        let diagnostics = match pack_root {
+            Some(pack_root) => diagnostics_for_pack_root(pack_root, report.diagnostics.clone()),
+            None => diagnostics_for_install(
+                &self.world_pack_status.active_install,
+                report.diagnostics.clone(),
+            ),
+        };
+        let count = diagnostics.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        {
+            let mut session = self
+                .session_daihon_diagnostics
+                .lock()
+                .map_err(|_| DeviceHostError::DaihonDiagnosticState)?;
+            session.extend(diagnostics.clone());
+        }
+        record_daihon_diagnostics_to_app_log(&self.logger, "world-pack.selection", &diagnostics)?;
+        Ok(count)
     }
 
     pub async fn attach_surface(&self, session: SurfaceSession) -> Result<ResidentSnapshot> {
@@ -608,6 +695,7 @@ impl LocalYuukeiRuntime {
                 Ok(snapshot)
             }
             Err(error) => {
+                self.record_runtime_daihon_diagnostics("surface.attach", &error);
                 let _ = self.logger.record(
                     "surface.attach.error",
                     "resident-home",
@@ -666,6 +754,7 @@ impl LocalYuukeiRuntime {
                 Ok(commands)
             }
             Err(error) => {
+                self.record_runtime_daihon_diagnostics("conversation.text", &error);
                 let _ = self.logger.record(
                     "runtime.commands.error",
                     "resident-home",
@@ -732,6 +821,7 @@ impl LocalYuukeiRuntime {
                 Ok(commands)
             }
             Err(error) => {
+                self.record_runtime_daihon_diagnostics("avatar.gesture.poke", &error);
                 let _ = self.logger.record(
                     "runtime.commands.error",
                     "resident-home",
@@ -874,6 +964,7 @@ impl LocalYuukeiRuntime {
                 Ok(commands)
             }
             Err(error) => {
+                self.record_runtime_daihon_diagnostics(kind, &error);
                 let _ = self.logger.record(
                     "runtime.commands.error",
                     "resident-home",
@@ -882,6 +973,46 @@ impl LocalYuukeiRuntime {
                 Err(error.into())
             }
         }
+    }
+
+    fn session_daihon_diagnostics(&self) -> Vec<DaihonDiagnosticEntry> {
+        let mut diagnostics = self
+            .session_daihon_diagnostics
+            .lock()
+            .map(|diagnostics| diagnostics.clone())
+            .unwrap_or_default();
+        diagnostics.extend(
+            self.home
+                .daihon_diagnostics()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|diagnostic| {
+                    enrich_diagnostic_for_install(
+                        diagnostic,
+                        &self.world_pack_status.active_install,
+                        None,
+                    )
+                }),
+        );
+        diagnostics.sort_by(|left, right| {
+            left.occurred_at
+                .cmp(&right.occurred_at)
+                .then_with(|| left.script_path.cmp(&right.script_path))
+                .then_with(|| left.line.cmp(&right.line))
+                .then_with(|| left.column.cmp(&right.column))
+        });
+        diagnostics
+    }
+
+    fn record_runtime_daihon_diagnostics(&self, context: &str, error: &ResidentHomeError) {
+        let Some(report) = error.daihon_report() else {
+            return;
+        };
+        let diagnostics = diagnostics_for_install(
+            &self.world_pack_status.active_install,
+            report.diagnostics.clone(),
+        );
+        let _ = record_daihon_diagnostics_to_app_log(&self.logger, context, &diagnostics);
     }
 
     pub fn export_event_log_jsonl(&self, path: impl AsRef<Path>) -> Result<usize> {
@@ -1301,6 +1432,92 @@ fn error_payload(stage: &str, error: &dyn std::fmt::Display) -> JsonMap {
         ("stage".to_string(), json!(stage)),
         ("message".to_string(), json!(error.to_string())),
     ])
+}
+
+fn diagnostics_from_error_for_install(
+    error: &DeviceHostError,
+    install: &WorldPackInstall,
+) -> Vec<DaihonDiagnosticEntry> {
+    error
+        .daihon_report()
+        .map(|report| diagnostics_for_install(install, report.diagnostics.clone()))
+        .unwrap_or_default()
+}
+
+fn diagnostics_for_install(
+    install: &WorldPackInstall,
+    diagnostics: Vec<DaihonDiagnosticEntry>,
+) -> Vec<DaihonDiagnosticEntry> {
+    let occurred_at = now_timestamp();
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| enrich_diagnostic_for_install(diagnostic, install, Some(&occurred_at)))
+        .collect()
+}
+
+fn diagnostics_for_pack_root(
+    pack_root: &Path,
+    diagnostics: Vec<DaihonDiagnosticEntry>,
+) -> Vec<DaihonDiagnosticEntry> {
+    let occurred_at = now_timestamp();
+    let pack_root = display_path(pack_root);
+    diagnostics
+        .into_iter()
+        .map(|mut diagnostic| {
+            if diagnostic.occurred_at.is_none() {
+                diagnostic.occurred_at = Some(occurred_at.clone());
+            }
+            if diagnostic.pack_root.is_none() {
+                diagnostic.pack_root = Some(pack_root.clone());
+            }
+            diagnostic
+        })
+        .collect()
+}
+
+fn enrich_diagnostic_for_install(
+    mut diagnostic: DaihonDiagnosticEntry,
+    install: &WorldPackInstall,
+    occurred_at: Option<&str>,
+) -> DaihonDiagnosticEntry {
+    if diagnostic.occurred_at.is_none() {
+        if let Some(occurred_at) = occurred_at {
+            diagnostic.occurred_at = Some(occurred_at.to_string());
+        }
+    }
+    if diagnostic.install_id.is_none() {
+        diagnostic.install_id = Some(install.install_id.clone());
+    }
+    if diagnostic.world_pack_id.is_none() {
+        diagnostic.world_pack_id = Some(install.world_pack_id.clone());
+    }
+    if diagnostic.pack_root.is_none() {
+        diagnostic.pack_root = Some(display_path(&install.canonical_root));
+    }
+    diagnostic
+}
+
+fn record_daihon_diagnostics_to_app_log(
+    logger: &AppLogger,
+    context: &str,
+    diagnostics: &[DaihonDiagnosticEntry],
+) -> Result<()> {
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    logger.record(
+        "daihon.diagnostics",
+        "device-host",
+        JsonMap::from([
+            ("context".to_string(), json!(context)),
+            ("count".to_string(), json!(diagnostics.len())),
+            (
+                "diagnostics".to_string(),
+                serde_json::to_value(diagnostics)?,
+            ),
+        ]),
+    )?;
+    Ok(())
 }
 
 async fn load_trusted_extensions(
@@ -1812,6 +2029,63 @@ mod tests {
         assert!(status.fallback_active);
         assert_eq!(status.configured_install_id, external_install_id);
         assert!(status.last_load_error.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_saved_external_daihon_is_reported_in_session_status_and_app_log() -> Result<()>
+    {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let external_root = workspace.path().join("external-pack");
+        write_pack(&external_root, "external-yuukei", "External Yuukei", &[])?;
+        let env = test_env(workspace.path(), data.path());
+
+        let selected =
+            LocalYuukeiRuntime::select_world_pack_directory_in(env.clone(), &external_root).await?;
+        let external_install_id = selected.install_id().to_string();
+        fs::write(
+            external_root
+                .join("scripts")
+                .join("desktop_reactions.daihon"),
+            r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: だれ
+「届きません。」
+"#,
+        )?;
+
+        let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let status = reopened.world_pack_status();
+
+        assert_eq!(reopened.install_id(), DEFAULT_WORLD_PACK_INSTALL_ID);
+        assert!(status.fallback_active);
+        assert_eq!(status.configured_install_id, external_install_id);
+        assert_eq!(status.daihon_diagnostics.len(), 1);
+        assert_eq!(
+            status.daihon_diagnostics[0].install_id.as_deref(),
+            Some(external_install_id.as_str())
+        );
+        let external_root = display_path(fs::canonicalize(&external_root)?);
+        assert_eq!(
+            status.daihon_diagnostics[0].pack_root.as_deref(),
+            Some(external_root.as_str())
+        );
+        assert!(status.daihon_diagnostics[0]
+            .message
+            .contains("unknown Daihon speaker"));
+
+        let raw_log = fs::read_to_string(data.path().join("app-activity.jsonl"))?;
+        assert!(raw_log.contains("\"type\":\"daihon.diagnostics\""));
+        assert!(raw_log.contains("\"context\":\"world-pack.fallback-load\""));
         Ok(())
     }
 
