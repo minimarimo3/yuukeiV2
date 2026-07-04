@@ -1614,6 +1614,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_pack_sample_dispatches_poke_dialogue_from_touched_actor() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        assert!(world.allows_signal("avatar.gesture.poke"));
+
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut yuukei_poke =
+            RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+        yuukei_poke.id = "evt_poke_yuukei".to_string();
+        yuukei_poke.actor_id = Some("yuukei".to_string());
+        yuukei_poke
+            .payload
+            .insert("hitZoneId".to_string(), json!("head"));
+        let result = adapter.dispatch(&yuukei_poke, &world).await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("yuukei dialogue");
+        assert_eq!(dialogue.payload["speakerId"], "yuukei");
+        assert_eq!(
+            dialogue
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("yuukei")
+        );
+
+        let mut partner_poke =
+            RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+        partner_poke.id = "evt_poke_partner".to_string();
+        partner_poke.actor_id = Some("partner".to_string());
+        partner_poke
+            .payload
+            .insert("hitZoneId".to_string(), json!("head"));
+        let result = adapter.dispatch(&partner_poke, &world).await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("partner dialogue");
+        assert_eq!(dialogue.payload["speakerId"], "partner");
+        assert_eq!(
+            dialogue
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("partner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_adapter_ignores_disallowed_signal() -> Result<()> {
         let world = pack();
         let adapter = YuukeiDaihonAdapter::default();

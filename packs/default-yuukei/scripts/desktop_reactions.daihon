@@ -16,10 +16,17 @@
 ＜表情 笑顔＞
 「聞こえています。＜ユーザー発言＞」
 
-### poke head
+### poke yuukei head
 合図: ＠住人_つつく
-条件:（入力#hitZoneId = 「head」）
+条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「yuukei」）
 話者: ゆ
+＜表情 照れ＞
+「わ、頭は急に触らないでください……！」
+
+### poke partner head
+合図: ＠住人_つつく
+条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「partner」）
+話者: パ
 ＜表情 照れ＞
 「わ、頭は急に触らないでください……！」
 
