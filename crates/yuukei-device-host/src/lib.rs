@@ -515,7 +515,8 @@ impl LocalYuukeiRuntime {
             }
         };
         let extension_settings = config.extension_settings_registry()?;
-        let capabilities = build_extension_capability_router(&extension_settings, &logger)?;
+        let capabilities =
+            build_extension_capability_router(&extension_settings, &logger, &config.data_dir)?;
         let home = match ResidentHome::with_parts(
             &config.resident_id,
             world,
@@ -547,7 +548,7 @@ impl LocalYuukeiRuntime {
             }
         };
         let loaded_extensions =
-            load_trusted_extensions(&extension_settings, &home, &logger).await?;
+            load_trusted_extensions(&extension_settings, &home, &logger, &config.data_dir).await?;
 
         logger.record(
             "runtime.open.ready",
@@ -1353,6 +1354,10 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
     }
 }
 
+fn extension_data_dir(data_dir: &Path, extension_id: &str) -> PathBuf {
+    data_dir.join("extension-data").join(extension_id)
+}
+
 fn actor_surface_asset_catalog(world: &WorldPack) -> ActorSurfaceAssetCatalog {
     ActorSurfaceAssetCatalog {
         world_pack_id: world.id.clone(),
@@ -1524,6 +1529,7 @@ async fn load_trusted_extensions(
     extension_settings: &ExtensionSettingsRegistry,
     home: &ResidentHome,
     logger: &AppLogger,
+    data_dir: &Path,
 ) -> Result<usize> {
     let mut loaded = 0;
     let hook_order = extension_settings.hook_order(&ExtensionHookPoint::BeforeCommandEmit);
@@ -1532,11 +1538,16 @@ async fn load_trusted_extensions(
             ExtensionRuntimeEntry::Ready(install) => {
                 let extension_id = install.extension_id.clone();
                 let manifest_path = install.manifest_path.clone();
-                home.register_extension(ProcessHookExtension::from_installed_manifest(
-                    install.manifest,
-                    install.install_dir,
-                    install.enabled,
-                ))
+                let extension_data_dir = extension_data_dir(data_dir, &extension_id);
+                fs::create_dir_all(&extension_data_dir)?;
+                home.register_extension(
+                    ProcessHookExtension::from_installed_manifest(
+                        install.manifest,
+                        install.install_dir,
+                        install.enabled,
+                    )
+                    .with_data_dir(extension_data_dir),
+                )
                 .await?;
                 loaded += 1;
                 logger.record(
@@ -1575,6 +1586,7 @@ async fn load_trusted_extensions(
 fn build_extension_capability_router(
     extension_settings: &ExtensionSettingsRegistry,
     logger: &AppLogger,
+    data_dir: &Path,
 ) -> Result<CapabilityRouter> {
     let mut router = CapabilityRouter::new();
     for entry in extension_settings.runtime_entries() {
@@ -1583,12 +1595,17 @@ fn build_extension_capability_router(
                 if install.manifest.capabilities.is_empty() {
                     continue;
                 }
+                let extension_data_dir = extension_data_dir(data_dir, &install.extension_id);
+                fs::create_dir_all(&extension_data_dir)?;
                 router
-                    .register(ProcessHookExtension::from_installed_manifest(
-                        install.manifest,
-                        install.install_dir,
-                        install.enabled,
-                    ))
+                    .register(
+                        ProcessHookExtension::from_installed_manifest(
+                            install.manifest,
+                            install.install_dir,
+                            install.enabled,
+                        )
+                        .with_data_dir(extension_data_dir),
+                    )
                     .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
             }
             ExtensionRuntimeEntry::Error(error) => {
@@ -1623,6 +1640,7 @@ mod tests {
 
     use serde_json::json;
     use tempfile::tempdir;
+    use yuukei_protocol::NewEventLogRecord;
 
     use super::*;
 
@@ -2359,6 +2377,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_extension_receives_persistent_extension_data_dir() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_llm_fallback_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let source = workspace.path().join("downloads").join("memory-env");
+        write_extension_data_dir_probe_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "環境変数は？")
+            .await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.payload["text"] == json!("data dir ok")));
+
+        let expected_dir = data.path().join("extension-data").join("memory-env");
+        assert!(expected_dir.is_dir());
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        let result = records
+            .iter()
+            .find(|record| {
+                record.kind == "capability.invocation.result"
+                    && record.payload["extensionId"] == json!("memory-env")
+            })
+            .expect("capability result");
+        assert_eq!(result.payload["metadata"]["exists"], json!(true));
+        assert_eq!(
+            result.payload["metadata"]["dataDir"],
+            json!(expected_dir.to_string_lossy().to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_intelligence_process_generates_dialogue_through_device_host() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
@@ -2436,6 +2494,62 @@ mod tests {
                 && record.payload["extensionId"] == json!("yuukei-intelligence")
                 && record.payload["capability"] == json!("dialogue.interpret")
                 && record.payload["output"]["choice"] == json!("いいえ")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_intelligence_process_indexes_and_retrieves_memory_through_device_host(
+    ) -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_llm_fallback_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let source = workspace
+            .path()
+            .join("downloads")
+            .join("yuukei-intelligence");
+        write_yuukei_intelligence_extension_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let mut yesterday = RuntimeEvent::new("conversation.text", "surface", DEFAULT_RESIDENT_ID);
+        yesterday.timestamp = (Local::now() - chrono::Duration::days(1)).to_rfc3339();
+        yesterday
+            .payload
+            .insert("text".to_string(), json!("唐揚げを食べた"));
+        runtime
+            .home()
+            .event_log()
+            .append(NewEventLogRecord::from(yesterday))?;
+
+        runtime.emit_app_startup().await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "唐揚げのこと覚えてる？")
+            .await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("generated dialogue command");
+        assert_eq!(
+            dialogue.payload["text"],
+            json!("覚えています。唐揚げが好きなんですよね。")
+        );
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["capability"] == json!("memory.index")
+                && record.payload["output"]["indexed"] == json!(true)
+        }));
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["capability"] == json!("memory.retrieve")
+                && record.payload["output"]["memories"][0]["text"] == json!("唐揚げが好き。")
         }));
         Ok(())
     }
@@ -2956,6 +3070,47 @@ process.stdout.write(JSON.stringify({{
         Ok(())
     }
 
+    fn write_extension_data_dir_probe_source(root: &Path) -> Result<()> {
+        fs::create_dir_all(root)?;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "memory-env",
+                "displayName": "Memory Env Probe",
+                "capabilities": [
+                    {
+                        "capability": "dialogue.generate",
+                        "methods": ["generate"]
+                    }
+                ],
+                "process": {
+                    "command": "node",
+                    "args": ["probe.js"]
+                }
+            }))?,
+        )?;
+        fs::write(
+            root.join("probe.js"),
+            r#"
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const dataDir = process.env.YUUKEI_EXTENSION_DATA_DIR ?? "";
+process.stdout.write(JSON.stringify({
+  invocationId: input.id,
+  extensionId: "memory-env",
+  capability: input.capability,
+  output: { speak: true, text: "data dir ok" },
+  metadata: {
+    dataDir,
+    exists: dataDir ? fs.existsSync(dataDir) : false
+  }
+}));
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_yuukei_intelligence_extension_source(root: &Path) -> Result<()> {
         fs::create_dir_all(root)?;
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2987,6 +3142,37 @@ globalThis.fetch = async (url, init) => {
         {
           message: {
             content: "{\"choice\":\"いいえ\",\"confidence\":0.9}"
+          }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }
+  if (bodyText.includes("memory.index provider") || bodyText.includes("newFacts")) {
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "{\"diary\":\"ユーザーは唐揚げの話をした。\",\"newFacts\":[\"唐揚げが好き。\"]}"
+          }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }
+  if (bodyText.includes("唐揚げのこと覚えてる？")) {
+    if (!bodyText.includes("唐揚げが好き。")) {
+      throw new Error("prompt did not include retrieved memory");
+    }
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "{\"speak\":true,\"text\":\"覚えています。唐揚げが好きなんですよね。\"}"
           }
         }
       ]
@@ -3031,6 +3217,14 @@ globalThis.fetch = async (url, init) => {
                     {
                         "capability": "dialogue.interpret",
                         "methods": ["interpret"]
+                    },
+                    {
+                        "capability": "memory.index",
+                        "methods": ["index"]
+                    },
+                    {
+                        "capability": "memory.retrieve",
+                        "methods": ["retrieve"]
                     }
                 ],
                 "process": {

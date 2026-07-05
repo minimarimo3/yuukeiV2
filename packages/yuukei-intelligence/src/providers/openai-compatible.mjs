@@ -2,11 +2,15 @@ import {
   buildDialoguePrompt,
   buildInterpretPrompt,
   buildInterpretSystemPrompt,
+  buildMemoryIndexPrompt,
+  buildMemoryIndexSystemPrompt,
   buildSystemPrompt
 } from "../prompt.mjs";
 import {
   parseJsonInterpretOutput,
+  parseJsonMemoryIndexOutput,
   parseJsonOutput,
+  memoryIndexFailureOutput,
   silentOutput,
   unknownChoiceOutput
 } from "../output.mjs";
@@ -112,6 +116,52 @@ export async function interpretWithOpenAiCompatible(input, config) {
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
     return { output: unknownChoiceOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+}
+
+export async function summarizeMemoryIndexWithOpenAiCompatible(input, config) {
+  const providerConfig = config.openaiCompatible ?? {};
+  const baseUrl = trimTrailingSlash(providerConfig.baseUrl ?? "http://127.0.0.1:1234/v1");
+  const model = providerConfig.model ?? "local-model";
+  if (!baseUrl || !model) {
+    console.error("yuukei-intelligence: openai-compatible baseUrl or model is not configured");
+    return { output: memoryIndexFailureOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+
+  const headers = { "content-type": "application/json" };
+  if (providerConfig.apiKey) {
+    headers.authorization = `Bearer ${providerConfig.apiKey}`;
+  }
+  const body = {
+    model,
+    messages: [
+      { role: "system", content: buildMemoryIndexSystemPrompt() },
+      { role: "user", content: buildMemoryIndexPrompt(input) }
+    ],
+    temperature: 0.3
+  };
+
+  try {
+    const response = await postChatCompletion(
+      `${baseUrl}/chat/completions`,
+      headers,
+      body,
+      config.timeoutMs
+    );
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: openai-compatible API error ${response.status}`);
+      return { output: memoryIndexFailureOutput(), metadata: { provider: "openai-compatible", model } };
+    }
+    const json = await response.json();
+    const text = json?.choices?.[0]?.message?.content;
+    const output = parseJsonMemoryIndexOutput(text);
+    return {
+      output: output ?? memoryIndexFailureOutput(),
+      metadata: { provider: "openai-compatible", model }
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
+    return { output: memoryIndexFailureOutput(), metadata: { provider: "openai-compatible", model } };
   }
 }
 

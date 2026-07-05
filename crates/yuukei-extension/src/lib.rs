@@ -557,6 +557,7 @@ pub struct ProcessCommandSpec {
 pub struct ProcessHookExtension {
     manifest: ProcessExtensionManifest,
     install_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     enabled: bool,
 }
 
@@ -565,6 +566,7 @@ impl ProcessHookExtension {
         Self {
             manifest,
             install_dir: None,
+            data_dir: None,
             enabled: true,
         }
     }
@@ -577,8 +579,14 @@ impl ProcessHookExtension {
         Self {
             manifest,
             install_dir: Some(install_dir.into()),
+            data_dir: None,
             enabled,
         }
+    }
+
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
     }
 }
 
@@ -605,6 +613,9 @@ impl YuukeiExtension for ProcessHookExtension {
         let mut command = Command::new(command_path);
         command.args(&self.manifest.process.args);
         command.kill_on_drop(true);
+        if let Some(data_dir) = &self.data_dir {
+            command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        }
         if let Some(cwd) = self.resolved_cwd() {
             command.current_dir(cwd);
         }
@@ -696,6 +707,9 @@ impl ProcessHookExtension {
         let mut command = Command::new(command_path);
         command.args(&self.manifest.process.args);
         command.kill_on_drop(true);
+        if let Some(data_dir) = &self.data_dir {
+            command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        }
         if let Some(cwd) = self.resolved_cwd() {
             command.current_dir(cwd);
         }

@@ -18,6 +18,18 @@
       "methods": [
         "interpret"
       ]
+    },
+    {
+      "capability": "memory.index",
+      "methods": [
+        "index"
+      ]
+    },
+    {
+      "capability": "memory.retrieve",
+      "methods": [
+        "retrieve"
+      ]
     }
   ],
   "process": {

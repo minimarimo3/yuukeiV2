@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -12,7 +12,8 @@ use tokio::{sync::broadcast, time::timeout};
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
-    DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
+    DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY, MEMORY_INDEX_CAPABILITY,
+    MEMORY_RETRIEVE_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -24,8 +25,10 @@ use yuukei_protocol::{
     DialogueGenerateConstraints, DialogueGenerateEvent, DialogueGenerateInput,
     DialogueGenerateOutput, DialogueGeneratePersona, DialogueGenerateRecentContext,
     DialogueInterpretInput, DialogueInterpretOutput, DialogueInterpretTextInput, EventLogRecord,
-    ExtensionHookPoint, JsonMap, NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent,
-    SignalAliasTable, SurfaceSession,
+    ExtensionHookPoint, JsonMap, MemoryIndexEvent, MemoryIndexInput, MemoryIndexOutput,
+    MemoryRetrieveInput, MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery,
+    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
+    SurfaceSession,
 };
 use yuukei_world::{
     DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonGenerateRequest,
@@ -57,6 +60,10 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
+const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MEMORY_INDEX_DAYS_PER_TRIGGER: usize = 7;
+const MEMORY_RETRIEVE_FACT_LIMIT: usize = 10;
+const MEMORY_RETRIEVE_EPISODE_LIMIT: usize = 5;
 const MAX_QUEUED_CONVERSATION_EVENTS_DURING_INTERPRET: usize = 16;
 const UNKNOWN_INTERPRETATION: &str = "不明";
 
@@ -735,6 +742,7 @@ impl ResidentHome {
     }
 
     async fn dispatch_recorded_event(&self, event: RuntimeEvent) -> Result<Vec<RuntimeCommand>> {
+        self.maybe_index_memory_for_trigger(&event).await?;
         let aliases = self.extension_signal_alias_table()?;
         if !self
             .world_pack
@@ -832,14 +840,16 @@ impl ResidentHome {
             return Ok(Vec::new());
         }
 
-        let input = self.dialogue_generate_input(event, &self.world_pack.default_actor_id, None)?;
+        let memories = self.retrieve_memories_for_dialogue_generate(event).await?;
+        let input =
+            self.dialogue_generate_input(event, &self.world_pack.default_actor_id, None, memories)?;
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
             capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
             method: "generate".to_string(),
             resident_id: event.resident_id.clone(),
             actor_id: Some(self.world_pack.default_actor_id.clone()),
-            input: json_map_from_value(serde_json::to_value(input)?),
+            input: json_map_omitting_null_values(serde_json::to_value(input)?),
             context: None,
         };
         self.record_capability_request(&invocation, event, None)?;
@@ -945,6 +955,7 @@ impl ResidentHome {
         event: &RuntimeEvent,
         actor_id: &str,
         instruction: Option<String>,
+        memories: Option<Vec<String>>,
     ) -> Result<DialogueGenerateInput> {
         let actor = self
             .world_pack
@@ -962,6 +973,7 @@ impl ResidentHome {
                 payload: event.payload.clone(),
             },
             instruction,
+            memories,
             persona: DialogueGeneratePersona {
                 actor_id: actor.id.clone(),
                 display_name: actor.display_name.clone(),
@@ -1255,6 +1267,176 @@ impl ResidentHome {
         Ok(())
     }
 
+    async fn maybe_index_memory_for_trigger(&self, trigger_event: &RuntimeEvent) -> Result<()> {
+        if !matches!(
+            trigger_event.kind.as_str(),
+            "app.startup" | "device.sleep.before"
+        ) {
+            return Ok(());
+        }
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        if !router.has_healthy_provider(MEMORY_INDEX_CAPABILITY) {
+            return Ok(());
+        }
+
+        let trigger_date =
+            event_record_date(&trigger_event.timestamp).unwrap_or_else(|| Utc::now().date_naive());
+        let records = self
+            .event_log
+            .read(EventLogQuery {
+                resident_id: Some(trigger_event.resident_id.clone()),
+                kind: None,
+                after_sequence: None,
+                limit: None,
+                extension_readable_only: false,
+            })?
+            .records;
+        let indexed_dates = indexed_memory_dates(&records);
+        let mut events_by_date: BTreeMap<NaiveDate, Vec<MemoryIndexEvent>> = BTreeMap::new();
+        for record in records {
+            let Some(date) = event_record_date(&record.timestamp) else {
+                continue;
+            };
+            if date >= trigger_date
+                || indexed_dates.contains(&date)
+                || !is_memory_index_event_kind(&record.kind)
+            {
+                continue;
+            }
+            events_by_date
+                .entry(date)
+                .or_default()
+                .push(MemoryIndexEvent {
+                    kind: record.kind,
+                    timestamp: record.timestamp,
+                    payload: major_payload(record.payload),
+                });
+        }
+
+        let mut targets = events_by_date.into_iter().collect::<Vec<_>>();
+        targets.reverse();
+        targets.truncate(MAX_MEMORY_INDEX_DAYS_PER_TRIGGER);
+        targets.reverse();
+
+        for (date, events) in targets {
+            if events.is_empty() {
+                continue;
+            }
+            let input = MemoryIndexInput {
+                resident_id: trigger_event.resident_id.clone(),
+                world_pack_id: self.world_pack.id.clone(),
+                date: date.to_string(),
+                events,
+            };
+            let invocation = CapabilityInvocation {
+                id: new_id("cap"),
+                capability: MEMORY_INDEX_CAPABILITY.to_string(),
+                method: "index".to_string(),
+                resident_id: trigger_event.resident_id.clone(),
+                actor_id: None,
+                input: json_map_from_value(serde_json::to_value(input)?),
+                context: None,
+            };
+            self.record_capability_request(&invocation, trigger_event, None)?;
+            let result = timeout(
+                DIALOGUE_INTERPRET_TIMEOUT,
+                router.invoke(invocation.clone()),
+            )
+            .await;
+            let Ok(Ok(result)) = result else {
+                return Ok(());
+            };
+            self.record_capability_result(
+                result.invocation_id,
+                result.extension_id,
+                result.capability,
+                result.output.clone(),
+                result.metadata,
+                trigger_event,
+                None,
+                None,
+            )?;
+            let output_value = Value::Object(result.output.into_iter().collect());
+            let Ok(output) = serde_json::from_value::<MemoryIndexOutput>(output_value) else {
+                return Ok(());
+            };
+            if !output.indexed {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    async fn retrieve_memories_for_dialogue_generate(
+        &self,
+        source_event: &RuntimeEvent,
+    ) -> Result<Option<Vec<String>>> {
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        if !router.has_healthy_provider(MEMORY_RETRIEVE_CAPABILITY) {
+            return Ok(None);
+        }
+        let query_text = source_event
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(&source_event.kind)
+            .to_string();
+        let input = MemoryRetrieveInput {
+            resident_id: source_event.resident_id.clone(),
+            world_pack_id: self.world_pack.id.clone(),
+            query: MemoryRetrieveQuery { text: query_text },
+            limits: MemoryRetrieveLimits {
+                facts: MEMORY_RETRIEVE_FACT_LIMIT,
+                episodes: MEMORY_RETRIEVE_EPISODE_LIMIT,
+            },
+        };
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: MEMORY_RETRIEVE_CAPABILITY.to_string(),
+            method: "retrieve".to_string(),
+            resident_id: source_event.resident_id.clone(),
+            actor_id: None,
+            input: json_map_omitting_null_values(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, source_event, None)?;
+        let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation.clone())).await;
+        let Ok(Ok(result)) = result else {
+            return Ok(None);
+        };
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output.clone(),
+            result.metadata,
+            source_event,
+            None,
+            None,
+        )?;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<MemoryRetrieveOutput>(output_value) else {
+            return Ok(None);
+        };
+        let memories = output
+            .memories
+            .into_iter()
+            .map(|memory| memory.text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>();
+        Ok((!memories.is_empty()).then_some(memories))
+    }
+
     async fn generate_dialogue_for_daihon(
         &self,
         source_event: &RuntimeEvent,
@@ -1283,6 +1465,8 @@ impl ResidentHome {
             source_event,
             &actor_id,
             Some(request.instruction.clone()),
+            self.retrieve_memories_for_dialogue_generate(source_event)
+                .await?,
         )?;
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
@@ -1609,6 +1793,16 @@ fn json_map_from_value(value: Value) -> JsonMap {
     }
 }
 
+fn json_map_omitting_null_values(value: Value) -> JsonMap {
+    match value {
+        Value::Object(map) => map
+            .into_iter()
+            .filter(|(_, value)| !value.is_null())
+            .collect(),
+        other => JsonMap::from([("value".to_string(), other)]),
+    }
+}
+
 fn generated_command(
     kind: impl Into<String>,
     source_event: &RuntimeEvent,
@@ -1643,6 +1837,9 @@ fn major_payload(payload: JsonMap) -> JsonMap {
         "expression",
         "motion",
         "anchor",
+        "button",
+        "hitZoneId",
+        "hitZoneLabel",
         "timePeriod",
         "localHour",
         "localMinute",
@@ -1677,6 +1874,68 @@ fn parse_rfc3339_utc(timestamp: &str) -> Result<DateTime<Utc>> {
         .map_err(|error| {
             ResidentHomeError::EventLogReadDenied(format!("invalid timestamp {timestamp}: {error}"))
         })
+}
+
+fn event_record_date(timestamp: &str) -> Option<NaiveDate> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc).date_naive())
+}
+
+fn indexed_memory_dates(records: &[EventLogRecord]) -> BTreeSet<NaiveDate> {
+    let successful_invocations = records
+        .iter()
+        .filter(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload.get("capability").and_then(Value::as_str)
+                    == Some(MEMORY_INDEX_CAPABILITY)
+                && record
+                    .payload
+                    .get("output")
+                    .and_then(Value::as_object)
+                    .and_then(|output| output.get("indexed"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        })
+        .filter_map(|record| {
+            record
+                .payload
+                .get("invocationId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+
+    records
+        .iter()
+        .filter(|record| {
+            record.kind == "capability.invocation.request"
+                && record.payload.get("capability").and_then(Value::as_str)
+                    == Some(MEMORY_INDEX_CAPABILITY)
+                && record
+                    .payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| successful_invocations.contains(id))
+        })
+        .filter_map(|record| {
+            record
+                .payload
+                .get("input")
+                .and_then(Value::as_object)
+                .and_then(|input| input.get("date"))
+                .and_then(Value::as_str)
+                .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        })
+        .collect()
+}
+
+fn is_memory_index_event_kind(kind: &str) -> bool {
+    kind.starts_with("conversation.")
+        || kind == "dialogue.say"
+        || kind == "app.startup"
+        || kind.starts_with("device.")
+        || kind.starts_with("avatar.gesture.")
 }
 
 fn strip_references_from_payload(payload: &mut JsonMap) {
@@ -1727,7 +1986,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use serde_json::{json, Value};
     use tempfile::tempdir;
-    use yuukei_capability::{CapabilityResult, ProviderRegistration};
+    use yuukei_capability::{CapabilityError, CapabilityResult, ProviderRegistration};
     use yuukei_event_log::EventLogQuery;
     use yuukei_extension::{
         DialogueSuffixExtension, ProcessCommandSpec, ProcessExtensionManifest,
@@ -2054,6 +2313,79 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct MemoryProvider {
+        retrieve_output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        fail_retrieve: bool,
+    }
+
+    impl MemoryProvider {
+        fn new(retrieve_output: JsonMap) -> Self {
+            Self {
+                retrieve_output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail_retrieve: false,
+            }
+        }
+
+        fn failing_retrieve(mut self) -> Self {
+            self.fail_retrieve = true;
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for MemoryProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "fake-memory".to_string(),
+                capabilities: vec![
+                    MEMORY_INDEX_CAPABILITY.to_string(),
+                    MEMORY_RETRIEVE_CAPABILITY.to_string(),
+                ],
+                methods: vec!["index".to_string(), "retrieve".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("memory calls lock")
+                .push(invocation.clone());
+            if invocation.capability == MEMORY_RETRIEVE_CAPABILITY && self.fail_retrieve {
+                return Err(CapabilityError::Extension("retrieve failed".to_string()));
+            }
+            let output = if invocation.capability == MEMORY_INDEX_CAPABILITY {
+                JsonMap::from([
+                    ("indexed".to_string(), json!(true)),
+                    ("noteCount".to_string(), json!(1)),
+                ])
+            } else {
+                self.retrieve_output.clone()
+            };
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "fake-memory".to_string(),
+                capability: invocation.capability,
+                output,
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
     fn llm_fallback_world() -> WorldPack {
         let mut world = world_pack();
         world.daihon.loaded_scripts[0].source = r#"
@@ -2330,6 +2662,103 @@ mod tests {
         assert!(!records.iter().any(|record| {
             record.kind == "dialogue.say" && record.payload["text"] == json!("起きました")
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_index_runs_for_unindexed_previous_day_on_app_startup() -> Result<()> {
+        let memory = MemoryProvider::new(JsonMap::from([("memories".to_string(), json!([]))]));
+        let calls = memory.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(memory)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut yesterday = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        yesterday.timestamp = (Utc::now() - Duration::days(1)).to_rfc3339();
+        yesterday
+            .payload
+            .insert("text".to_string(), json!("昨日の話"));
+        home.ingest_event(yesterday).await?;
+
+        let startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        home.ingest_event(startup).await?;
+
+        let calls = calls.lock().expect("memory calls lock");
+        let index_calls = calls
+            .iter()
+            .filter(|call| call.capability == MEMORY_INDEX_CAPABILITY)
+            .collect::<Vec<_>>();
+        assert_eq!(index_calls.len(), 1);
+        assert_eq!(
+            index_calls[0].input["date"],
+            (Utc::now() - Duration::days(1)).date_naive().to_string()
+        );
+        assert_eq!(index_calls[0].input["residentId"], "resident-default");
+        assert_eq!(index_calls[0].input["worldPackId"], "default-yuukei");
+        assert!(index_calls[0].input["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["type"] == json!("conversation.text")
+                || event["kind"] == json!("conversation.text")));
+        assert!(index_calls[0].input["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .any(|event| event["payload"]["text"] == json!("昨日の話")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_index_does_not_repeat_after_successful_result() -> Result<()> {
+        let memory = MemoryProvider::new(JsonMap::from([("memories".to_string(), json!([]))]));
+        let calls = memory.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(memory)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut yesterday = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        yesterday.timestamp = (Utc::now() - Duration::days(1)).to_rfc3339();
+        yesterday
+            .payload
+            .insert("text".to_string(), json!("昨日の話"));
+        home.ingest_event(yesterday).await?;
+
+        home.ingest_event(RuntimeEvent::new(
+            "app.startup",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+        home.ingest_event(RuntimeEvent::new(
+            "app.startup",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+
+        let calls = calls.lock().expect("memory calls lock");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.capability == MEMORY_INDEX_CAPABILITY)
+                .count(),
+            1
+        );
         Ok(())
     }
 
@@ -2632,6 +3061,92 @@ mod tests {
             .iter()
             .any(|record| record.kind == "capability.invocation.result"
                 && record.payload["capability"] == DIALOGUE_GENERATE_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_input_includes_retrieved_memories() -> Result<()> {
+        let memory = MemoryProvider::new(JsonMap::from([(
+            "memories".to_string(),
+            json!([
+                { "text": "唐揚げが好き。", "kind": "fact" },
+                { "text": "昨日は公園へ行った。", "kind": "episode", "date": "2026-01-01" }
+            ]),
+        )]));
+        let memory_calls = memory.calls();
+        let dialogue = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("覚えています。")),
+        ]));
+        let dialogue_calls = dialogue.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(memory)?;
+        capabilities.register(dialogue)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("唐揚げの話"));
+        let commands = home.ingest_event(event).await?;
+
+        assert!(commands
+            .iter()
+            .any(|command| command.payload["text"] == json!("覚えています。")));
+        let memory_calls = memory_calls.lock().expect("memory calls lock");
+        let retrieve = memory_calls
+            .iter()
+            .find(|call| call.capability == MEMORY_RETRIEVE_CAPABILITY)
+            .expect("memory retrieve call");
+        assert_eq!(retrieve.input["query"]["text"], "唐揚げの話");
+        assert_eq!(retrieve.input["limits"]["facts"], 10);
+        assert_eq!(retrieve.input["limits"]["episodes"], 5);
+        let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
+        assert_eq!(
+            dialogue_calls[0].input["memories"],
+            json!(["唐揚げが好き。", "昨日は公園へ行った。"])
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_retrieve_failure_does_not_block_dialogue_generate() -> Result<()> {
+        let memory = MemoryProvider::new(JsonMap::new()).failing_retrieve();
+        let dialogue = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("記憶なしでも返します。")),
+        ]));
+        let dialogue_calls = dialogue.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(memory)?;
+        capabilities.register(dialogue)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("覚えてる？"));
+        let commands = home.ingest_event(event).await?;
+
+        assert!(commands
+            .iter()
+            .any(|command| command.payload["text"] == json!("記憶なしでも返します。")));
+        let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
+        assert!(dialogue_calls[0].input.get("memories").is_none());
         Ok(())
     }
 

@@ -535,6 +535,9 @@ pub struct DialogueGenerateInput {
     #[serde(default)]
     #[ts(optional)]
     pub instruction: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub memories: Option<Vec<String>>,
     pub persona: DialogueGeneratePersona,
     #[serde(default)]
     pub recent_context: Vec<DialogueGenerateRecentContext>,
@@ -614,6 +617,85 @@ pub struct DialogueInterpretOutput {
     pub choice: String,
     #[ts(optional)]
     pub confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryIndexInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub date: String,
+    pub events: Vec<MemoryIndexEvent>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryIndexEvent {
+    pub kind: String,
+    pub timestamp: String,
+    #[ts(type = "{ [key: string]: unknown }")]
+    pub payload: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryIndexOutput {
+    pub indexed: bool,
+    #[ts(optional)]
+    pub note_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryRetrieveInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub query: MemoryRetrieveQuery,
+    pub limits: MemoryRetrieveLimits,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryRetrieveQuery {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryRetrieveLimits {
+    pub facts: usize,
+    pub episodes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryRetrieveOutput {
+    pub memories: Vec<MemorySnippet>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemorySnippet {
+    pub text: String,
+    pub kind: MemorySnippetKind,
+    #[ts(optional)]
+    pub date: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum MemorySnippetKind {
+    Fact,
+    Episode,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]

@@ -1,7 +1,9 @@
-import { buildDialoguePrompt, buildInterpretPrompt } from "../prompt.mjs";
+import { buildDialoguePrompt, buildInterpretPrompt, buildMemoryIndexPrompt } from "../prompt.mjs";
 import {
+  memoryIndexFailureOutput,
   normalizeOutput,
   parseJsonInterpretOutput,
+  parseJsonMemoryIndexOutput,
   parseJsonOutput,
   silentOutput,
   unknownChoiceOutput
@@ -108,6 +110,56 @@ export async function interpretWithGemini(input, config) {
   }
 }
 
+export async function summarizeMemoryIndexWithGemini(input, config) {
+  const providerConfig = config.gemini ?? {};
+  const apiKey = providerConfig.apiKey;
+  const model = providerConfig.model ?? "gemini-2.5-flash";
+  if (!apiKey) {
+    console.error("yuukei-intelligence: GEMINI_API_KEY is not configured");
+    return { output: memoryIndexFailureOutput(), metadata: { provider: "gemini", model } };
+  }
+
+  const url = `${GEMINI_ENDPOINT}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: buildMemoryIndexPrompt(input) }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.3,
+      responseMimeType: "application/json",
+      responseSchema: memoryIndexSchema()
+    }
+  };
+
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      config.timeoutMs
+    );
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: gemini API error ${response.status}`);
+      return { output: memoryIndexFailureOutput(), metadata: { provider: "gemini", model } };
+    }
+    const json = await response.json();
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return {
+      output: parseJsonMemoryIndexOutput(text) ?? memoryIndexFailureOutput(),
+      metadata: { provider: "gemini", model }
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
+    return { output: memoryIndexFailureOutput(), metadata: { provider: "gemini", model } };
+  }
+}
+
 function dialogueGenerateSchema() {
   return {
     type: "OBJECT",
@@ -129,6 +181,20 @@ function dialogueInterpretSchema() {
       confidence: { type: "NUMBER" }
     },
     required: ["choice"]
+  };
+}
+
+function memoryIndexSchema() {
+  return {
+    type: "OBJECT",
+    properties: {
+      diary: { type: "STRING" },
+      newFacts: {
+        type: "ARRAY",
+        items: { type: "STRING" }
+      }
+    },
+    required: ["diary", "newFacts"]
   };
 }
 

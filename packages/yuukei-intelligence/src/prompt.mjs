@@ -6,6 +6,7 @@ export function buildDialoguePrompt(input) {
   const profile = persona.profile && typeof persona.profile === "object" ? persona.profile : {};
   const languageHint = eventLanguageHint(event);
   const instruction = typeof input?.instruction === "string" ? input.instruction.trim() : "";
+  const memories = Array.isArray(input?.memories) ? input.memories.filter(isNonEmptyString) : [];
   const instructionSection = instruction
     ? [
         "",
@@ -13,6 +14,9 @@ export function buildDialoguePrompt(input) {
         instruction,
         "Write one short line that follows this instruction. Do not continue the scene structure."
       ]
+    : [];
+  const memorySection = memories.length
+    ? ["", "覚えていること:", ...memories.slice(0, 15).map((memory) => `- ${memory}`)]
     : [];
 
   return [
@@ -40,6 +44,7 @@ export function buildDialoguePrompt(input) {
     "Current event:",
     JSON.stringify(event, null, 2),
     ...instructionSection,
+    ...memorySection,
     "",
     "Recent context:",
     JSON.stringify(recentContext.slice(-20), null, 2)
@@ -86,6 +91,33 @@ export function buildInterpretSystemPrompt() {
   ].join(" ");
 }
 
+export function buildMemoryIndexPrompt(input) {
+  const date = typeof input?.date === "string" ? input.date : "";
+  const events = Array.isArray(input?.events) ? input.events : [];
+  return [
+    "You are consolidating one day of Yuukei event log records into memory notes.",
+    "From the events, produce:",
+    "(a) diary: a third-person memo in 2 to 4 sentences,",
+    "(b) newFacts: 0 to 5 durable facts such as user preferences, habits, promises, or recurring context.",
+    "Return JSON only. Do not include Markdown.",
+    "Output shape: {\"diary\":\"...\",\"newFacts\":[\"...\"]}.",
+    "",
+    "Date:",
+    date,
+    "",
+    "Digest lines:",
+    formatMemoryDigest(events)
+  ].join("\n");
+}
+
+export function buildMemoryIndexSystemPrompt() {
+  return [
+    "You are a memory.index provider for Yuukei.",
+    "Return only valid JSON.",
+    "Do not invent facts not supported by the digest."
+  ].join(" ");
+}
+
 function eventLanguageHint(event) {
   const text = event?.payload?.text;
   if (typeof text !== "string" || !text.trim()) {
@@ -96,4 +128,19 @@ function eventLanguageHint(event) {
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim();
+}
+
+function formatMemoryDigest(events) {
+  return events
+    .map((event) => {
+      const kind = typeof event?.kind === "string" ? event.kind : "";
+      const timestamp = typeof event?.timestamp === "string" ? event.timestamp : "";
+      const payload = event?.payload && typeof event.payload === "object" ? event.payload : {};
+      const payloadText = Object.entries(payload)
+        .filter(([, value]) => value === null || ["boolean", "number", "string"].includes(typeof value))
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(", ");
+      return `- ${timestamp} ${kind}${payloadText ? ` (${payloadText})` : ""}`;
+    })
+    .join("\n");
 }

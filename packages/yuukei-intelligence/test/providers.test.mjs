@@ -146,6 +146,36 @@ test("openai-compatible includes Daihon generation instruction in prompt", async
   }
 });
 
+test("openai-compatible includes retrieved memories in prompt", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      choices: [{ message: { content: JSON.stringify({ speak: true, text: "覚えてるよ。" }) } }]
+    });
+  };
+  try {
+    const result = await generateWithOpenAiCompatible(
+      { ...sampleInput, memories: ["唐揚げが好き。", "昨日は公園へ行った。"] },
+      {
+        timeoutMs: 1000,
+        openaiCompatible: {
+          baseUrl: "http://127.0.0.1:1234/v1",
+          model: "local-test"
+        }
+      }
+    );
+
+    assert.deepEqual(result.output, { speak: true, text: "覚えてるよ。" });
+    assert.match(calls[0].body.messages[1].content, /覚えていること/);
+    assert.match(calls[0].body.messages[1].content, /唐揚げが好き/);
+    assert.match(calls[0].body.messages[1].content, /昨日は公園へ行った/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("openai-compatible retries once without response_format when json_schema is rejected", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];

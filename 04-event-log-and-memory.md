@@ -48,6 +48,19 @@ Extensionはmanifestで許可されたevent log範囲を読み、好きな方式
 
 Yuukei Coreは、それらの内部構造を知らない。Coreは `memory.index`、`memory.retrieve`、`memory.forget`、`memory.rebuild` のようなcapabilityを、選択されたExtensionへルーティングするだけにする。
 
+最初の契約は次の2つに限定する。
+
+- `memory.index`: Resident Homeが日単位のevent log抜粋を渡し、Memory Extensionが内部DBへ統合する。入力は `residentId`、`worldPackId`、`date`、最小payload化されたevent一覧であり、出力は `indexed` と任意の `noteCount` だけである。
+- `memory.retrieve`: Resident Homeが発話生成前に短いqueryと件数上限を渡し、Memory Extensionが `fact` / `episode` の短いテキスト断片を返す。Coreはその内部根拠や保存形式を知らず、`dialogue.generate` にはtext配列として渡す。
+
+統合は遅延実行でよい。Resident Homeは `app.startup` と `device.sleep.before` を受けたとき、event log上の `memory.index` 成功記録を見て、今日より前の未統合日を直近7日分までMemory Extensionへ渡す。失敗やprovider未登録はCoreの動作を止めず、次回の起動やスリープ前に再試行される。
+
+想起には小さな予算を置く。発話生成の直前に `memory.retrieve` を呼び、facts最大10件、episodes最大5件を `DialogueGenerateInput.memories` へ入れる。retrieveの失敗、timeout、provider未登録は、記憶なしの発話生成として扱う。`dialogue.interpret` は機械的判定なので記憶を受け取らない。
+
+外部プロセスExtensionが派生記憶DBを持つ場合、Device Hostは `YUUKEI_DATA_DIR/extension-data/<extensionId>` を作成し、起動時に `YUUKEI_EXTENSION_DATA_DIR` として渡す。この領域はExtension再インストール用のコピー先とは別であり、Extensionの内部DBはcanonical event logから再構築できる派生物として扱う。
+
+公式 `yuukei-intelligence` の初期実装は、`YUUKEI_EXTENSION_DATA_DIR/memory/<worldPackId>/<residentId>/facts.json` と `episodes.jsonl` に派生記憶を保存する。世界観のツマミはExtension側にあり、恒久ノートは最大50件、取り出し予算はfacts 10件 / episodes 5件、Resident Homeからの遡り統合は直近7日、episodeの新しさ減衰は半減期14日である。
+
 Extensionが再起動後に内部状態を再構築する場合、manifestでevent log読み出し権限を宣言する。
 
 ```ts
