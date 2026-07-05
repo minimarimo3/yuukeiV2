@@ -28,8 +28,9 @@ use yuukei_protocol::{
     SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
-    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonInterpretHandler,
-    DaihonInterpretRequest, WorldError, WorldPack, YuukeiDaihonAdapter,
+    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonGenerateRequest,
+    DaihonGenerateResponse, DaihonInterpretHandler, DaihonInterpretRequest, WorldError, WorldPack,
+    YuukeiDaihonAdapter,
 };
 
 #[derive(Debug, Error)]
@@ -831,7 +832,7 @@ impl ResidentHome {
             return Ok(Vec::new());
         }
 
-        let input = self.dialogue_generate_input(event)?;
+        let input = self.dialogue_generate_input(event, &self.world_pack.default_actor_id, None)?;
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
             capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
@@ -939,16 +940,20 @@ impl ResidentHome {
         Ok(())
     }
 
-    fn dialogue_generate_input(&self, event: &RuntimeEvent) -> Result<DialogueGenerateInput> {
+    fn dialogue_generate_input(
+        &self,
+        event: &RuntimeEvent,
+        actor_id: &str,
+        instruction: Option<String>,
+    ) -> Result<DialogueGenerateInput> {
         let actor = self
             .world_pack
             .actors
             .iter()
-            .find(|actor| actor.id == self.world_pack.default_actor_id)
+            .find(|actor| actor.id == actor_id)
             .ok_or_else(|| {
                 ResidentHomeError::MissingRequiredCapabilities(format!(
-                    "default actor is not declared: {}",
-                    self.world_pack.default_actor_id
+                    "actor is not declared: {actor_id}"
                 ))
             })?;
         Ok(DialogueGenerateInput {
@@ -956,6 +961,7 @@ impl ResidentHome {
                 kind: event.kind.clone(),
                 payload: event.payload.clone(),
             },
+            instruction,
             persona: DialogueGeneratePersona {
                 actor_id: actor.id.clone(),
                 display_name: actor.display_name.clone(),
@@ -1249,6 +1255,87 @@ impl ResidentHome {
         Ok(())
     }
 
+    async fn generate_dialogue_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonGenerateRequest,
+    ) -> Result<Option<DaihonGenerateResponse>> {
+        self.set_interpretation_in_flight(true)?;
+        let result = self
+            .invoke_dialogue_generate_for_daihon(source_event, request)
+            .await
+            .unwrap_or(None);
+        self.set_interpretation_in_flight(false)?;
+        Ok(result)
+    }
+
+    async fn invoke_dialogue_generate_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonGenerateRequest,
+    ) -> Result<Option<DaihonGenerateResponse>> {
+        let actor_id = request
+            .speaker_id
+            .as_deref()
+            .unwrap_or(&self.world_pack.default_actor_id)
+            .to_string();
+        let input = self.dialogue_generate_input(
+            source_event,
+            &actor_id,
+            Some(request.instruction.clone()),
+        )?;
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
+            method: "generate".to_string(),
+            resident_id: source_event.resident_id.clone(),
+            actor_id: Some(actor_id.clone()),
+            input: json_map_from_value(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, source_event, None)?;
+
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let result = timeout(
+            DIALOGUE_INTERPRET_TIMEOUT,
+            router.invoke(invocation.clone()),
+        )
+        .await;
+        let Ok(Ok(result)) = result else {
+            return Ok(None);
+        };
+
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output.clone(),
+            result.metadata,
+            source_event,
+            None,
+            invocation.actor_id.as_deref(),
+        )?;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
+            return Ok(None);
+        };
+        if !output.speak {
+            return Ok(None);
+        }
+        let Some(text) = output.text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some(DaihonGenerateResponse {
+            text,
+            expression: output.expression,
+            motion: output.motion,
+        }))
+    }
+
     async fn interpret_dialogue(
         &self,
         source_event: &RuntimeEvent,
@@ -1505,6 +1592,13 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
             .interpret_dialogue(&self.source_event, request)
             .await
             .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
+    }
+
+    async fn generate(&mut self, request: DaihonGenerateRequest) -> Option<DaihonGenerateResponse> {
+        self.home
+            .generate_dialogue_for_daihon(&self.source_event, request)
+            .await
+            .unwrap_or(None)
     }
 }
 
@@ -1840,6 +1934,7 @@ mod tests {
     struct DialogueGenerateProvider {
         output: JsonMap,
         calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        delay: Option<std::time::Duration>,
     }
 
     impl DialogueGenerateProvider {
@@ -1847,7 +1942,13 @@ mod tests {
             Self {
                 output,
                 calls: Arc::new(Mutex::new(Vec::new())),
+                delay: None,
             }
+        }
+
+        fn delayed(mut self, delay: std::time::Duration) -> Self {
+            self.delay = Some(delay);
+            self
         }
 
         fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
@@ -1878,6 +1979,9 @@ mod tests {
                 .lock()
                 .expect("dialogue generate calls lock")
                 .push(invocation.clone());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
             Ok(CapabilityResult {
                 invocation_id: invocation.id,
                 extension_id: "fake-dialogue".to_string(),
@@ -1992,6 +2096,12 @@ mod tests {
 "#
         .to_string();
         world.signals.allow.push("device.wake".to_string());
+        world
+    }
+
+    fn generate_world(script: &str) -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = script.to_string();
         world
     }
 
@@ -2220,6 +2330,171 @@ mod tests {
         assert!(!records.iter().any(|record| {
             record.kind == "dialogue.say" && record.payload["text"] == json!("起きました")
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_statement_sends_instruction_and_emits_generated_commands(
+    ) -> Result<()> {
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("早く行きたいな。")),
+            ("expression".to_string(), json!("sparkle")),
+            ("motion".to_string(), json!("bounce")),
+        ]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            generate_world(
+                r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「やった、楽しみにしてるね。」
+＜生成 「お出かけの日の楽しみを一言」 「楽しみだなあ」＞
+"#,
+            ),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_scene_generate".to_string();
+        event.payload.insert("text".to_string(), json!("うん"));
+
+        let commands = home.ingest_event(event).await?;
+
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0].kind, "dialogue.say");
+        assert_eq!(commands[0].payload["text"], "やった、楽しみにしてるね。");
+        assert_eq!(commands[1].kind, "avatar.expression");
+        assert_eq!(commands[1].payload["expression"], "sparkle");
+        assert_eq!(commands[2].kind, "avatar.motion");
+        assert_eq!(commands[2].payload["motion"], "bounce");
+        assert_eq!(commands[3].kind, "dialogue.say");
+        assert_eq!(commands[3].payload["text"], "早く行きたいな。");
+        assert_eq!(commands[3].source, "capability.dialogue.generate");
+        assert_eq!(commands[3].payload["sourceFunction"], "生成");
+        assert_eq!(
+            commands[3].payload["generationInstruction"],
+            "お出かけの日の楽しみを一言"
+        );
+
+        let calls = calls.lock().expect("generate calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].capability, DIALOGUE_GENERATE_CAPABILITY);
+        assert_eq!(calls[0].input["instruction"], "お出かけの日の楽しみを一言");
+        assert_eq!(calls[0].input["persona"]["actorId"], "yuukei");
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        let generated = records
+            .iter()
+            .find(|record| {
+                record.kind == "dialogue.say"
+                    && record.source == "capability.dialogue.generate"
+                    && record.payload["text"] == json!("早く行きたいな。")
+            })
+            .expect("generated dialogue record");
+        assert_eq!(generated.payload["sourceFunction"], "生成");
+        assert_eq!(
+            generated
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_event_id.as_deref()),
+            Some("evt_scene_generate")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_statement_speak_false_uses_fallback_or_skips() -> Result<()> {
+        let provider =
+            DialogueGenerateProvider::new(JsonMap::from([("speak".to_string(), json!(false))]));
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            generate_world(
+                r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+＜生成 「一言目」 「フォールバック」＞
+＜生成 「二言目」＞
+「続き」
+"#,
+            ),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("うん"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue_texts = commands
+            .iter()
+            .filter(|command| command.kind == "dialogue.say")
+            .map(|command| command.payload["text"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(dialogue_texts, vec![json!("フォールバック"), json!("続き")]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_events_are_queued_while_dialogue_generate_is_in_flight() -> Result<()> {
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("生成応答")),
+        ]))
+        .delayed(std::time::Duration::from_millis(80));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            generate_world(
+                r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+＜生成 「短く返す」 「fallback」＞
+"#,
+            ),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        first.id = "evt_generate_first".to_string();
+        first.payload.insert("text".to_string(), json!("一つ目"));
+        let first_home = home.clone();
+        let first_task = tokio::spawn(async move { first_home.ingest_event(first).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        second.id = "evt_generate_second".to_string();
+        second.payload.insert("text".to_string(), json!("二つ目"));
+        let second_commands = home.ingest_event(second).await?;
+        assert!(second_commands.is_empty());
+
+        let first_commands = first_task.await.expect("first ingest task")?;
+        let dialogue_texts = first_commands
+            .iter()
+            .filter(|command| command.kind == "dialogue.say")
+            .map(|command| command.payload["text"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(dialogue_texts, vec![json!("生成応答"), json!("生成応答")]);
+        assert_eq!(calls.lock().expect("generate calls lock").len(), 2);
         Ok(())
     }
 

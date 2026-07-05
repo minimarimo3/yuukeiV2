@@ -532,6 +532,9 @@ pub struct CapabilityInvocation {
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct DialogueGenerateInput {
     pub event: DialogueGenerateEvent,
+    #[serde(default)]
+    #[ts(optional)]
+    pub instruction: Option<String>,
     pub persona: DialogueGeneratePersona,
     #[serde(default)]
     pub recent_context: Vec<DialogueGenerateRecentContext>,

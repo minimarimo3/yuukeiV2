@@ -4,4 +4,4 @@ import type { DialogueGenerateEvent } from "./DialogueGenerateEvent";
 import type { DialogueGeneratePersona } from "./DialogueGeneratePersona";
 import type { DialogueGenerateRecentContext } from "./DialogueGenerateRecentContext";
 
-export type DialogueGenerateInput = { event: DialogueGenerateEvent, persona: DialogueGeneratePersona, recentContext: Array<DialogueGenerateRecentContext>, constraints: DialogueGenerateConstraints, };
+export type DialogueGenerateInput = { event: DialogueGenerateEvent, instruction?: string, persona: DialogueGeneratePersona, recentContext: Array<DialogueGenerateRecentContext>, constraints: DialogueGenerateConstraints, };

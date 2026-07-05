@@ -18,8 +18,17 @@ use crate::value::{DaihonNumber, DaihonValue};
 use crate::variable::{builtin_time_value, VariableRef, VariableStore};
 
 pub const INTERPRET_FUNCTION_NAME: &str = "解釈";
+pub const GENERATE_FUNCTION_NAME: &str = "生成";
 pub const UNKNOWN_INTERPRETATION: &str = "不明";
 pub const DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH: usize = 4;
+pub const DEFAULT_MAX_GENERATIONS_PER_DISPATCH: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedDialogue {
+    pub text: String,
+    pub expression: Option<String>,
+    pub motion: Option<String>,
+}
 
 #[async_trait]
 pub trait ActionHandler {
@@ -28,6 +37,15 @@ pub trait ActionHandler {
         speaker_id: Option<&str>,
         text: &str,
     ) -> Result<(), DaihonRuntimeError>;
+
+    async fn show_generated_dialogue(
+        &mut self,
+        speaker_id: Option<&str>,
+        dialogue: GeneratedDialogue,
+        _instruction: &str,
+    ) -> Result<(), DaihonRuntimeError> {
+        self.show_dialogue(speaker_id, &dialogue.text).await
+    }
 
     async fn call_function(
         &mut self,
@@ -45,9 +63,22 @@ pub struct InterpretRequest {
     pub choices: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateRequest {
+    pub instruction: String,
+    pub speaker_id: Option<String>,
+}
+
 #[async_trait]
 pub trait InterpretHandler {
     async fn interpret(&mut self, request: InterpretRequest) -> Result<String, DaihonRuntimeError>;
+
+    async fn generate(
+        &mut self,
+        _request: GenerateRequest,
+    ) -> Result<Option<GeneratedDialogue>, DaihonRuntimeError> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -105,6 +136,7 @@ pub struct RunOptions {
     pub random_seed: Option<u64>,
     pub max_jumps: usize,
     pub max_interpretations_per_dispatch: usize,
+    pub max_generations_per_dispatch: usize,
     pub now: Option<DateTime<FixedOffset>>,
     pub validation_mode: ValidationMode,
 }
@@ -117,6 +149,7 @@ impl Default for RunOptions {
             random_seed: None,
             max_jumps: 1000,
             max_interpretations_per_dispatch: DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH,
+            max_generations_per_dispatch: DEFAULT_MAX_GENERATIONS_PER_DISPATCH,
             now: None,
             validation_mode: ValidationMode::Strict,
         }
@@ -157,6 +190,7 @@ pub struct Interpreter<'a, A, V, H, I> {
     pub function_registry: &'a FunctionRegistry,
     pub options: RunOptions,
     pub interpretation_count: usize,
+    pub generation_count: usize,
     pub diagnostics: Vec<DaihonDiagnostic>,
 }
 
@@ -172,6 +206,7 @@ where
         script: &Script,
     ) -> Result<DaihonRunResult, DaihonRuntimeError> {
         self.interpretation_count = 0;
+        self.generation_count = 0;
         self.diagnostics.clear();
         let mut registry = self.function_registry.clone();
         registry.set_mode(self.options.validation_mode);
@@ -676,6 +711,11 @@ where
         if function.name.value == INTERPRET_FUNCTION_NAME {
             return self.call_interpret(function, positional, named).await;
         }
+        if function.name.value == GENERATE_FUNCTION_NAME {
+            return self
+                .call_generate(function, speaker, positional, named)
+                .await;
+        }
         self.action_handler
             .call_function(speaker, &function.name.value, positional, named)
             .await
@@ -723,6 +763,63 @@ where
         } else {
             Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
         }
+    }
+
+    async fn call_generate(
+        &mut self,
+        function: &FunctionCall,
+        speaker: Option<&str>,
+        positional: Vec<DaihonValue>,
+        named: BTreeMap<String, DaihonValue>,
+    ) -> Result<DaihonValue, DaihonRuntimeError> {
+        if !named.is_empty() || positional.is_empty() {
+            return Ok(DaihonValue::None);
+        }
+        let instruction = positional[0].to_display_string();
+        let fallback = positional
+            .get(1)
+            .map(DaihonValue::to_display_string)
+            .filter(|value| !value.trim().is_empty());
+        if self.generation_count >= self.options.max_generations_per_dispatch {
+            self.diagnostics.push(
+                DaihonDiagnostic::warning(
+                    "W-DHN-RUN-051",
+                    "生成関数の呼び出し回数が上限を超えました。",
+                    function.span,
+                )
+                .with_help(
+                    "同じdispatch内の以後の生成行はフォールバックまたはスキップになります。",
+                ),
+            );
+            if let Some(fallback) = fallback {
+                self.action_handler
+                    .show_dialogue(speaker, &fallback)
+                    .await?;
+            }
+            return Ok(DaihonValue::None);
+        }
+        self.generation_count += 1;
+
+        let request = GenerateRequest {
+            instruction: instruction.clone(),
+            speaker_id: speaker.map(ToOwned::to_owned),
+        };
+        let generated = self.interpret_handler.generate(request).await;
+        match generated {
+            Ok(Some(dialogue)) if !dialogue.text.trim().is_empty() => {
+                self.action_handler
+                    .show_generated_dialogue(speaker, dialogue, &instruction)
+                    .await?;
+            }
+            _ => {
+                if let Some(fallback) = fallback {
+                    self.action_handler
+                        .show_dialogue(speaker, &fallback)
+                        .await?;
+                }
+            }
+        }
+        Ok(DaihonValue::None)
     }
 
     #[async_recursion]

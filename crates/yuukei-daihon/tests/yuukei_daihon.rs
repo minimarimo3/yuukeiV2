@@ -21,6 +21,9 @@ type MockFunctionCall = (
 struct MockInterpretHandler {
     responses: VecDeque<std::result::Result<String, DaihonRuntimeError>>,
     requests: Vec<InterpretRequest>,
+    generate_responses:
+        VecDeque<std::result::Result<Option<GeneratedDialogue>, DaihonRuntimeError>>,
+    generate_requests: Vec<GenerateRequest>,
 }
 
 impl MockInterpretHandler {
@@ -28,6 +31,21 @@ impl MockInterpretHandler {
         Self {
             responses: responses.into_iter().map(Ok).collect(),
             requests: Vec::new(),
+            generate_responses: VecDeque::new(),
+            generate_requests: Vec::new(),
+        }
+    }
+
+    fn with_generate_responses(
+        responses: impl IntoIterator<
+            Item = std::result::Result<Option<GeneratedDialogue>, DaihonRuntimeError>,
+        >,
+    ) -> Self {
+        Self {
+            responses: VecDeque::new(),
+            requests: Vec::new(),
+            generate_responses: responses.into_iter().collect(),
+            generate_requests: Vec::new(),
         }
     }
 
@@ -39,6 +57,8 @@ impl MockInterpretHandler {
                 Span::empty(),
             ))]),
             requests: Vec::new(),
+            generate_responses: VecDeque::new(),
+            generate_requests: Vec::new(),
         }
     }
 }
@@ -50,6 +70,14 @@ impl InterpretHandler for MockInterpretHandler {
         self.responses
             .pop_front()
             .unwrap_or_else(|| Ok(UNKNOWN_INTERPRETATION.to_string()))
+    }
+
+    async fn generate(
+        &mut self,
+        request: GenerateRequest,
+    ) -> Result<Option<GeneratedDialogue>, DaihonRuntimeError> {
+        self.generate_requests.push(request);
+        self.generate_responses.pop_front().unwrap_or(Ok(None))
     }
 }
 
@@ -152,6 +180,23 @@ fn registry() -> FunctionRegistry {
         ],
         named: BTreeMap::new(),
         return_type: Some(ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: GENERATE_FUNCTION_NAME.to_owned(),
+        positional: vec![
+            ParamSpec {
+                name: Some("指示".to_owned()),
+                ty: ParamType::String,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("フォールバック".to_owned()),
+                ty: ParamType::String,
+                required: false,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: None,
     });
     registry
 }
@@ -372,6 +417,7 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
             ..RunOptions::default()
         },
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -414,6 +460,7 @@ async fn runtime_interpret_choice_branches_scene() {
         function_registry: &registry(),
         options: RunOptions::default(),
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -456,6 +503,7 @@ async fn runtime_interpret_error_becomes_unknown() {
         function_registry: &registry(),
         options: RunOptions::default(),
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -502,6 +550,7 @@ async fn runtime_interpret_limit_returns_unknown_and_warns() {
             ..RunOptions::default()
         },
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -513,6 +562,170 @@ async fn runtime_interpret_limit_returns_unknown_and_warns() {
         .any(|diagnostic| diagnostic.code == "W-DHN-RUN-050"));
     assert_eq!(action.dialogues[0].1, "一回目既知");
     assert_eq!(action.dialogues[1].1, "二回目不明");
+}
+
+#[tokio::test]
+async fn runtime_generate_outputs_current_speaker_dialogue() {
+    let script = parse_script(
+        r#"
+## 生成
+### 通常
+話者: ミカ
+「固定」
+＜生成 「お出かけの楽しみを一言」＞
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret =
+        MockInterpretHandler::with_generate_responses([Ok(Some(GeneratedDialogue {
+            text: "寄り道も楽しみ。".to_string(),
+            expression: None,
+            motion: None,
+        }))]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(
+        interpret.generate_requests[0].instruction,
+        "お出かけの楽しみを一言"
+    );
+    assert_eq!(
+        interpret.generate_requests[0].speaker_id.as_deref(),
+        Some("ミカ")
+    );
+    assert_eq!(
+        action.dialogues,
+        vec![
+            (Some("ミカ".to_string()), "固定".to_string()),
+            (Some("ミカ".to_string()), "寄り道も楽しみ。".to_string())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn runtime_generate_failure_uses_fallback_dialogue() {
+    let script = parse_script(
+        r#"
+## 生成
+### 通常
+話者: ミカ
+＜生成 「お出かけの楽しみを一言」 「楽しみだなあ」＞
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_generate_responses([Err(
+        DaihonRuntimeError::new("E-TEST-GENERATE", "generate failed", Span::empty()),
+    )]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(action.dialogues[0].1, "楽しみだなあ");
+}
+
+#[tokio::test]
+async fn runtime_generate_failure_without_fallback_skips_and_continues() {
+    let script = parse_script(
+        r#"
+## 生成
+### 通常
+＜生成 「お出かけの楽しみを一言」＞
+「続き」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_generate_responses([Ok(None)]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(action.dialogues.len(), 1);
+    assert_eq!(action.dialogues[0].1, "続き");
+}
+
+#[tokio::test]
+async fn runtime_generate_limit_warns_and_uses_fallback() {
+    let script = parse_script(
+        r#"
+## 生成
+### 通常
+＜生成 「一回目」 「一回目fallback」＞
+＜生成 「二回目」 「二回目fallback」＞
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret =
+        MockInterpretHandler::with_generate_responses([Ok(Some(GeneratedDialogue {
+            text: "一回目生成".to_string(),
+            expression: None,
+            motion: None,
+        }))]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            max_generations_per_dispatch: 1,
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(interpret.generate_requests.len(), 1);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-051"));
+    assert_eq!(action.dialogues[0].1, "一回目生成");
+    assert_eq!(action.dialogues[1].1, "二回目fallback");
 }
 
 #[tokio::test]
@@ -541,6 +754,7 @@ async fn runtime_uses_defaults_preconditions_and_assignments() {
         function_registry: &FunctionRegistry::permissive(),
         options: RunOptions::default(),
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -589,6 +803,7 @@ async fn runtime_falls_back_to_default_and_respects_cooldown() {
             ..RunOptions::default()
         },
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -625,6 +840,7 @@ async fn runtime_supports_overnight_time_range() {
             ..RunOptions::default()
         },
         interpretation_count: 0,
+        generation_count: 0,
         diagnostics: Vec::new(),
     };
 

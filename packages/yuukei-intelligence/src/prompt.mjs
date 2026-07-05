@@ -5,6 +5,15 @@ export function buildDialoguePrompt(input) {
   const recentContext = Array.isArray(input?.recentContext) ? input.recentContext : [];
   const profile = persona.profile && typeof persona.profile === "object" ? persona.profile : {};
   const languageHint = eventLanguageHint(event);
+  const instruction = typeof input?.instruction === "string" ? input.instruction.trim() : "";
+  const instructionSection = instruction
+    ? [
+        "",
+        "Daihon author instruction for this scene line:",
+        instruction,
+        "Write one short line that follows this instruction. Do not continue the scene structure."
+      ]
+    : [];
 
   return [
     "You are generating one in-character micro reaction for Yuukei.",
@@ -30,6 +39,7 @@ export function buildDialoguePrompt(input) {
     "",
     "Current event:",
     JSON.stringify(event, null, 2),
+    ...instructionSection,
     "",
     "Recent context:",
     JSON.stringify(recentContext.slice(-20), null, 2)

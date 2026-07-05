@@ -11,10 +11,11 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
-    DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, InMemorySceneHistory,
-    InMemoryVariableStore, InterpretHandler, InterpretRequest, Interpreter, ParamSpec, ParamType,
-    RunOptions, Script, Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent,
-    ValidationMode, INTERPRET_FUNCTION_NAME,
+    DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, GenerateRequest,
+    GeneratedDialogue, InMemorySceneHistory, InMemoryVariableStore, InterpretHandler,
+    InterpretRequest, Interpreter, ParamSpec, ParamType, RunOptions, Script,
+    Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
+    GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -324,9 +325,29 @@ pub struct DaihonInterpretRequest {
     pub choices: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonGenerateRequest {
+    pub instruction: String,
+    pub speaker_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonGenerateResponse {
+    pub text: String,
+    pub expression: Option<String>,
+    pub motion: Option<String>,
+}
+
 #[async_trait]
 pub trait DaihonInterpretHandler: Send {
     async fn interpret(&mut self, request: DaihonInterpretRequest) -> String;
+
+    async fn generate(
+        &mut self,
+        _request: DaihonGenerateRequest,
+    ) -> Option<DaihonGenerateResponse> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -489,6 +510,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     ..RunOptions::default()
                 },
                 interpretation_count: 0,
+                generation_count: 0,
                 diagnostics: Vec::new(),
             };
             let run = interpreter
@@ -557,6 +579,24 @@ impl InterpretHandler for YuukeiInterpretBridge<'_> {
             })
             .await)
     }
+
+    async fn generate(
+        &mut self,
+        request: GenerateRequest,
+    ) -> std::result::Result<Option<GeneratedDialogue>, DaihonRuntimeError> {
+        Ok(self
+            .interpret_handler
+            .generate(DaihonGenerateRequest {
+                instruction: request.instruction,
+                speaker_id: request.speaker_id,
+            })
+            .await
+            .map(|response| GeneratedDialogue {
+                text: response.text,
+                expression: response.expression,
+                motion: response.motion,
+            }))
+    }
 }
 
 impl YuukeiActionHandler {
@@ -602,6 +642,78 @@ impl ActionHandler for YuukeiActionHandler {
             ("text".to_string(), Value::String(text.to_string())),
             ("speakerId".to_string(), Value::String(actor_id)),
             ("emotion".to_string(), Value::String("neutral".to_string())),
+        ]);
+        self.commands.push(command);
+        Ok(())
+    }
+
+    async fn show_generated_dialogue(
+        &mut self,
+        speaker_id: Option<&str>,
+        dialogue: GeneratedDialogue,
+        instruction: &str,
+    ) -> std::result::Result<(), DaihonRuntimeError> {
+        let actor_id = speaker_id.unwrap_or(&self.default_actor_id).to_string();
+        if let Some(expression) = dialogue.expression.filter(|value| !value.trim().is_empty()) {
+            let mut command = self.command("avatar.expression", speaker_id);
+            command.source = "capability.dialogue.generate".to_string();
+            command.payload = JsonMap::from([
+                ("expression".to_string(), Value::String(expression)),
+                ("speakerId".to_string(), Value::String(actor_id.clone())),
+                (
+                    "sourceFunction".to_string(),
+                    Value::String(GENERATE_FUNCTION_NAME.to_string()),
+                ),
+                (
+                    "sourceCapability".to_string(),
+                    Value::String("dialogue.generate".to_string()),
+                ),
+                (
+                    "generationInstruction".to_string(),
+                    Value::String(instruction.to_string()),
+                ),
+            ]);
+            self.commands.push(command);
+        }
+        if let Some(motion) = dialogue.motion.filter(|value| !value.trim().is_empty()) {
+            let mut command = self.command("avatar.motion", speaker_id);
+            command.source = "capability.dialogue.generate".to_string();
+            command.payload = JsonMap::from([
+                ("motion".to_string(), Value::String(motion)),
+                ("speakerId".to_string(), Value::String(actor_id.clone())),
+                (
+                    "sourceFunction".to_string(),
+                    Value::String(GENERATE_FUNCTION_NAME.to_string()),
+                ),
+                (
+                    "sourceCapability".to_string(),
+                    Value::String("dialogue.generate".to_string()),
+                ),
+                (
+                    "generationInstruction".to_string(),
+                    Value::String(instruction.to_string()),
+                ),
+            ]);
+            self.commands.push(command);
+        }
+        let mut command = self.command("dialogue.say", speaker_id);
+        command.source = "capability.dialogue.generate".to_string();
+        command.payload = JsonMap::from([
+            ("text".to_string(), Value::String(dialogue.text)),
+            ("speakerId".to_string(), Value::String(actor_id)),
+            ("emotion".to_string(), Value::String("neutral".to_string())),
+            (
+                "sourceFunction".to_string(),
+                Value::String(GENERATE_FUNCTION_NAME.to_string()),
+            ),
+            (
+                "sourceCapability".to_string(),
+                Value::String("dialogue.generate".to_string()),
+            ),
+            (
+                "generationInstruction".to_string(),
+                Value::String(instruction.to_string()),
+            ),
         ]);
         self.commands.push(command);
         Ok(())
@@ -920,6 +1032,23 @@ fn yuukei_function_registry() -> FunctionRegistry {
         ],
         named: BTreeMap::new(),
         return_type: Some(yuukei_daihon::ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: GENERATE_FUNCTION_NAME.to_string(),
+        positional: vec![
+            ParamSpec {
+                name: Some("指示".to_string()),
+                ty: ParamType::String,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("フォールバック".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: None,
     });
     registry
 }
