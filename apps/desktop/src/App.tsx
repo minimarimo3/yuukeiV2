@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import type { ExtensionSettingField } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
   type DaihonDiagnosticEntry,
@@ -332,6 +333,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           ))}
                         </dl>
                       ) : null}
+                      {extension.settingsSchema ? (
+                        <ExtensionSettingsForm
+                          extension={extension}
+                          client={client}
+                          disabled={changingExtensions}
+                          onResult={applyExtensionResult}
+                        />
+                      ) : null}
                     </div>
                     {extension.lastLoadError ? (
                       <p className="settings-error">
@@ -450,6 +459,252 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       </section>
     </main>
   );
+}
+
+type ExtensionSettingsFormProps = {
+  extension: InstalledExtension;
+  client: YuukeiClient;
+  disabled: boolean;
+  onResult: (result: ExtensionSettingsChangeResult) => void;
+};
+
+function ExtensionSettingsForm({
+  extension,
+  client,
+  disabled,
+  onResult
+}: ExtensionSettingsFormProps) {
+  const [draft, setDraft] = useState<Record<string, unknown>>(() =>
+    initialSettingDraft(extension)
+  );
+  const [secretDraft, setSecretDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(initialSettingDraft(extension));
+    setSecretDraft({});
+    setError(null);
+  }, [extension.extensionId, extension.settingsSchema, extension.settingValues]);
+
+  const fields = extension.settingsSchema?.fields ?? [];
+  const visibleFields = fields.filter((field) => fieldIsVisible(field, draft));
+
+  async function saveSettings() {
+    setSaving(true);
+    setError(null);
+    try {
+      const nonSecretValues: Record<string, unknown> = {};
+      for (const field of fields) {
+        if (field.type === "secret") continue;
+        nonSecretValues[field.key] = draft[field.key] ?? null;
+      }
+      let result = await client.setExtensionSettingValues(
+        extension.extensionId,
+        nonSecretValues
+      );
+      for (const field of fields) {
+        if (field.type !== "secret") continue;
+        const value = secretDraft[field.key];
+        if (value && value.length > 0) {
+          result = await client.setExtensionSecret(
+            extension.extensionId,
+            field.key,
+            value
+          );
+        }
+      }
+      setSecretDraft({});
+      onResult(result);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function clearSecret(key: string) {
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await client.setExtensionSecret(
+        extension.extensionId,
+        key,
+        null
+      );
+      setSecretDraft((current) => ({ ...current, [key]: "" }));
+      onResult(result);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section
+      className="extension-settings-form"
+      aria-label={`${extension.displayName} settings`}
+    >
+      {visibleFields.map((field) => (
+        <ExtensionSettingControl
+          key={field.key}
+          field={field}
+          value={draft[field.key]}
+          secretValue={secretDraft[field.key] ?? ""}
+          secretSet={extension.secretsSet.includes(field.key)}
+          disabled={disabled || saving}
+          onValueChange={(value) =>
+            setDraft((current) => ({ ...current, [field.key]: value }))
+          }
+          onSecretChange={(value) =>
+            setSecretDraft((current) => ({ ...current, [field.key]: value }))
+          }
+          onSecretClear={() => clearSecret(field.key)}
+        />
+      ))}
+      {error ? <p className="settings-error">{error}</p> : null}
+      <div className="extension-settings-actions">
+        <button
+          type="button"
+          className="secondary-button compact-button"
+          disabled={disabled || saving}
+          onClick={saveSettings}
+        >
+          保存
+        </button>
+      </div>
+    </section>
+  );
+}
+
+type ExtensionSettingControlProps = {
+  field: ExtensionSettingField;
+  value: unknown;
+  secretValue: string;
+  secretSet: boolean;
+  disabled: boolean;
+  onValueChange: (value: unknown) => void;
+  onSecretChange: (value: string) => void;
+  onSecretClear: () => void;
+};
+
+function ExtensionSettingControl({
+  field,
+  value,
+  secretValue,
+  secretSet,
+  disabled,
+  onValueChange,
+  onSecretChange,
+  onSecretClear
+}: ExtensionSettingControlProps) {
+  const id = `extension-setting-${field.key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  return (
+    <label className="extension-setting-field" htmlFor={id}>
+      <span>
+        <strong>{field.label}</strong>
+        {"description" in field && field.description ? (
+          <small>{field.description}</small>
+        ) : null}
+      </span>
+      {field.type === "string" ? (
+        <input
+          id={id}
+          type="text"
+          value={typeof value === "string" ? value : ""}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.currentTarget.value)}
+        />
+      ) : null}
+      {field.type === "number" ? (
+        <input
+          id={id}
+          type="number"
+          value={typeof value === "number" ? String(value) : ""}
+          min={field.min}
+          max={field.max}
+          disabled={disabled}
+          onChange={(event) => {
+            const next = event.currentTarget.value;
+            onValueChange(next === "" ? null : Number(next));
+          }}
+        />
+      ) : null}
+      {field.type === "boolean" ? (
+        <input
+          id={id}
+          type="checkbox"
+          checked={Boolean(value)}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.currentTarget.checked)}
+        />
+      ) : null}
+      {field.type === "select" ? (
+        <select
+          id={id}
+          value={typeof value === "string" ? value : ""}
+          disabled={disabled}
+          onChange={(event) => onValueChange(event.currentTarget.value)}
+        >
+          {field.options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      {field.type === "secret" ? (
+        <span className="extension-secret-control">
+          <input
+            id={id}
+            type="password"
+            value={secretValue}
+            placeholder={secretSet ? "設定済み" : ""}
+            disabled={disabled}
+            onChange={(event) => onSecretChange(event.currentTarget.value)}
+          />
+          {secretSet ? (
+            <button
+              type="button"
+              className="secondary-button compact-button"
+              disabled={disabled}
+              onClick={onSecretClear}
+            >
+              クリア
+            </button>
+          ) : null}
+        </span>
+      ) : null}
+    </label>
+  );
+}
+
+function initialSettingDraft(extension: InstalledExtension): Record<string, unknown> {
+  const draft: Record<string, unknown> = {};
+  for (const field of extension.settingsSchema?.fields ?? []) {
+    if (field.type === "secret") continue;
+    draft[field.key] =
+      extension.settingValues[field.key] ?? fieldDefaultValue(field) ?? null;
+  }
+  return draft;
+}
+
+function fieldDefaultValue(field: ExtensionSettingField): unknown {
+  if ("default" in field) {
+    return field.default;
+  }
+  return undefined;
+}
+
+function fieldIsVisible(
+  field: ExtensionSettingField,
+  values: Record<string, unknown>
+): boolean {
+  if (!("visibleWhen" in field) || !field.visibleWhen) {
+    return true;
+  }
+  return values[field.visibleWhen.key] === field.visibleWhen.equals;
 }
 
 type DaihonDiagnosticsPanelProps = {

@@ -8,6 +8,7 @@ import type {
   ExtensionHookSubscription,
   ExtensionPermissions,
   ExtensionRuntimeKind,
+  ExtensionSettingsSchema,
   ExtensionSignalAlias,
   ResidentSnapshot,
   RuntimeCommand
@@ -78,6 +79,9 @@ export type InstalledExtension = {
   emittedEvents: string[];
   capabilities: ExtensionCapabilityDeclaration[];
   signalAliases: ExtensionSignalAlias[];
+  settingsSchema?: ExtensionSettingsSchema;
+  settingValues: Record<string, unknown>;
+  secretsSet: string[];
   installedPath: string;
   manifestPath: string;
   installedAt: string;
@@ -218,6 +222,15 @@ export type YuukeiClient = {
     hookPoint: ExtensionHookPoint,
     extensionIds: string[]
   ): Promise<ExtensionSettingsChangeResult>;
+  setExtensionSettingValues(
+    extensionId: string,
+    values: Record<string, unknown>
+  ): Promise<ExtensionSettingsChangeResult>;
+  setExtensionSecret(
+    extensionId: string,
+    key: string,
+    value: string | null
+  ): Promise<ExtensionSettingsChangeResult>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
   onWorldPackStatus(
@@ -288,6 +301,24 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<ExtensionSettingsChangeResult>("set_extension_hook_order", {
       hookPoint,
       extensionIds
+    }),
+  setExtensionSettingValues: (
+    extensionId: string,
+    values: Record<string, unknown>
+  ) =>
+    invoke<ExtensionSettingsChangeResult>("set_extension_setting_values", {
+      extensionId,
+      values
+    }),
+  setExtensionSecret: (
+    extensionId: string,
+    key: string,
+    value: string | null
+  ) =>
+    invoke<ExtensionSettingsChangeResult>("set_extension_secret", {
+      extensionId,
+      key,
+      value
     }),
   onCommand: async (callback) => {
     const unlisten = await listen<RuntimeCommand>("yuukei-command", (event) => {

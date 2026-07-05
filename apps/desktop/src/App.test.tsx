@@ -133,6 +133,8 @@ function installedExtension(
     emittedEvents: [],
     capabilities: [],
     signalAliases: [],
+    settingValues: {},
+    secretsSet: [],
     installedPath: `/tmp/yuukei-v2/extensions/${extensionId}`,
     manifestPath: `/tmp/yuukei-v2/extensions/${extensionId}/manifest.json`,
     installedAt: "2026-06-25T00:00:00.000Z",
@@ -173,6 +175,8 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     uninstallExtension: vi.fn(),
     setExtensionEnabled: vi.fn(),
     setExtensionHookOrder: vi.fn(),
+    setExtensionSettingValues: vi.fn(),
+    setExtensionSecret: vi.fn(),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
@@ -450,5 +454,165 @@ describe("App", () => {
     expect(screen.getByText("memory.retrieve")).toBeInTheDocument();
     expect(screen.getByText("発行イベント")).toBeInTheDocument();
     expect(screen.getByText("ext.watcher.activity")).toBeInTheDocument();
+  });
+
+  it("renders schema-driven Extension settings and saves visible values and secrets", async () => {
+    const intelligence = {
+      ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),
+      settingsSchema: {
+        fields: [
+          {
+            key: "provider",
+            type: "select" as const,
+            label: "プロバイダ",
+            options: [
+              { value: "gemini", label: "Gemini" },
+              {
+                value: "openai-compatible",
+                label: "OpenAI互換 (LM Studio等)"
+              }
+            ],
+            default: "openai-compatible"
+          },
+          {
+            key: "timeoutMs",
+            type: "number" as const,
+            label: "タイムアウト(ms)",
+            default: 30000,
+            min: 1000
+          },
+          {
+            key: "gemini.apiKey",
+            type: "secret" as const,
+            label: "Gemini APIキー",
+            visibleWhen: { key: "provider", equals: "gemini" }
+          },
+          {
+            key: "openaiCompatible.baseUrl",
+            type: "string" as const,
+            label: "OpenAI互換 Base URL",
+            default: "http://127.0.0.1:1234/v1",
+            visibleWhen: {
+              key: "provider",
+              equals: "openai-compatible"
+            }
+          }
+        ]
+      },
+      settingValues: {
+        provider: "openai-compatible"
+      },
+      secretsSet: ["gemini.apiKey"]
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      setExtensionSettingValues: vi.fn(async () => ({
+        state: extensionSettings([
+          {
+            ...intelligence,
+            settingValues: {
+              provider: "gemini",
+              timeoutMs: 45000,
+              "openaiCompatible.baseUrl": "http://127.0.0.1:1234/v1"
+            }
+          }
+        ]),
+        snapshot: snapshot("設定を保存しました")
+      })),
+      setExtensionSecret: vi.fn(async () => ({
+        state: extensionSettings([
+          {
+            ...intelligence,
+            settingValues: { provider: "gemini", timeoutMs: 45000 },
+            secretsSet: ["gemini.apiKey"]
+          }
+        ]),
+        snapshot: snapshot("secretを保存しました")
+      }))
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    expect(await screen.findByText("Yuukei Intelligence")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenAI互換 Base URL")).toHaveValue(
+      "http://127.0.0.1:1234/v1"
+    );
+    expect(screen.queryByLabelText("Gemini APIキー")).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText("プロバイダ"), "gemini");
+    expect(await screen.findByLabelText("Gemini APIキー")).toHaveValue("");
+    expect(screen.getByPlaceholderText("設定済み")).toBeInTheDocument();
+    expect(screen.queryByLabelText("OpenAI互換 Base URL")).not.toBeInTheDocument();
+
+    await userEvent.clear(screen.getByLabelText("タイムアウト(ms)"));
+    await userEvent.type(screen.getByLabelText("タイムアウト(ms)"), "45000");
+    await userEvent.type(screen.getByLabelText("Gemini APIキー"), "new-secret");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(client.setExtensionSettingValues).toHaveBeenCalledWith(
+        "yuukei-intelligence",
+        expect.objectContaining({
+          provider: "gemini",
+          timeoutMs: 45000
+        })
+      );
+    });
+    expect(client.setExtensionSecret).toHaveBeenCalledWith(
+      "yuukei-intelligence",
+      "gemini.apiKey",
+      "new-secret"
+    );
+  });
+
+  it("clears Extension secrets without exposing their values", async () => {
+    const intelligence = {
+      ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),
+      settingsSchema: {
+        fields: [
+          {
+            key: "provider",
+            type: "select" as const,
+            label: "プロバイダ",
+            options: [{ value: "gemini", label: "Gemini" }],
+            default: "gemini"
+          },
+          {
+            key: "gemini.apiKey",
+            type: "secret" as const,
+            label: "Gemini APIキー",
+            visibleWhen: { key: "provider", equals: "gemini" }
+          }
+        ]
+      },
+      settingValues: {
+        provider: "gemini"
+      },
+      secretsSet: ["gemini.apiKey"]
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      setExtensionSecret: vi.fn(async () => ({
+        state: extensionSettings([{ ...intelligence, secretsSet: [] }]),
+        snapshot: snapshot("secretを消しました")
+      }))
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    const secret = await screen.findByLabelText("Gemini APIキー");
+    expect(secret).toHaveValue("");
+    expect(screen.getByPlaceholderText("設定済み")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "クリア" }));
+
+    await waitFor(() => {
+      expect(client.setExtensionSecret).toHaveBeenCalledWith(
+        "yuukei-intelligence",
+        "gemini.apiKey",
+        null
+      );
+    });
   });
 });

@@ -170,6 +170,8 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     uninstallExtension: vi.fn(),
     setExtensionEnabled: vi.fn(),
     setExtensionHookOrder: vi.fn(),
+    setExtensionSettingValues: vi.fn(),
+    setExtensionSecret: vi.fn(),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),

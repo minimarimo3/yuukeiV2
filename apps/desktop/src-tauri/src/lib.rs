@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tauri::{
     http::{Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -313,6 +314,31 @@ async fn set_extension_hook_order(
     reload_runtime_for_extension_change(app, state).await
 }
 
+#[tauri::command]
+async fn set_extension_setting_values(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    extension_id: String,
+    values: Map<String, Value>,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::set_extension_setting_values_in(state.env.clone(), &extension_id, values)
+        .map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
+#[tauri::command]
+async fn set_extension_secret(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    extension_id: String,
+    key: String,
+    value: Option<String>,
+) -> Result<ExtensionSettingsChangeResult, String> {
+    LocalYuukeiRuntime::set_extension_secret_in(state.env.clone(), &extension_id, &key, value)
+        .map_err(to_message)?;
+    reload_runtime_for_extension_change(app, state).await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -393,7 +419,9 @@ pub fn run() {
             install_extension_directory,
             uninstall_extension,
             set_extension_enabled,
-            set_extension_hook_order
+            set_extension_hook_order,
+            set_extension_setting_values,
+            set_extension_secret
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");
