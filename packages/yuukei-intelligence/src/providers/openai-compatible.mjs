@@ -59,7 +59,7 @@ export async function generateWithOpenAiCompatible(input, config) {
     const text = json?.choices?.[0]?.message?.content;
     return {
       output: parseJsonOutput(text, input?.constraints?.maxLength),
-      metadata: { provider: "openai-compatible", model }
+      metadata: openAiCompatibleMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
@@ -111,7 +111,7 @@ export async function interpretWithOpenAiCompatible(input, config) {
     const text = json?.choices?.[0]?.message?.content;
     return {
       output: parseJsonInterpretOutput(text, input?.choices),
-      metadata: { provider: "openai-compatible", model }
+      metadata: openAiCompatibleMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
@@ -157,7 +157,7 @@ export async function summarizeMemoryIndexWithOpenAiCompatible(input, config) {
     const output = parseJsonMemoryIndexOutput(text);
     return {
       output: output ?? memoryIndexFailureOutput(),
-      metadata: { provider: "openai-compatible", model }
+      metadata: openAiCompatibleMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
@@ -229,4 +229,19 @@ async function fetchWithTimeout(url, init, timeoutMs = 10_000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function openAiCompatibleMetadata(json, model) {
+  const metadata = { provider: "openai-compatible", model };
+  const inputTokens = json?.usage?.prompt_tokens;
+  const outputTokens = json?.usage?.completion_tokens;
+  if (Number.isFinite(inputTokens) && Number.isFinite(outputTokens)) {
+    metadata.usage = {
+      inputTokens,
+      outputTokens,
+      model,
+      provider: "openai-compatible"
+    };
+  }
+  return metadata;
 }

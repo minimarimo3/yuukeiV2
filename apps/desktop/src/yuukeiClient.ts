@@ -103,6 +103,33 @@ export type ExtensionSettingsChangeResult = {
   snapshot: ResidentSnapshot;
 };
 
+export type TokenUsageTotals = {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
+export type ModelCapabilityUsage = {
+  provider: string;
+  model: string;
+  allTime: TokenUsageTotals;
+  last7Days: TokenUsageTotals;
+};
+
+export type CapabilityUsageByCapability = {
+  capability: string;
+  models: ModelCapabilityUsage[];
+};
+
+export type ExtensionCapabilityUsage = {
+  extensionId: string;
+  capabilities: CapabilityUsageByCapability[];
+};
+
+export type CapabilityUsageState = {
+  extensions: ExtensionCapabilityUsage[];
+};
+
 export type ActorSurfaceAssetCatalog = {
   worldPackId: string;
   actors: ActorSurfaceAsset[];
@@ -195,6 +222,7 @@ export type YuukeiClient = {
   getSnapshot(): Promise<ResidentSnapshot>;
   getWorldPackStatus(): Promise<WorldPackSelectionState>;
   getExtensionSettings(): Promise<ExtensionSettingsState>;
+  getCapabilityUsage(): Promise<CapabilityUsageState>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
   setStageOverlayClickThrough(passthrough: boolean): Promise<void>;
@@ -249,6 +277,7 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<WorldPackSelectionState>("get_world_pack_status"),
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
+  getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
   getActorSurfaceAssets: () =>
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
   setActorWindowClickThrough: (passthrough: boolean) =>

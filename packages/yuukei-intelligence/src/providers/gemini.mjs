@@ -52,7 +52,7 @@ export async function generateWithGemini(input, config) {
     const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
     return {
       output: parseJsonOutput(text, input?.constraints?.maxLength),
-      metadata: { provider: "gemini", model }
+      metadata: geminiMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
@@ -102,7 +102,7 @@ export async function interpretWithGemini(input, config) {
     const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
     return {
       output: parseJsonInterpretOutput(text, input?.choices),
-      metadata: { provider: "gemini", model }
+      metadata: geminiMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
@@ -152,7 +152,7 @@ export async function summarizeMemoryIndexWithGemini(input, config) {
     const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
     return {
       output: parseJsonMemoryIndexOutput(text) ?? memoryIndexFailureOutput(),
-      metadata: { provider: "gemini", model }
+      metadata: geminiMetadata(json, model)
     };
   } catch (error) {
     console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
@@ -206,6 +206,21 @@ async function fetchWithTimeout(url, init, timeoutMs = 10_000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function geminiMetadata(json, model) {
+  const metadata = { provider: "gemini", model };
+  const inputTokens = json?.usageMetadata?.promptTokenCount;
+  const outputTokens = json?.usageMetadata?.candidatesTokenCount;
+  if (Number.isFinite(inputTokens) && Number.isFinite(outputTokens)) {
+    metadata.usage = {
+      inputTokens,
+      outputTokens,
+      model,
+      provider: "gemini"
+    };
+  }
+  return metadata;
 }
 
 export function normalizeGeminiOutput(value, maxLength) {

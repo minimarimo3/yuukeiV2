@@ -20,11 +20,20 @@ test("memory.index saves diary and facts", async () => {
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(init.body);
     assert.match(body.messages[1].content, /唐揚げを食べた/);
-    return chatResponse({ diary: "ユーザーは唐揚げの話をした。", newFacts: ["唐揚げが好き。"] });
+    return chatResponse(
+      { diary: "ユーザーは唐揚げの話をした。", newFacts: ["唐揚げが好き。"] },
+      { prompt_tokens: 22, completion_tokens: 9 }
+    );
   };
   try {
     const result = await indexMemory(sampleIndexInput(), config, env(dataDir));
     assert.deepEqual(result.output, { indexed: true, noteCount: 1 });
+    assert.deepEqual(result.metadata.usage, {
+      inputTokens: 22,
+      outputTokens: 9,
+      model: "stub-model",
+      provider: "openai-compatible"
+    });
     assert.deepEqual(await readEpisodes(dataDir), [
       { date: "2026-01-02", text: "ユーザーは唐揚げの話をした。" }
     ]);
@@ -193,9 +202,12 @@ function env(dataDir) {
   return { YUUKEI_EXTENSION_DATA_DIR: dataDir };
 }
 
-function chatResponse(value) {
+function chatResponse(value, usage) {
   return new Response(
-    JSON.stringify({ choices: [{ message: { content: JSON.stringify(value) } }] }),
+    JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(value) } }],
+      ...(usage ? { usage } : {})
+    }),
     { status: 200, headers: { "content-type": "application/json" } }
   );
 }

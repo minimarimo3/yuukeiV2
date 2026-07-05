@@ -40,6 +40,10 @@ test("openai-compatible formats request and maps JSON response", async () => {
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init, body: JSON.parse(init.body) });
     return response(200, {
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 5
+      },
       choices: [
         {
           message: {
@@ -78,6 +82,12 @@ test("openai-compatible formats request and maps JSON response", async () => {
     assert.equal(calls[0].body.messages[0].role, "system");
     assert.equal(calls[0].body.messages[1].role, "user");
     assert.match(calls[0].body.messages[1].content, /Yuukei/);
+    assert.deepEqual(result.metadata.usage, {
+      inputTokens: 12,
+      outputTokens: 5,
+      model: "local-test",
+      provider: "openai-compatible"
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -402,6 +412,10 @@ test("gemini formats request and maps JSON response", async () => {
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init, body: JSON.parse(init.body) });
     return response(200, {
+      usageMetadata: {
+        promptTokenCount: 18,
+        candidatesTokenCount: 7
+      },
       candidates: [
         {
           content: {
@@ -431,6 +445,12 @@ test("gemini formats request and maps JSON response", async () => {
     assert.equal(calls[0].body.generationConfig.responseMimeType, "application/json");
     assert.equal(calls[0].body.generationConfig.responseSchema.properties.speak.type, "BOOLEAN");
     assert.match(calls[0].body.contents[0].parts[0].text, /Yuukei/);
+    assert.deepEqual(result.metadata.usage, {
+      inputTokens: 18,
+      outputTokens: 7,
+      model: "gemini-test",
+      provider: "gemini"
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

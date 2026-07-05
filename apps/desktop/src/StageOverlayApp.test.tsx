@@ -153,6 +153,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getSnapshot: vi.fn(),
     getWorldPackStatus: vi.fn(),
     getExtensionSettings: vi.fn(),
+    getCapabilityUsage: vi.fn(),
     getActorSurfaceAssets: vi.fn(),
     setActorWindowClickThrough: vi.fn(async () => undefined),
     setStageOverlayClickThrough: vi.fn(async () => undefined),

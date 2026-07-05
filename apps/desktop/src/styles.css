@@ -839,6 +839,66 @@ input {
   background: var(--panel-muted);
 }
 
+.extension-usage {
+  display: grid;
+  gap: 8px;
+}
+
+.extension-usage h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.extension-usage-table {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.extension-usage-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.1fr) minmax(108px, 0.9fr) minmax(108px, 0.9fr);
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border-top: 1px solid #eaecf0;
+  font-size: 11px;
+}
+
+.extension-usage-row:first-child {
+  border-top: 0;
+}
+
+.extension-usage-head {
+  background: var(--panel-muted);
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.extension-usage-row strong,
+.extension-usage-row small,
+.extension-usage-totals span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.extension-usage-row strong {
+  color: var(--text);
+}
+
+.extension-usage-row small,
+.extension-usage-totals {
+  color: var(--muted);
+}
+
+.extension-usage-totals {
+  display: grid;
+  gap: 2px;
+}
+
 .compact-button {
   min-width: 42px;
   height: 30px;
@@ -986,7 +1046,8 @@ input {
   }
 
   .extension-setting-field,
-  .extension-secret-control {
+  .extension-secret-control,
+  .extension-usage-row {
     grid-template-columns: 1fr;
   }
 }

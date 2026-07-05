@@ -1,9 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import { App } from "./App";
 import type {
+  CapabilityUsageState,
   DaihonDiagnosticEntry,
   ExtensionSettingsState,
   WorldPackSelectionState,
@@ -112,6 +113,12 @@ function extensionSettings(
   };
 }
 
+function capabilityUsage(
+  extensions: CapabilityUsageState["extensions"] = []
+): CapabilityUsageState {
+  return { extensions };
+}
+
 function installedExtension(
   extensionId: string,
   displayName = extensionId,
@@ -148,6 +155,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
+    getCapabilityUsage: vi.fn(async () => capabilityUsage()),
     getActorSurfaceAssets: vi.fn(async () => ({
       worldPackId: "default-yuukei",
       actors: []
@@ -456,6 +464,94 @@ describe("App", () => {
     expect(screen.getByText("ext.watcher.activity")).toBeInTheDocument();
   });
 
+  it("shows token usage per Extension and refreshes it manually", async () => {
+    const intelligence = {
+      ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),
+      capabilities: [
+        {
+          capability: "dialogue.generate",
+          methods: ["generate"],
+          requiredPermissions: []
+        }
+      ]
+    };
+    const usage = capabilityUsage([
+      {
+        extensionId: "yuukei-intelligence",
+        capabilities: [
+          {
+            capability: "dialogue.generate",
+            models: [
+              {
+                provider: "openai-compatible",
+                model: "local-model",
+                allTime: {
+                  requests: 3,
+                  inputTokens: 1200,
+                  outputTokens: 345
+                },
+                last7Days: {
+                  requests: 1,
+                  inputTokens: 400,
+                  outputTokens: 90
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]);
+    const refreshedUsage = capabilityUsage([
+      {
+        extensionId: "yuukei-intelligence",
+        capabilities: [
+          {
+            capability: "dialogue.generate",
+            models: [
+              {
+                provider: "openai-compatible",
+                model: "local-model",
+                allTime: {
+                  requests: 4,
+                  inputTokens: 1500,
+                  outputTokens: 444
+                },
+                last7Days: {
+                  requests: 2,
+                  inputTokens: 700,
+                  outputTokens: 189
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]);
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      getCapabilityUsage: vi
+        .fn()
+        .mockResolvedValueOnce(usage)
+        .mockResolvedValueOnce(refreshedUsage)
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    expect(await screen.findByText("トークン使用量")).toBeInTheDocument();
+    const usageSection = screen.getByLabelText("yuukei-intelligence token usage");
+    expect(within(usageSection).getByText("dialogue.generate")).toBeInTheDocument();
+    expect(within(usageSection).getByText("openai-compatible / local-model")).toBeInTheDocument();
+    expect(within(usageSection).getByText("リクエスト 3")).toBeInTheDocument();
+    expect(within(usageSection).getByText("入力 1,200")).toBeInTheDocument();
+    expect(within(usageSection).getByText("出力 345")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "使用量を更新" }));
+
+    expect(await screen.findByText("リクエスト 4")).toBeInTheDocument();
+    expect(client.getCapabilityUsage).toHaveBeenCalledTimes(2);
+  });
+
   it("renders schema-driven Extension settings and saves visible values and secrets", async () => {
     const intelligence = {
       ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),
@@ -564,6 +660,62 @@ describe("App", () => {
       "gemini.apiKey",
       "new-secret"
     );
+  });
+
+  it("does not save untouched default Extension setting values", async () => {
+    const intelligence = {
+      ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),
+      settingsSchema: {
+        fields: [
+          {
+            key: "provider",
+            type: "select" as const,
+            label: "プロバイダ",
+            options: [
+              { value: "gemini", label: "Gemini" },
+              { value: "openai-compatible", label: "OpenAI互換" }
+            ],
+            default: "openai-compatible"
+          },
+          {
+            key: "timeoutMs",
+            type: "number" as const,
+            label: "タイムアウト(ms)",
+            default: 30000,
+            min: 1000
+          }
+        ]
+      },
+      settingValues: {},
+      secretsSet: []
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      setExtensionSettingValues: vi.fn(async () => ({
+        state: extensionSettings([
+          {
+            ...intelligence,
+            settingValues: { provider: "gemini" }
+          }
+        ]),
+        snapshot: snapshot("設定を保存しました")
+      }))
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await screen.findByText("Yuukei Intelligence");
+
+    expect(screen.getByLabelText("タイムアウト(ms)")).toHaveValue(30000);
+    await userEvent.selectOptions(screen.getByLabelText("プロバイダ"), "gemini");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(client.setExtensionSettingValues).toHaveBeenCalledWith(
+        "yuukei-intelligence",
+        { provider: "gemini" }
+      );
+    });
   });
 
   it("clears Extension secrets without exposing their values", async () => {

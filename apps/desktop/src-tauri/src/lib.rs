@@ -16,7 +16,7 @@ use tauri::{
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AvatarGesturePoke, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    AvatarGesturePoke, CapabilityUsageState, ExtensionSettingsChangeResult, ExtensionSettingsState,
     LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult,
     TAURI_SURFACE_ID,
 };
@@ -137,6 +137,12 @@ async fn get_extension_settings(
 ) -> Result<ExtensionSettingsState, String> {
     let runtime = state.runtime.lock().await;
     runtime.extension_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_capability_usage(state: State<'_, AppState>) -> Result<CapabilityUsageState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.capability_usage().map_err(to_message)
 }
 
 #[tauri::command]
@@ -405,6 +411,7 @@ pub fn run() {
             get_snapshot,
             get_world_pack_status,
             get_extension_settings,
+            get_capability_usage,
             get_actor_surface_assets,
             set_actor_window_click_through,
             set_stage_overlay_click_through,

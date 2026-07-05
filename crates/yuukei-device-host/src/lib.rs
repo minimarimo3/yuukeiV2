@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Local, Timelike};
+use chrono::{DateTime, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use thiserror::Error;
@@ -16,8 +16,9 @@ use yuukei_capability::CapabilityRouter;
 use yuukei_event_log::{EventLog, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
-    new_id, now_timestamp, ExtensionHookPoint, JsonMap, ResidentSnapshot, RuntimeCommand,
-    RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer, SurfaceSession,
+    new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, ResidentSnapshot,
+    RuntimeCommand, RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer,
+    SurfaceSession,
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{
@@ -211,6 +212,43 @@ pub enum ActorSurfaceHitZoneShape {
     Mesh,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityUsageState {
+    pub extensions: Vec<ExtensionCapabilityUsage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionCapabilityUsage {
+    pub extension_id: String,
+    pub capabilities: Vec<CapabilityUsageByCapability>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityUsageByCapability {
+    pub capability: String,
+    pub models: Vec<ModelCapabilityUsage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilityUsage {
+    pub provider: String,
+    pub model: String,
+    pub all_time: TokenUsageTotals,
+    pub last_7_days: TokenUsageTotals,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsageTotals {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvatarGesturePoke {
@@ -273,6 +311,101 @@ impl LocalTimePeriod {
             Self::LateNight => "深夜",
         }
     }
+}
+
+fn capability_usage_from_records(
+    records: &[EventLogRecord],
+    now: DateTime<Utc>,
+) -> CapabilityUsageState {
+    let cutoff = now - chrono::Duration::days(7);
+    let mut usage_by_key: BTreeMap<
+        (String, String, String, String),
+        (TokenUsageTotals, TokenUsageTotals),
+    > = BTreeMap::new();
+
+    for record in records {
+        if record.kind != "capability.invocation.result" {
+            continue;
+        }
+        let Some(usage) = record
+            .payload
+            .get("metadata")
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("usage"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let Some(extension_id) = record.payload.get("extensionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(capability) = record.payload.get("capability").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(provider) = usage.get("provider").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(model) = usage.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(input_tokens) = usage.get("inputTokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(output_tokens) = usage.get("outputTokens").and_then(Value::as_u64) else {
+            continue;
+        };
+
+        let timestamp = DateTime::parse_from_rfc3339(&record.timestamp)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .ok();
+        let entry = usage_by_key
+            .entry((
+                extension_id.to_string(),
+                capability.to_string(),
+                provider.to_string(),
+                model.to_string(),
+            ))
+            .or_default();
+        add_usage(&mut entry.0, input_tokens, output_tokens);
+        if timestamp.is_some_and(|timestamp| timestamp >= cutoff) {
+            add_usage(&mut entry.1, input_tokens, output_tokens);
+        }
+    }
+
+    let mut extension_map: BTreeMap<String, BTreeMap<String, Vec<ModelCapabilityUsage>>> =
+        BTreeMap::new();
+    for ((extension_id, capability, provider, model), (all_time, last_7_days)) in usage_by_key {
+        extension_map
+            .entry(extension_id)
+            .or_default()
+            .entry(capability)
+            .or_default()
+            .push(ModelCapabilityUsage {
+                provider,
+                model,
+                all_time,
+                last_7_days,
+            });
+    }
+
+    CapabilityUsageState {
+        extensions: extension_map
+            .into_iter()
+            .map(|(extension_id, capabilities)| ExtensionCapabilityUsage {
+                extension_id,
+                capabilities: capabilities
+                    .into_iter()
+                    .map(|(capability, models)| CapabilityUsageByCapability { capability, models })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn add_usage(totals: &mut TokenUsageTotals, input_tokens: u64, output_tokens: u64) {
+    totals.requests += 1;
+    totals.input_tokens += input_tokens;
+    totals.output_tokens += output_tokens;
 }
 
 impl LocalYuukeiRuntime {
@@ -478,6 +611,15 @@ impl LocalYuukeiRuntime {
         let config = extension_config_for_env(env);
         let mut registry = config.extension_settings_registry()?;
         registry.set_extension_secret(extension_id, key, value)
+    }
+
+    pub fn capability_usage(&self) -> Result<CapabilityUsageState> {
+        let records = self
+            .home
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        Ok(capability_usage_from_records(&records, Utc::now()))
     }
 
     pub async fn open(config: LocalRuntimeConfig) -> Result<Self> {
@@ -2612,6 +2754,154 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn capability_usage_aggregates_usage_metadata_with_7_day_boundary() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let records = vec![
+            usage_record(
+                1,
+                "2026-07-06T12:00:00.000Z",
+                "yuukei-intelligence",
+                "dialogue.generate",
+                "openai-compatible",
+                "local-model",
+                10,
+                4,
+            ),
+            usage_record(
+                2,
+                "2026-06-29T12:00:00.000Z",
+                "yuukei-intelligence",
+                "dialogue.generate",
+                "openai-compatible",
+                "local-model",
+                20,
+                6,
+            ),
+            usage_record(
+                3,
+                "2026-06-29T11:59:59.000Z",
+                "yuukei-intelligence",
+                "dialogue.generate",
+                "openai-compatible",
+                "local-model",
+                30,
+                8,
+            ),
+            usage_record(
+                4,
+                "2026-07-06T12:00:00.000Z",
+                "yuukei-intelligence",
+                "memory.index",
+                "gemini",
+                "gemini-2.5-flash",
+                40,
+                12,
+            ),
+        ];
+
+        let usage = capability_usage_from_records(&records, now);
+        let extension = usage
+            .extensions
+            .iter()
+            .find(|extension| extension.extension_id == "yuukei-intelligence")
+            .expect("extension usage");
+        let dialogue = extension
+            .capabilities
+            .iter()
+            .find(|capability| capability.capability == "dialogue.generate")
+            .expect("dialogue usage");
+        let local_model = &dialogue.models[0];
+
+        assert_eq!(
+            local_model.all_time,
+            TokenUsageTotals {
+                requests: 3,
+                input_tokens: 60,
+                output_tokens: 18
+            }
+        );
+        assert_eq!(
+            local_model.last_7_days,
+            TokenUsageTotals {
+                requests: 2,
+                input_tokens: 30,
+                output_tokens: 10
+            }
+        );
+        assert!(extension
+            .capabilities
+            .iter()
+            .any(|capability| capability.capability == "memory.index"));
+    }
+
+    #[tokio::test]
+    async fn capability_usage_reads_capability_result_events() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime.home().event_log().append(NewEventLogRecord {
+            id: "evt_usage_runtime".to_string(),
+            kind: "capability.invocation.result".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            resident_id: DEFAULT_RESIDENT_ID.to_string(),
+            source: "capability".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                ("invocationId".to_string(), json!("cap_1")),
+                ("extensionId".to_string(), json!("usage-extension")),
+                ("capability".to_string(), json!("dialogue.generate")),
+                ("output".to_string(), json!({ "speak": true })),
+                (
+                    "metadata".to_string(),
+                    json!({
+                        "usage": {
+                            "inputTokens": 12,
+                            "outputTokens": 5,
+                            "model": "usage-model",
+                            "provider": "openai-compatible"
+                        }
+                    }),
+                ),
+            ]),
+            causality: None,
+            privacy: None,
+        })?;
+
+        let usage = runtime.capability_usage()?;
+        let extension = usage
+            .extensions
+            .iter()
+            .find(|extension| extension.extension_id == "usage-extension")
+            .expect("extension usage");
+        let model = &extension.capabilities[0].models[0];
+
+        assert_eq!(extension.capabilities[0].capability, "dialogue.generate");
+        assert_eq!(model.provider, "openai-compatible");
+        assert_eq!(model.model, "usage-model");
+        assert_eq!(
+            model.all_time,
+            TokenUsageTotals {
+                requests: 1,
+                input_tokens: 12,
+                output_tokens: 5
+            }
+        );
+        assert_eq!(model.last_7_days, model.all_time);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn yuukei_intelligence_process_generates_dialogue_through_device_host() -> Result<()> {
         let workspace = tempdir()?;
@@ -2641,11 +2931,23 @@ mod tests {
             .event_log()
             .read(EventLogQuery::default())?
             .records;
-        assert!(records.iter().any(|record| {
-            record.kind == "capability.invocation.result"
-                && record.payload["extensionId"] == json!("yuukei-intelligence")
-                && record.payload["capability"] == json!("dialogue.generate")
-        }));
+        let result = records
+            .iter()
+            .find(|record| {
+                record.kind == "capability.invocation.result"
+                    && record.payload["extensionId"] == json!("yuukei-intelligence")
+                    && record.payload["capability"] == json!("dialogue.generate")
+            })
+            .expect("dialogue.generate result");
+        assert_eq!(
+            result.payload["metadata"]["usage"],
+            json!({
+                "inputTokens": 13,
+                "outputTokens": 5,
+                "model": "stub-model",
+                "provider": "openai-compatible"
+            })
+        );
         Ok(())
     }
 
@@ -2844,6 +3146,46 @@ mod tests {
             }))?,
         )?;
         Ok(())
+    }
+
+    fn usage_record(
+        sequence: i64,
+        timestamp: &str,
+        extension_id: &str,
+        capability: &str,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> EventLogRecord {
+        EventLogRecord {
+            sequence,
+            id: format!("evt_usage_{sequence}"),
+            kind: "capability.invocation.result".to_string(),
+            timestamp: timestamp.to_string(),
+            resident_id: DEFAULT_RESIDENT_ID.to_string(),
+            source: "capability".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                ("extensionId".to_string(), json!(extension_id)),
+                ("capability".to_string(), json!(capability)),
+                (
+                    "metadata".to_string(),
+                    json!({
+                        "usage": {
+                            "inputTokens": input_tokens,
+                            "outputTokens": output_tokens,
+                            "model": model,
+                            "provider": provider
+                        }
+                    }),
+                ),
+            ]),
+            causality: None,
+            privacy: None,
+        }
     }
 
     fn write_llm_fallback_pack(root: &Path) -> Result<()> {
@@ -3403,6 +3745,7 @@ globalThis.fetch = async (url, init) => {
   const bodyText = JSON.stringify(body);
   if (bodyText.includes("ユーザーは今日のお出かけに行けますか？")) {
     return new Response(JSON.stringify({
+      usage: { prompt_tokens: 21, completion_tokens: 7 },
       choices: [
         {
           message: {
@@ -3417,6 +3760,7 @@ globalThis.fetch = async (url, init) => {
   }
   if (bodyText.includes("memory.index provider") || bodyText.includes("newFacts")) {
     return new Response(JSON.stringify({
+      usage: { prompt_tokens: 34, completion_tokens: 10 },
       choices: [
         {
           message: {
@@ -3434,6 +3778,7 @@ globalThis.fetch = async (url, init) => {
       throw new Error("prompt did not include retrieved memory");
     }
     return new Response(JSON.stringify({
+      usage: { prompt_tokens: 55, completion_tokens: 12 },
       choices: [
         {
           message: {
@@ -3450,6 +3795,7 @@ globalThis.fetch = async (url, init) => {
     throw new Error("prompt did not include source text");
   }
   return new Response(JSON.stringify({
+    usage: { prompt_tokens: 13, completion_tokens: 5 },
     choices: [
       {
         message: {

@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import type { ExtensionSettingField } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
+  type CapabilityUsageState,
+  type ExtensionCapabilityUsage,
   type DaihonDiagnosticEntry,
   type ExtensionSettingsChangeResult,
   type ExtensionSettingsState,
@@ -34,6 +36,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     useState<WorldPackSelectionState | null>(null);
   const [extensionState, setExtensionState] =
     useState<ExtensionSettingsState | null>(null);
+  const [capabilityUsage, setCapabilityUsage] =
+    useState<CapabilityUsageState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
   const [switchingPack, setSwitchingPack] = useState(false);
@@ -69,13 +73,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
 
     async function refreshSettings() {
-      const [nextWorldPackStatus, nextExtensionState] = await Promise.all([
-        client.getWorldPackStatus(),
-        client.getExtensionSettings()
-      ]);
+      const [nextWorldPackStatus, nextExtensionState, nextCapabilityUsage] =
+        await Promise.all([
+          client.getWorldPackStatus(),
+          client.getExtensionSettings(),
+          client.getCapabilityUsage()
+        ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
         setExtensionState(nextExtensionState);
+        setCapabilityUsage(nextCapabilityUsage);
       }
     }
 
@@ -205,6 +212,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function refreshCapabilityUsage() {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      setCapabilityUsage(await client.getCapabilityUsage());
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
   const settingsCategories: SettingsCategory[] = [
     {
       id: "worldPack",
@@ -291,6 +310,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   );
                 const canReorderHook = hookIndex >= 0;
                 const permissionRows = extensionPermissionRows(extension);
+                const usage = capabilityUsage?.extensions.find(
+                  (usage) => usage.extensionId === extension.extensionId
+                );
                 return (
                   <article
                     className="extension-row"
@@ -341,6 +363,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           onResult={applyExtensionResult}
                         />
                       ) : null}
+                      <ExtensionUsageSection usage={usage} />
                     </div>
                     {extension.lastLoadError ? (
                       <p className="settings-error">
@@ -392,6 +415,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               disabled={changingExtensions}
             >
               追加
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={refreshCapabilityUsage}
+              disabled={changingExtensions}
+            >
+              使用量を更新
             </button>
           </div>
         </>
@@ -468,6 +499,72 @@ type ExtensionSettingsFormProps = {
   onResult: (result: ExtensionSettingsChangeResult) => void;
 };
 
+type ExtensionUsageSectionProps = {
+  usage?: ExtensionCapabilityUsage;
+};
+
+function ExtensionUsageSection({ usage }: ExtensionUsageSectionProps) {
+  const rows =
+    usage?.capabilities.flatMap((capability) =>
+      capability.models.map((model) => ({
+        capability: capability.capability,
+        ...model
+      }))
+    ) ?? [];
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return (
+    <section
+      className="extension-usage"
+      aria-label={`${usage?.extensionId ?? "extension"} token usage`}
+    >
+      <h3>トークン使用量</h3>
+      <div className="extension-usage-table">
+        <div className="extension-usage-row extension-usage-head">
+          <span>capability / model</span>
+          <span>全期間</span>
+          <span>直近7日</span>
+        </div>
+        {rows.map((row) => (
+          <div
+            className="extension-usage-row"
+            key={`${row.capability}:${row.provider}:${row.model}`}
+          >
+            <span>
+              <strong>{row.capability}</strong>
+              <small>
+                {row.provider} / {row.model}
+              </small>
+            </span>
+            <TokenUsageTotalsView totals={row.allTime} />
+            <TokenUsageTotalsView totals={row.last7Days} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type TokenUsageTotalsViewProps = {
+  totals: {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+  };
+};
+
+function TokenUsageTotalsView({ totals }: TokenUsageTotalsViewProps) {
+  return (
+    <span className="extension-usage-totals">
+      <span>リクエスト {formatNumber(totals.requests)}</span>
+      <span>入力 {formatNumber(totals.inputTokens)}</span>
+      <span>出力 {formatNumber(totals.outputTokens)}</span>
+    </span>
+  );
+}
+
 function ExtensionSettingsForm({
   extension,
   client,
@@ -478,12 +575,14 @@ function ExtensionSettingsForm({
     initialSettingDraft(extension)
   );
   const [secretDraft, setSecretDraft] = useState<Record<string, string>>({});
+  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(initialSettingDraft(extension));
     setSecretDraft({});
+    setDirtyKeys(new Set());
     setError(null);
   }, [extension.extensionId, extension.settingsSchema, extension.settingValues]);
 
@@ -497,7 +596,20 @@ function ExtensionSettingsForm({
       const nonSecretValues: Record<string, unknown> = {};
       for (const field of fields) {
         if (field.type === "secret") continue;
-        nonSecretValues[field.key] = draft[field.key] ?? null;
+        const hasSavedValue = Object.prototype.hasOwnProperty.call(
+          extension.settingValues,
+          field.key
+        );
+        if (!hasSavedValue && !dirtyKeys.has(field.key)) continue;
+        if (
+          hasSavedValue &&
+          dirtyKeys.has(field.key) &&
+          valuesEqual(draft[field.key], fieldDefaultValue(field))
+        ) {
+          nonSecretValues[field.key] = null;
+        } else {
+          nonSecretValues[field.key] = draft[field.key] ?? null;
+        }
       }
       let result = await client.setExtensionSettingValues(
         extension.extensionId,
@@ -515,6 +627,7 @@ function ExtensionSettingsForm({
         }
       }
       setSecretDraft({});
+      setDirtyKeys(new Set());
       onResult(result);
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
@@ -554,9 +667,10 @@ function ExtensionSettingsForm({
           secretValue={secretDraft[field.key] ?? ""}
           secretSet={extension.secretsSet.includes(field.key)}
           disabled={disabled || saving}
-          onValueChange={(value) =>
-            setDraft((current) => ({ ...current, [field.key]: value }))
-          }
+          onValueChange={(value) => {
+            setDraft((current) => ({ ...current, [field.key]: value }));
+            setDirtyKeys((current) => new Set(current).add(field.key));
+          }}
           onSecretChange={(value) =>
             setSecretDraft((current) => ({ ...current, [field.key]: value }))
           }
@@ -695,6 +809,14 @@ function fieldDefaultValue(field: ExtensionSettingField): unknown {
     return field.default;
   }
   return undefined;
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("ja-JP").format(value);
 }
 
 function fieldIsVisible(
