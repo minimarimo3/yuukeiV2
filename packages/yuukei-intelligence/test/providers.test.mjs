@@ -3,7 +3,7 @@ import { once } from "node:events";
 import test from "node:test";
 import { generateWithGemini } from "../src/providers/gemini.mjs";
 import { generateWithOpenAiCompatible } from "../src/providers/openai-compatible.mjs";
-import { capabilityResult } from "../src/output.mjs";
+import { capabilityResult, parseJsonOutput } from "../src/output.mjs";
 
 const sampleInput = {
   event: {
@@ -65,10 +65,82 @@ test("openai-compatible formats request and maps JSON response", async () => {
     assert.equal(calls[0].init.method, "POST");
     assert.equal(calls[0].init.headers.authorization, "Bearer secret");
     assert.equal(calls[0].body.model, "local-test");
-    assert.equal(calls[0].body.response_format.type, "json_object");
+    assert.equal(calls[0].body.response_format, undefined);
     assert.equal(calls[0].body.messages[0].role, "system");
     assert.equal(calls[0].body.messages[1].role, "user");
     assert.match(calls[0].body.messages[1].content, /Yuukei/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openai-compatible can request json_schema response format", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      choices: [{ message: { content: JSON.stringify({ speak: true, text: "schema ok" }) } }]
+    });
+  };
+  try {
+    const result = await generateWithOpenAiCompatible(sampleInput, {
+      timeoutMs: 1000,
+      openaiCompatible: {
+        baseUrl: "http://127.0.0.1:1234/v1",
+        model: "local-test",
+        responseFormat: "json_schema"
+      }
+    });
+
+    assert.deepEqual(result.output, { speak: true, text: "schema ok" });
+    assert.equal(calls[0].body.response_format.type, "json_schema");
+    assert.equal(calls[0].body.response_format.json_schema.name, "dialogue_generate_output");
+    assert.equal(calls[0].body.response_format.json_schema.strict, true);
+    assert.equal(calls[0].body.response_format.json_schema.schema.required[0], "speak");
+    assert.equal(
+      calls[0].body.response_format.json_schema.schema.additionalProperties,
+      false
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openai-compatible retries once without response_format when json_schema is rejected", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    if (calls.length === 1) {
+      return response(400, {
+        error: "'response_format.type' must be 'json_schema' or 'text'"
+      });
+    }
+    return response(200, {
+      choices: [
+        {
+          message: {
+            content: "```json\n{\"speak\":true,\"text\":\"再送で話せた。\"}\n```"
+          }
+        }
+      ]
+    });
+  };
+  try {
+    const result = await generateWithOpenAiCompatible(sampleInput, {
+      timeoutMs: 1000,
+      openaiCompatible: {
+        baseUrl: "http://127.0.0.1:1234/v1",
+        model: "local-test",
+        responseFormat: "json_schema"
+      }
+    });
+
+    assert.deepEqual(result.output, { speak: true, text: "再送で話せた。" });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].body.response_format.type, "json_schema");
+    assert.equal(calls[1].body.response_format, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -237,6 +309,18 @@ test("capability result preserves invocation envelope", () => {
   assert.equal(result.capability, "dialogue.generate");
   assert.equal(result.metadata.provider, "test");
   assert.equal(result.output.text.length, sampleInput.constraints.maxLength);
+});
+
+test("parseJsonOutput accepts fenced and embedded JSON but rejects non-JSON text", () => {
+  assert.deepEqual(parseJsonOutput("```json\n{\"speak\":true,\"text\":\"フェンス\"}\n```", 20), {
+    speak: true,
+    text: "フェンス"
+  });
+  assert.deepEqual(parseJsonOutput("前置き {\"speak\":true,\"text\":\"抽出\"} 後置き", 20), {
+    speak: true,
+    text: "抽出"
+  });
+  assert.deepEqual(parseJsonOutput("話すかもしれません", 20), { speak: false });
 });
 
 function response(status, body) {

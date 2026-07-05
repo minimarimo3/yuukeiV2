@@ -20,20 +20,23 @@ export async function generateWithOpenAiCompatible(input, config) {
       { role: "system", content: buildSystemPrompt() },
       { role: "user", content: buildDialoguePrompt(input) }
     ],
-    temperature: 0.7,
-    response_format: { type: "json_object" }
+    temperature: 0.7
   };
+  if (providerConfig.responseFormat === "json_schema") {
+    body.response_format = dialogueGenerateResponseFormat();
+  }
 
   try {
-    const response = await fetchWithTimeout(
-      `${baseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body)
-      },
-      config.timeoutMs
-    );
+    const url = `${baseUrl}/chat/completions`;
+    let response = await postChatCompletion(url, headers, body, config.timeoutMs);
+    if (!response.ok && body.response_format) {
+      console.error(
+        `yuukei-intelligence: openai-compatible API error ${response.status}; retrying without response_format`
+      );
+      const fallbackBody = { ...body };
+      delete fallbackBody.response_format;
+      response = await postChatCompletion(url, headers, fallbackBody, config.timeoutMs);
+    }
     if (!response.ok) {
       console.error(`yuukei-intelligence: openai-compatible API error ${response.status}`);
       return { output: silentOutput(), metadata: { provider: "openai-compatible", model } };
@@ -50,8 +53,41 @@ export async function generateWithOpenAiCompatible(input, config) {
   }
 }
 
+function dialogueGenerateResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "dialogue_generate_output",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          speak: { type: "boolean" },
+          text: { type: "string" },
+          expression: { type: "string" },
+          motion: { type: "string" }
+        },
+        required: ["speak"]
+      }
+    }
+  };
+}
+
 function trimTrailingSlash(value) {
   return String(value).replace(/\/+$/, "");
+}
+
+async function postChatCompletion(url, headers, body, timeoutMs) {
+  return await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    },
+    timeoutMs
+  );
 }
 
 async function fetchWithTimeout(url, init, timeoutMs = 10_000) {

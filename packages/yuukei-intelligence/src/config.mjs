@@ -3,13 +3,14 @@ import { join } from "node:path";
 
 const DEFAULT_CONFIG = {
   provider: "openai-compatible",
-  timeoutMs: 10_000,
+  timeoutMs: 30_000,
   gemini: {
     model: "gemini-2.5-flash"
   },
   openaiCompatible: {
     baseUrl: "http://127.0.0.1:1234/v1",
-    model: "local-model"
+    model: "local-model",
+    responseFormat: "none"
   }
 };
 
@@ -36,6 +37,9 @@ export async function loadConfig(cwd = process.cwd(), env = process.env) {
   }
   if (env.OPENAI_COMPATIBLE_MODEL) {
     merged.openaiCompatible.model = env.OPENAI_COMPATIBLE_MODEL;
+  }
+  if (env.OPENAI_COMPATIBLE_RESPONSE_FORMAT) {
+    merged.openaiCompatible.responseFormat = env.OPENAI_COMPATIBLE_RESPONSE_FORMAT;
   }
   return merged;
 }
