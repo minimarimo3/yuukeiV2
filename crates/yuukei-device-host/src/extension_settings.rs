@@ -1,18 +1,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use yuukei_capability::{DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID, SPEECH_SYNTHESIS_CAPABILITY};
 use yuukei_extension::{
     validate_extension_summary, ProcessExtensionManifest, ProcessHookExtension, YuukeiExtension,
 };
 use yuukei_protocol::{
     now_timestamp, ExtensionCapabilityDeclaration, ExtensionEventSubscription, ExtensionHookPoint,
-    ExtensionHookSubscription, ExtensionPermissions, ExtensionRuntimeKind, ExtensionSignalAlias,
-    ResidentSnapshot,
+    ExtensionHookSubscription, ExtensionPermissions, ExtensionRuntimeKind, ExtensionSettingField,
+    ExtensionSettingsSchema, ExtensionSignalAlias, ResidentSnapshot,
 };
 
 use crate::{DeviceHostError, Result};
@@ -22,7 +24,7 @@ const EXTENSION_MANIFEST_FILE: &str = "manifest.json";
 
 pub const TRUSTED_CODE_NOTICE: &str = "Extensionは信頼したローカルコードとして実行されます。Yuukeiは公開protocolへの入力と出力を検証しますが、OSレベルのファイルアクセス隔離はv1では行いません。";
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionSettingsState {
     pub installed: Vec<InstalledExtension>,
@@ -33,7 +35,7 @@ pub struct ExtensionSettingsState {
     pub trusted_code_notice: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledExtension {
     pub extension_id: String,
@@ -46,6 +48,12 @@ pub struct InstalledExtension {
     pub emitted_events: Vec<String>,
     pub capabilities: Vec<ExtensionCapabilityDeclaration>,
     pub signal_aliases: Vec<ExtensionSignalAlias>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_schema: Option<ExtensionSettingsSchema>,
+    #[serde(default)]
+    pub setting_values: Map<String, Value>,
+    #[serde(default)]
+    pub secrets_set: Vec<String>,
     pub installed_path: PathBuf,
     pub manifest_path: PathBuf,
     pub installed_at: String,
@@ -61,7 +69,7 @@ pub struct ExtensionSettingsChangeResult {
     pub snapshot: ResidentSnapshot,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredExtensionSettings {
     schema_version: u32,
@@ -71,6 +79,15 @@ struct StoredExtensionSettings {
     hook_order: BTreeMap<ExtensionHookPoint, Vec<String>>,
     #[serde(default)]
     capability_defaults: BTreeMap<String, String>,
+    #[serde(default)]
+    extension_values: BTreeMap<String, Map<String, Value>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredExtensionSecrets {
+    #[serde(flatten)]
+    extensions: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -90,6 +107,7 @@ pub(crate) struct ExtensionRuntimeInstall {
     pub enabled: bool,
     pub install_dir: PathBuf,
     pub manifest_path: PathBuf,
+    pub settings_json: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,14 +126,17 @@ pub(crate) enum ExtensionRuntimeEntry {
 #[derive(Clone, Debug)]
 pub struct ExtensionSettingsRegistry {
     settings_path: PathBuf,
+    secrets_path: PathBuf,
     extension_root: PathBuf,
     stored: StoredExtensionSettings,
+    secrets: StoredExtensionSecrets,
 }
 
 impl ExtensionSettingsRegistry {
     pub fn open(data_dir: impl AsRef<Path>, extension_root: impl AsRef<Path>) -> Result<Self> {
         let data_dir = data_dir.as_ref();
         let settings_path = data_dir.join("settings").join("extensions.json");
+        let secrets_path = data_dir.join("settings").join("extension-secrets.json");
         let extension_root = extension_root.as_ref().to_path_buf();
         fs::create_dir_all(&extension_root)?;
         if let Some(parent) = settings_path.parent() {
@@ -130,7 +151,14 @@ impl ExtensionSettingsRegistry {
                 installed_extensions: Vec::new(),
                 hook_order: BTreeMap::new(),
                 capability_defaults: BTreeMap::new(),
+                extension_values: BTreeMap::new(),
             }
+        };
+        let secrets = if secrets_path.exists() {
+            let raw = fs::read_to_string(&secrets_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            StoredExtensionSecrets::default()
         };
         if stored.schema_version != EXTENSION_SETTINGS_SCHEMA_VERSION {
             return Err(DeviceHostError::ExtensionSettings(format!(
@@ -140,11 +168,14 @@ impl ExtensionSettingsRegistry {
         }
         let mut registry = Self {
             settings_path,
+            secrets_path,
             extension_root,
             stored,
+            secrets,
         };
         registry.normalize();
         registry.save()?;
+        registry.save_secrets()?;
         Ok(registry)
     }
 
@@ -240,6 +271,8 @@ impl ExtensionSettingsRegistry {
         self.stored
             .installed_extensions
             .retain(|extension| extension.extension_id != extension_id);
+        self.stored.extension_values.remove(extension_id);
+        self.secrets.extensions.remove(extension_id);
         for order in self.stored.hook_order.values_mut() {
             order.retain(|candidate| candidate != extension_id);
         }
@@ -249,6 +282,7 @@ impl ExtensionSettingsRegistry {
         }
         self.normalize();
         self.save()?;
+        self.save_secrets()?;
         Ok(self.state())
     }
 
@@ -328,19 +362,119 @@ impl ExtensionSettingsRegistry {
         Ok(self.state())
     }
 
+    pub fn set_extension_setting_values(
+        &mut self,
+        extension_id: &str,
+        values: Map<String, Value>,
+    ) -> Result<ExtensionSettingsState> {
+        validate_extension_id(extension_id)?;
+        let manifest = self.manifest_for_installed_id(extension_id)?;
+        let Some(schema) = manifest.settings.as_ref() else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "extension does not declare settings: {extension_id}"
+            )));
+        };
+        let known = schema_fields_by_key(schema);
+        let mut next = self
+            .stored
+            .extension_values
+            .get(extension_id)
+            .cloned()
+            .unwrap_or_default();
+
+        for (key, value) in values {
+            let Some(field) = known.get(key.as_str()) else {
+                return Err(DeviceHostError::ExtensionSettings(format!(
+                    "unknown setting key for {extension_id}: {key}"
+                )));
+            };
+            if matches!(field, ExtensionSettingField::Secret { .. }) {
+                return Err(DeviceHostError::ExtensionSettings(format!(
+                    "secret setting must be updated through set_extension_secret: {key}"
+                )));
+            }
+            if value.is_null() {
+                next.remove(&key);
+                continue;
+            }
+            validate_setting_value(field, &value)?;
+            next.insert(key, value);
+        }
+
+        if next.is_empty() {
+            self.stored.extension_values.remove(extension_id);
+        } else {
+            self.stored
+                .extension_values
+                .insert(extension_id.to_string(), next);
+        }
+        self.save()?;
+        Ok(self.state())
+    }
+
+    pub fn set_extension_secret(
+        &mut self,
+        extension_id: &str,
+        key: &str,
+        value: Option<String>,
+    ) -> Result<ExtensionSettingsState> {
+        validate_extension_id(extension_id)?;
+        let manifest = self.manifest_for_installed_id(extension_id)?;
+        let Some(schema) = manifest.settings.as_ref() else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "extension does not declare settings: {extension_id}"
+            )));
+        };
+        let Some(field) = schema_fields_by_key(schema).remove(key) else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "unknown setting key for {extension_id}: {key}"
+            )));
+        };
+        if !matches!(field, ExtensionSettingField::Secret { .. }) {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "setting is not secret: {key}"
+            )));
+        }
+
+        match value {
+            Some(value) if !value.is_empty() => {
+                self.secrets
+                    .extensions
+                    .entry(extension_id.to_string())
+                    .or_default()
+                    .insert(key.to_string(), value);
+            }
+            _ => {
+                if let Some(secrets) = self.secrets.extensions.get_mut(extension_id) {
+                    secrets.remove(key);
+                    if secrets.is_empty() {
+                        self.secrets.extensions.remove(extension_id);
+                    }
+                }
+            }
+        }
+        self.save_secrets()?;
+        Ok(self.state())
+    }
+
     pub(crate) fn runtime_entries(&self) -> Vec<ExtensionRuntimeEntry> {
         self.ordered_installed_extensions()
             .into_iter()
             .map(|stored| {
                 let manifest_path = self.manifest_path(&stored.extension_id);
-                match self.read_manifest_for(stored) {
-                    Ok(manifest) => {
+                match self.read_manifest_for(stored).and_then(|manifest| {
+                    let settings_json =
+                        self.resolved_settings_json(&stored.extension_id, &manifest)?;
+                    Ok((manifest, settings_json))
+                }) {
+                    Ok((manifest, settings_json)) => {
                         ExtensionRuntimeEntry::Ready(Box::new(ExtensionRuntimeInstall {
                             extension_id: stored.extension_id.clone(),
                             manifest,
                             enabled: stored.enabled,
                             install_dir: self.install_dir(&stored.extension_id),
                             manifest_path,
+                            settings_json,
                         }))
                     }
                     Err(error) => ExtensionRuntimeEntry::Error(ExtensionRuntimeLoadError {
@@ -373,6 +507,18 @@ impl ExtensionSettingsRegistry {
         for extension in &mut self.stored.installed_extensions {
             extension.installed_path = self.extension_root.join(&extension.extension_id);
         }
+        let installed_ids = self
+            .stored
+            .installed_extensions
+            .iter()
+            .map(|extension| extension.extension_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.stored
+            .extension_values
+            .retain(|extension_id, _| installed_ids.contains(extension_id));
+        self.secrets
+            .extensions
+            .retain(|extension_id, _| installed_ids.contains(extension_id));
         for hook_point in [ExtensionHookPoint::BeforeCommandEmit] {
             let current = self
                 .stored
@@ -381,16 +527,8 @@ impl ExtensionSettingsRegistry {
                 .unwrap_or_default();
             let mut next = Vec::new();
             let mut ordered = BTreeSet::new();
-            let installed_ids = self
-                .stored
-                .installed_extensions
-                .iter()
-                .map(|extension| extension.extension_id.as_str())
-                .collect::<BTreeSet<_>>();
             for extension_id in current {
-                if installed_ids.contains(extension_id.as_str())
-                    && ordered.insert(extension_id.clone())
-                {
+                if installed_ids.contains(&extension_id) && ordered.insert(extension_id.clone()) {
                     next.push(extension_id);
                 }
             }
@@ -497,6 +635,10 @@ impl ExtensionSettingsRegistry {
                 emitted_events: manifest.emitted_events,
                 capabilities: manifest.capabilities,
                 signal_aliases: manifest.signal_aliases,
+                settings_schema: manifest.settings.clone(),
+                setting_values: self
+                    .visible_setting_values(&stored.extension_id, manifest.settings.as_ref()),
+                secrets_set: self.secret_keys_set(&stored.extension_id, manifest.settings.as_ref()),
                 installed_path: self.install_dir(&stored.extension_id),
                 manifest_path,
                 installed_at: stored.installed_at.clone(),
@@ -514,6 +656,9 @@ impl ExtensionSettingsRegistry {
                 emitted_events: Vec::new(),
                 capabilities: Vec::new(),
                 signal_aliases: Vec::new(),
+                settings_schema: None,
+                setting_values: Map::new(),
+                secrets_set: Vec::new(),
                 installed_path: self.install_dir(&stored.extension_id),
                 manifest_path,
                 installed_at: stored.installed_at.clone(),
@@ -589,6 +734,120 @@ impl ExtensionSettingsRegistry {
         )))
     }
 
+    fn manifest_for_installed_id(&self, extension_id: &str) -> Result<ProcessExtensionManifest> {
+        let Some(stored) = self
+            .stored
+            .installed_extensions
+            .iter()
+            .find(|stored| stored.extension_id == extension_id)
+        else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "extension is not installed: {extension_id}"
+            )));
+        };
+        self.read_manifest_for(stored)
+    }
+
+    fn visible_setting_values(
+        &self,
+        extension_id: &str,
+        schema: Option<&ExtensionSettingsSchema>,
+    ) -> Map<String, Value> {
+        let Some(schema) = schema else {
+            return Map::new();
+        };
+        let known = schema_fields_by_key(schema);
+        self.stored
+            .extension_values
+            .get(extension_id)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let field = known.get(key.as_str())?;
+                        if matches!(field, ExtensionSettingField::Secret { .. })
+                            || validate_setting_value(field, value).is_err()
+                        {
+                            return None;
+                        }
+                        Some((key.clone(), value.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn secret_keys_set(
+        &self,
+        extension_id: &str,
+        schema: Option<&ExtensionSettingsSchema>,
+    ) -> Vec<String> {
+        let Some(schema) = schema else {
+            return Vec::new();
+        };
+        let secret_keys = schema
+            .fields
+            .iter()
+            .filter_map(|field| {
+                matches!(field, ExtensionSettingField::Secret { .. })
+                    .then(|| field.key().to_string())
+            })
+            .collect::<BTreeSet<_>>();
+        let mut keys = self
+            .secrets
+            .extensions
+            .get(extension_id)
+            .map(|values| {
+                values
+                    .keys()
+                    .filter(|key| secret_keys.contains(*key))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        keys.sort();
+        keys
+    }
+
+    fn resolved_settings_json(
+        &self,
+        extension_id: &str,
+        manifest: &ProcessExtensionManifest,
+    ) -> Result<Option<String>> {
+        let Some(schema) = manifest.settings.as_ref() else {
+            return Ok(None);
+        };
+        // スキーマのdefaultはGUI表示用。ここで実効値へ焼き込むと、Extension自身の
+        // デフォルトや環境変数フォールバックを常に上書きしてしまうため、
+        // ユーザーが明示的に保存した値とsecretだけを渡す。
+        let mut effective = Map::new();
+        let known = schema_fields_by_key(schema);
+        if let Some(values) = self.stored.extension_values.get(extension_id) {
+            for (key, value) in values {
+                let Some(field) = known.get(key.as_str()) else {
+                    continue;
+                };
+                if matches!(field, ExtensionSettingField::Secret { .. })
+                    || validate_setting_value(field, value).is_err()
+                {
+                    continue;
+                }
+                effective.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(secrets) = self.secrets.extensions.get(extension_id) {
+            for (key, value) in secrets {
+                if known
+                    .get(key.as_str())
+                    .is_some_and(|field| matches!(field, ExtensionSettingField::Secret { .. }))
+                {
+                    effective.insert(key.clone(), Value::String(value.clone()));
+                }
+            }
+        }
+        Ok(Some(serde_json::to_string(&effective)?))
+    }
+
     fn save(&self) -> Result<()> {
         if let Some(parent) = self.settings_path.parent() {
             fs::create_dir_all(parent)?;
@@ -597,6 +856,31 @@ impl ExtensionSettingsRegistry {
             &self.settings_path,
             serde_json::to_vec_pretty(&self.stored)?,
         )?;
+        Ok(())
+    }
+
+    fn save_secrets(&self) -> Result<()> {
+        if let Some(parent) = self.secrets_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(&self.secrets)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&self.secrets_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.secrets_path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }
@@ -630,11 +914,161 @@ fn validate_manifest(manifest: &ProcessExtensionManifest) -> Result<()> {
             ));
         }
     }
+    if let Some(schema) = &manifest.settings {
+        validate_settings_schema(schema)?;
+    }
     validate_extension_id(&manifest.id)?;
     let summary = ProcessHookExtension::from_manifest(manifest.clone()).registration();
     validate_extension_summary(&summary)
         .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
     Ok(())
+}
+
+fn validate_settings_schema(schema: &ExtensionSettingsSchema) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    for field in &schema.fields {
+        validate_setting_key(field.key())?;
+        if !keys.insert(field.key().to_string()) {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "duplicate setting key: {}",
+                field.key()
+            )));
+        }
+        match field {
+            ExtensionSettingField::Select {
+                key,
+                options,
+                default,
+                ..
+            } => {
+                if options.is_empty() {
+                    return Err(DeviceHostError::ExtensionSettings(format!(
+                        "select setting must declare options: {key}"
+                    )));
+                }
+                let option_values = options
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .collect::<BTreeSet<_>>();
+                if let Some(default) = default {
+                    if !option_values.contains(default.as_str()) {
+                        return Err(DeviceHostError::ExtensionSettings(format!(
+                            "select setting default must be one of options: {key}"
+                        )));
+                    }
+                }
+            }
+            ExtensionSettingField::Number { key, min, max, .. } => {
+                if let (Some(min), Some(max)) = (*min, *max) {
+                    if min > max {
+                        return Err(DeviceHostError::ExtensionSettings(format!(
+                            "number setting min must be <= max: {key}"
+                        )));
+                    }
+                }
+            }
+            ExtensionSettingField::Secret { key, default, .. } => {
+                if default.is_some() {
+                    return Err(DeviceHostError::ExtensionSettings(format!(
+                        "secret setting cannot declare default: {key}"
+                    )));
+                }
+            }
+            ExtensionSettingField::String { .. } | ExtensionSettingField::Boolean { .. } => {}
+        }
+    }
+    for field in &schema.fields {
+        if let Some(visible_when) = field.visible_when() {
+            if !keys.contains(&visible_when.key) {
+                return Err(DeviceHostError::ExtensionSettings(format!(
+                    "visibleWhen references unknown setting key: {}",
+                    visible_when.key
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn schema_fields_by_key(
+    schema: &ExtensionSettingsSchema,
+) -> BTreeMap<&str, &ExtensionSettingField> {
+    schema
+        .fields
+        .iter()
+        .map(|field| (field.key(), field))
+        .collect()
+}
+
+fn validate_setting_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err(DeviceHostError::ExtensionSettings(format!(
+            "invalid setting key: {key}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_setting_value(field: &ExtensionSettingField, value: &Value) -> Result<()> {
+    match field {
+        ExtensionSettingField::String { key, .. } => {
+            if value.is_string() {
+                Ok(())
+            } else {
+                Err(setting_type_error(key, "string"))
+            }
+        }
+        ExtensionSettingField::Number { key, min, max, .. } => {
+            let Some(number) = value.as_f64() else {
+                return Err(setting_type_error(key, "number"));
+            };
+            if let Some(min) = *min {
+                if number < min {
+                    return Err(DeviceHostError::ExtensionSettings(format!(
+                        "setting {key} is below minimum {min}"
+                    )));
+                }
+            }
+            if let Some(max) = *max {
+                if number > max {
+                    return Err(DeviceHostError::ExtensionSettings(format!(
+                        "setting {key} is above maximum {max}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        ExtensionSettingField::Boolean { key, .. } => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(setting_type_error(key, "boolean"))
+            }
+        }
+        ExtensionSettingField::Select { key, options, .. } => {
+            let Some(selected) = value.as_str() else {
+                return Err(setting_type_error(key, "select"));
+            };
+            if options.iter().any(|option| option.value == selected) {
+                Ok(())
+            } else {
+                return Err(DeviceHostError::ExtensionSettings(format!(
+                    "setting {key} must be one of declared options"
+                )));
+            }
+        }
+        ExtensionSettingField::Secret { key, .. } => Err(DeviceHostError::ExtensionSettings(
+            format!("secret setting must be updated through set_extension_secret: {key}"),
+        )),
+    }
+}
+
+fn setting_type_error(key: &str, expected: &str) -> DeviceHostError {
+    DeviceHostError::ExtensionSettings(format!("setting {key} must be {expected}"))
 }
 
 fn validate_capability_name(capability: &str) -> Result<()> {

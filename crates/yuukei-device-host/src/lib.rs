@@ -9,7 +9,7 @@ use std::{
 
 use chrono::{DateTime, Local, Timelike};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use yuukei_capability::CapabilityRouter;
@@ -433,6 +433,51 @@ impl LocalYuukeiRuntime {
         let config = extension_config_for_env(env);
         let mut registry = config.extension_settings_registry()?;
         registry.set_capability_default(capability, extension_id)
+    }
+
+    pub fn set_extension_setting_values(
+        extension_id: &str,
+        values: Map<String, Value>,
+    ) -> Result<ExtensionSettingsState> {
+        Self::set_extension_setting_values_in(
+            LocalRuntimeEnvironment::default_local(),
+            extension_id,
+            values,
+        )
+    }
+
+    pub fn set_extension_setting_values_in(
+        env: LocalRuntimeEnvironment,
+        extension_id: &str,
+        values: Map<String, Value>,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.set_extension_setting_values(extension_id, values)
+    }
+
+    pub fn set_extension_secret(
+        extension_id: &str,
+        key: &str,
+        value: Option<String>,
+    ) -> Result<ExtensionSettingsState> {
+        Self::set_extension_secret_in(
+            LocalRuntimeEnvironment::default_local(),
+            extension_id,
+            key,
+            value,
+        )
+    }
+
+    pub fn set_extension_secret_in(
+        env: LocalRuntimeEnvironment,
+        extension_id: &str,
+        key: &str,
+        value: Option<String>,
+    ) -> Result<ExtensionSettingsState> {
+        let config = extension_config_for_env(env);
+        let mut registry = config.extension_settings_registry()?;
+        registry.set_extension_secret(extension_id, key, value)
     }
 
     pub async fn open(config: LocalRuntimeConfig) -> Result<Self> {
@@ -1540,14 +1585,13 @@ async fn load_trusted_extensions(
                 let manifest_path = install.manifest_path.clone();
                 let extension_data_dir = extension_data_dir(data_dir, &extension_id);
                 fs::create_dir_all(&extension_data_dir)?;
-                home.register_extension(
-                    ProcessHookExtension::from_installed_manifest(
-                        install.manifest,
-                        install.install_dir,
-                        install.enabled,
-                    )
-                    .with_data_dir(extension_data_dir),
-                )
+                home.register_extension(extension_with_runtime_environment(
+                    install.manifest,
+                    install.install_dir,
+                    install.enabled,
+                    extension_data_dir,
+                    install.settings_json,
+                ))
                 .await?;
                 loaded += 1;
                 logger.record(
@@ -1598,14 +1642,13 @@ fn build_extension_capability_router(
                 let extension_data_dir = extension_data_dir(data_dir, &install.extension_id);
                 fs::create_dir_all(&extension_data_dir)?;
                 router
-                    .register(
-                        ProcessHookExtension::from_installed_manifest(
-                            install.manifest,
-                            install.install_dir,
-                            install.enabled,
-                        )
-                        .with_data_dir(extension_data_dir),
-                    )
+                    .register(extension_with_runtime_environment(
+                        install.manifest,
+                        install.install_dir,
+                        install.enabled,
+                        extension_data_dir,
+                        install.settings_json,
+                    ))
                     .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
             }
             ExtensionRuntimeEntry::Error(error) => {
@@ -1628,6 +1671,22 @@ fn build_extension_capability_router(
         router.set_default_extension(capability, extension_id);
     }
     Ok(router)
+}
+
+fn extension_with_runtime_environment(
+    manifest: yuukei_extension::ProcessExtensionManifest,
+    install_dir: impl Into<PathBuf>,
+    enabled: bool,
+    data_dir: impl Into<PathBuf>,
+    settings_json: Option<String>,
+) -> ProcessHookExtension {
+    let extension = ProcessHookExtension::from_installed_manifest(manifest, install_dir, enabled)
+        .with_data_dir(data_dir);
+    if let Some(settings_json) = settings_json {
+        extension.with_settings_json(settings_json)
+    } else {
+        extension
+    }
 }
 
 fn display_path(path: impl AsRef<Path>) -> String {
@@ -2417,6 +2476,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_setting_values_and_secrets_persist_without_exposing_secret() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_llm_fallback_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let source = workspace.path().join("downloads").join("settings-probe");
+        write_settings_probe_extension_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let state = LocalYuukeiRuntime::set_extension_setting_values_in(
+            env.clone(),
+            "settings-probe",
+            Map::from_iter([
+                ("provider".to_string(), json!("gemini")),
+                ("timeoutMs".to_string(), json!(45000)),
+            ]),
+        )?;
+        assert_eq!(
+            state.installed[0].setting_values["provider"],
+            json!("gemini")
+        );
+        assert!(state.installed[0].secrets_set.is_empty());
+
+        let state = LocalYuukeiRuntime::set_extension_secret_in(
+            env.clone(),
+            "settings-probe",
+            "gemini.apiKey",
+            Some("super-secret".to_string()),
+        )?;
+        assert_eq!(state.installed[0].secrets_set, vec!["gemini.apiKey"]);
+        assert!(!serde_json::to_string(&state)?.contains("super-secret"));
+
+        let raw_settings =
+            fs::read_to_string(data.path().join("settings").join("extensions.json"))?;
+        assert!(raw_settings.contains("\"extensionValues\""));
+        assert!(raw_settings.contains("\"provider\""));
+        assert!(!raw_settings.contains("super-secret"));
+
+        let secrets_path = data.path().join("settings").join("extension-secrets.json");
+        let raw_secrets = fs::read_to_string(&secrets_path)?;
+        assert!(raw_secrets.contains("super-secret"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&secrets_path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "設定は？")
+            .await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.payload["text"] == json!("settings ok")));
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        assert!(!serde_json::to_string(&records)?.contains("super-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn extension_setting_values_reject_invalid_values() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let source = workspace.path().join("downloads").join("settings-probe");
+        write_settings_probe_extension_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let unknown = LocalYuukeiRuntime::set_extension_setting_values_in(
+            env.clone(),
+            "settings-probe",
+            Map::from_iter([("missing".to_string(), json!("value"))]),
+        )
+        .unwrap_err();
+        assert!(unknown.to_string().contains("unknown setting key"));
+
+        let type_error = LocalYuukeiRuntime::set_extension_setting_values_in(
+            env.clone(),
+            "settings-probe",
+            Map::from_iter([("timeoutMs".to_string(), json!("fast"))]),
+        )
+        .unwrap_err();
+        assert!(type_error.to_string().contains("must be number"));
+
+        let select_error = LocalYuukeiRuntime::set_extension_setting_values_in(
+            env.clone(),
+            "settings-probe",
+            Map::from_iter([("provider".to_string(), json!("unknown-provider"))]),
+        )
+        .unwrap_err();
+        assert!(select_error.to_string().contains("declared options"));
+
+        let min_error = LocalYuukeiRuntime::set_extension_setting_values_in(
+            env,
+            "settings-probe",
+            Map::from_iter([("timeoutMs".to_string(), json!(500))]),
+        )
+        .unwrap_err();
+        assert!(min_error.to_string().contains("below minimum"));
+        Ok(())
+    }
+
+    #[test]
+    fn extension_manifest_rejects_invalid_settings_schema() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let source = workspace.path().join("downloads").join("settings-probe");
+        write_settings_probe_extension_source(&source)?;
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+        manifest["settings"]["fields"][1]["key"] = json!("provider");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        let env = test_env(workspace.path(), data.path());
+        let duplicate =
+            LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source).unwrap_err();
+        assert!(duplicate.to_string().contains("duplicate setting key"));
+
+        write_settings_probe_extension_source(&source)?;
+        let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+        manifest["settings"]["fields"][2]["default"] = json!("should-not-load");
+        fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        let secret_default =
+            LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+        assert!(secret_default
+            .to_string()
+            .contains("secret setting cannot declare default"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_intelligence_process_generates_dialogue_through_device_host() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
@@ -3105,6 +3301,75 @@ process.stdout.write(JSON.stringify({
     dataDir,
     exists: dataDir ? fs.existsSync(dataDir) : false
   }
+}));
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_settings_probe_extension_source(root: &Path) -> Result<()> {
+        fs::create_dir_all(root)?;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "settings-probe",
+                "displayName": "Settings Probe",
+                "capabilities": [
+                    {
+                        "capability": "dialogue.generate",
+                        "methods": ["generate"]
+                    }
+                ],
+                "settings": {
+                    "fields": [
+                        {
+                            "key": "provider",
+                            "type": "select",
+                            "label": "Provider",
+                            "options": [
+                                { "value": "gemini", "label": "Gemini" },
+                                { "value": "openai-compatible", "label": "OpenAI compatible" }
+                            ],
+                            "default": "openai-compatible"
+                        },
+                        {
+                            "key": "timeoutMs",
+                            "type": "number",
+                            "label": "Timeout",
+                            "default": 30000,
+                            "min": 1000,
+                            "max": 120000
+                        },
+                        {
+                            "key": "gemini.apiKey",
+                            "type": "secret",
+                            "label": "Gemini API key",
+                            "visibleWhen": { "key": "provider", "equals": "gemini" }
+                        }
+                    ]
+                },
+                "process": {
+                    "command": "node",
+                    "args": ["settings.js"]
+                }
+            }))?,
+        )?;
+        fs::write(
+            root.join("settings.js"),
+            r#"
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const settings = JSON.parse(process.env.YUUKEI_EXTENSION_SETTINGS_JSON ?? "{}");
+const ok = settings.provider === "gemini"
+  && settings.timeoutMs === 45000
+  && settings["gemini.apiKey"] === "super-secret";
+process.stdout.write(JSON.stringify({
+  invocationId: input.id,
+  extensionId: "settings-probe",
+  capability: input.capability,
+  output: { speak: true, text: ok ? "settings ok" : "settings missing" },
+  metadata: { provider: settings.provider, hasGeminiApiKey: Boolean(settings["gemini.apiKey"]) }
 }));
 "#,
         )?;
