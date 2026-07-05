@@ -41,6 +41,7 @@ export async function loadConfig(cwd = process.cwd(), env = process.env) {
   if (env.OPENAI_COMPATIBLE_RESPONSE_FORMAT) {
     merged.openaiCompatible.responseFormat = env.OPENAI_COMPATIBLE_RESPONSE_FORMAT;
   }
+  applyHostSettings(merged, env.YUUKEI_EXTENSION_SETTINGS_JSON);
   return merged;
 }
 
@@ -73,4 +74,50 @@ function mergeConfig(base, override) {
 function numberOrDefault(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function applyHostSettings(config, rawSettings) {
+  if (!rawSettings) {
+    return;
+  }
+  let settings;
+  try {
+    settings = JSON.parse(rawSettings);
+  } catch (error) {
+    console.error(`yuukei-intelligence: settings json unavailable: ${error.message}`);
+    return;
+  }
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    return;
+  }
+  assignString(settings, "provider", (value) => {
+    config.provider = value;
+  });
+  if (Object.hasOwn(settings, "timeoutMs")) {
+    config.timeoutMs = numberOrDefault(settings.timeoutMs, config.timeoutMs);
+  }
+  assignString(settings, "gemini.apiKey", (value) => {
+    config.gemini.apiKey = value;
+  });
+  assignString(settings, "gemini.model", (value) => {
+    config.gemini.model = value;
+  });
+  assignString(settings, "openaiCompatible.baseUrl", (value) => {
+    config.openaiCompatible.baseUrl = value;
+  });
+  assignString(settings, "openaiCompatible.apiKey", (value) => {
+    config.openaiCompatible.apiKey = value;
+  });
+  assignString(settings, "openaiCompatible.model", (value) => {
+    config.openaiCompatible.model = value;
+  });
+  assignString(settings, "openaiCompatible.responseFormat", (value) => {
+    config.openaiCompatible.responseFormat = value;
+  });
+}
+
+function assignString(settings, key, assign) {
+  if (typeof settings[key] === "string") {
+    assign(settings[key]);
+  }
 }

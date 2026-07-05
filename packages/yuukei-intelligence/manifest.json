@@ -51,24 +51,103 @@
       "responseFormat": "none"
     }
   },
-  "configSchema": {
-    "provider": [
-      "gemini",
-      "openai-compatible"
-    ],
-    "timeoutMs": "number",
-    "gemini": {
-      "apiKey": "string",
-      "model": "string"
-    },
-    "openaiCompatible": {
-      "baseUrl": "string",
-      "apiKey": "string",
-      "model": "string",
-      "responseFormat": [
-        "none",
-        "json_schema"
-      ]
-    }
+  "settings": {
+    "fields": [
+      {
+        "key": "provider",
+        "type": "select",
+        "label": "プロバイダ",
+        "options": [
+          {
+            "value": "gemini",
+            "label": "Gemini"
+          },
+          {
+            "value": "openai-compatible",
+            "label": "OpenAI互換 (LM Studio等)"
+          }
+        ],
+        "default": "openai-compatible"
+      },
+      {
+        "key": "timeoutMs",
+        "type": "number",
+        "label": "タイムアウト(ms)",
+        "default": 30000,
+        "min": 1000
+      },
+      {
+        "key": "gemini.apiKey",
+        "type": "secret",
+        "label": "Gemini APIキー",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "gemini"
+        }
+      },
+      {
+        "key": "gemini.model",
+        "type": "string",
+        "label": "Geminiモデル",
+        "default": "gemini-2.5-flash",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "gemini"
+        }
+      },
+      {
+        "key": "openaiCompatible.baseUrl",
+        "type": "string",
+        "label": "OpenAI互換 Base URL",
+        "default": "http://127.0.0.1:1234/v1",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "openai-compatible"
+        }
+      },
+      {
+        "key": "openaiCompatible.apiKey",
+        "type": "secret",
+        "label": "OpenAI互換 APIキー",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "openai-compatible"
+        }
+      },
+      {
+        "key": "openaiCompatible.model",
+        "type": "string",
+        "label": "OpenAI互換モデル",
+        "default": "local-model",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "openai-compatible"
+        }
+      },
+      {
+        "key": "openaiCompatible.responseFormat",
+        "type": "select",
+        "label": "レスポンス形式",
+        "options": [
+          {
+            "value": "none",
+            "label": "none"
+          },
+          {
+            "value": "json_object",
+            "label": "json_object"
+          },
+          {
+            "value": "json_schema",
+            "label": "json_schema"
+          }
+        ],
+        "default": "none",
+        "visibleWhen": {
+          "key": "provider",
+          "equals": "openai-compatible"
+        }
+      }
+    ]
   }
 }
