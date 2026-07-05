@@ -329,6 +329,31 @@ type DialogueGenerateOutput = {
 
 Capability route登録は、少なくともExtension ID、提供capability、必要権限、実行場所、設定schema、health状態を持つ。設定画面はDevice Hostが表示してよいが、設定値の所有と権限管理はResident Homeに寄せる。
 
+### Extension Settings Schema
+
+Extensionは任意でmanifestに `settings` を宣言できる。Extension自身は設定UIを持たず、Device Hostが汎用フォームとして描画する。
+
+```ts
+type ExtensionSettingsSchema = {
+  fields: ExtensionSettingField[];
+};
+
+type ExtensionSettingField =
+  | { key: string; type: "string"; label: string; description?: string; default?: string; visibleWhen?: { key: string; equals: unknown } }
+  | { key: string; type: "number"; label: string; description?: string; default?: number; min?: number; max?: number; visibleWhen?: { key: string; equals: unknown } }
+  | { key: string; type: "boolean"; label: string; description?: string; default?: boolean; visibleWhen?: { key: string; equals: unknown } }
+  | { key: string; type: "select"; label: string; description?: string; options: { value: string; label: string }[]; default?: string; visibleWhen?: { key: string; equals: unknown } }
+  | { key: string; type: "secret"; label: string; description?: string; visibleWhen?: { key: string; equals: unknown } };
+```
+
+`key` はExtension内で一意なflat keyであり、`gemini.apiKey` のようなドット区切りを許す。v1のfield typeは `string` / `number` / `boolean` / `select` / `secret` の5種だけにする。`visibleWhen` は単一条件だけを扱い、動的な選択肢照会や任意UIは持たせない。
+
+Device Hostはmanifest load時に、keyの文字種と重複、`select.default` がoptions内にあること、`secret` がdefaultを持たないこと、`visibleWhen.key` が存在することを検証する。
+
+非secret値は `YUUKEI_DATA_DIR/settings/extensions.json` の `extensionValues` に保存する。secret値は別ファイル `YUUKEI_DATA_DIR/settings/extension-secrets.json` に保存し、Unixでは0600で書く。API応答や設定画面stateにはsecret本文を含めず、設定済みkeyの一覧だけを返す。
+
+process Extension起動時、Device Hostは有効値を `YUUKEI_EXTENSION_SETTINGS_JSON` にflat JSON objectとして渡す。有効値は保存済み非secret値と保存済みsecret値だけで構成する。schemaのdefaultはGUI表示用であり、ここへは焼き込まない。Extension自身のデフォルトや環境変数フォールバックは、ユーザーが明示的に保存していないkeyに対してのみ効く。schemaを持たないExtensionにはこの環境変数を渡さない。
+
 ## Capability Composition
 
 Extension同士は直接つながない。LLMが作った文でも、Daihonが書いた固定セリフでも、TTS Extensionは同じ `speech.synthesis` 入力を受け取る。
