@@ -314,6 +314,19 @@ type CapabilityInvocation = {
 
 Extensionは内部DBや外部APIを自由に使える。ただし、event logを改変しない。Extensionが生成した派生物はExtensionの所有物であり、再index可能であるべき。
 
+`dialogue.generate` の出力はプレーンテキストではなく、次の構造化出力にする。
+
+```ts
+type DialogueGenerateOutput = {
+  speak: boolean;
+  text?: string;
+  expression?: string;
+  motion?: string;
+};
+```
+
+`speak: false` は正当な結果であり、Resident Homeはcommandを発行しない。`speak: true` の場合だけ、Resident Homeがdefault actor宛の `dialogue.say` と、必要に応じて `avatar.expression` / `avatar.motion` を作る。
+
 Capability route登録は、少なくともExtension ID、提供capability、必要権限、実行場所、設定schema、health状態を持つ。設定画面はDevice Hostが表示してよいが、設定値の所有と権限管理はResident Homeに寄せる。
 
 ## Capability Composition

@@ -164,6 +164,8 @@ pub struct WorldPack {
     pub signals: SignalAllowlist,
     #[serde(default)]
     pub capabilities: CapabilityDeclarations,
+    #[serde(default, skip_serializing_if = "LlmDelegation::is_empty")]
+    pub llm_delegation: LlmDelegation,
     #[serde(default)]
     pub daihon: DaihonConfig,
     #[serde(default)]
@@ -249,6 +251,29 @@ pub struct CapabilityDeclarations {
     pub required: Vec<String>,
     #[serde(default)]
     pub optional: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmDelegation {
+    #[serde(default)]
+    pub signals: Vec<LlmDelegationSignal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_budget: Option<u32>,
+}
+
+impl LlmDelegation {
+    pub fn is_empty(&self) -> bool {
+        self.signals.is_empty() && self.daily_budget.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmDelegationSignal {
+    pub signal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -926,6 +951,17 @@ impl WorldPack {
                 )));
             }
         }
+        let mut delegated_signals = BTreeSet::new();
+        for signal in &self.llm_delegation.signals {
+            require_non_empty("llmDelegation.signals.signal", &signal.signal)?;
+            let canonical = canonical_signal_id(&signal.signal).to_string();
+            if !delegated_signals.insert(canonical.clone()) {
+                return Err(WorldError::Validation(format!(
+                    "duplicate llmDelegation signal after canonicalization: {} ({canonical})",
+                    signal.signal
+                )));
+            }
+        }
 
         Ok(())
     }
@@ -978,6 +1014,18 @@ impl WorldPack {
             .allow
             .iter()
             .any(|allowed| aliases.canonicalize(allowed) == signal)
+    }
+
+    pub fn llm_delegation_for_signal_with_aliases(
+        &self,
+        signal: &str,
+        aliases: &SignalAliasTable,
+    ) -> Option<&LlmDelegationSignal> {
+        let signal = aliases.canonicalize(signal);
+        self.llm_delegation
+            .signals
+            .iter()
+            .find(|delegation| aliases.canonicalize(&delegation.signal) == signal)
     }
 
     pub fn actor_map(&self) -> BTreeMap<String, ActorDefinition> {
@@ -1091,7 +1139,7 @@ pub fn resolve_pack_relative_path(root: &Path, path: &str) -> Result<PathBuf> {
 mod tests {
     use serde_json::json;
     use tempfile::tempdir;
-    use yuukei_protocol::RuntimeEvent;
+    use yuukei_protocol::{RuntimeEvent, SignalAliasTable};
 
     use super::*;
 
@@ -1115,6 +1163,7 @@ mod tests {
                 required: Vec::new(),
                 optional: vec!["speech.synthesis".to_string()],
             },
+            llm_delegation: LlmDelegation::default(),
             daihon: daihon_config(),
             initial_variables: JsonMap::new(),
             ui_space: JsonMap::new(),
@@ -1153,6 +1202,23 @@ mod tests {
         let mut world = pack();
         world.signals.allow = vec!["会話_入力".to_string(), "conversation.text".to_string()];
         let error = world.validate().expect_err("duplicate canonical signal");
+        assert!(error.to_string().contains("conversation.text"));
+    }
+
+    #[test]
+    fn validates_llm_delegation_after_alias_canonicalization() {
+        let mut world = pack();
+        world.llm_delegation.signals = vec![
+            LlmDelegationSignal {
+                signal: "会話_入力".to_string(),
+                cooldown_seconds: Some(60),
+            },
+            LlmDelegationSignal {
+                signal: "conversation.text".to_string(),
+                cooldown_seconds: None,
+            },
+        ];
+        let error = world.validate().expect_err("duplicate delegation signal");
         assert!(error.to_string().contains("conversation.text"));
     }
 
@@ -1210,6 +1276,24 @@ mod tests {
         assert!(world.allows_signal("conversation.text"));
         assert!(world.allows_signal("会話_入力"));
         assert!(!world.allows_signal("surface.attach"));
+    }
+
+    #[test]
+    fn llm_delegation_accepts_standard_aliases() {
+        let mut world = pack();
+        world.llm_delegation.signals = vec![LlmDelegationSignal {
+            signal: "会話_入力".to_string(),
+            cooldown_seconds: Some(60),
+        }];
+        assert!(world
+            .llm_delegation_for_signal_with_aliases(
+                "conversation.text",
+                &SignalAliasTable::default()
+            )
+            .is_some());
+        assert!(world
+            .llm_delegation_for_signal_with_aliases("surface.attach", &SignalAliasTable::default())
+            .is_none());
     }
 
     #[test]

@@ -3,13 +3,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
+    DIALOGUE_GENERATE_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -17,9 +18,11 @@ use yuukei_extension::{
     ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, YuukeiExtension,
 };
 use yuukei_protocol::{
-    new_id, ActorSnapshot, CapabilityInvocation, Causality, EventLogRecord, ExtensionHookPoint,
-    JsonMap, NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
-    SurfaceSession,
+    new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget,
+    DialogueGenerateConstraints, DialogueGenerateEvent, DialogueGenerateInput,
+    DialogueGenerateOutput, DialogueGeneratePersona, DialogueGenerateRecentContext, EventLogRecord,
+    ExtensionHookPoint, JsonMap, NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent,
+    SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
     DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, WorldError, WorldPack,
@@ -84,6 +87,19 @@ struct HomeState {
     surfaces: BTreeMap<String, SurfaceSession>,
     recent_event_cursor: i64,
     daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
+    llm_delegation: LlmDelegationCounters,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LlmDelegationCounters {
+    cooldowns: BTreeMap<String, DateTime<Utc>>,
+    daily_budget: Option<DailyBudgetCounter>,
+}
+
+#[derive(Clone, Debug)]
+struct DailyBudgetCounter {
+    date: NaiveDate,
+    used: u32,
 }
 
 impl ResidentHome {
@@ -183,6 +199,7 @@ impl ResidentHome {
                 surfaces: BTreeMap::new(),
                 recent_event_cursor: 0,
                 daihon_diagnostics: Vec::new(),
+                llm_delegation: LlmDelegationCounters::default(),
             })),
             command_tx,
         })
@@ -635,21 +652,267 @@ impl ResidentHome {
             let appended_result = self.event_log.append(result_record)?;
             self.set_cursor(appended_result.sequence)?;
         }
-        let mut emitted_commands = Vec::with_capacity(result.commands.len());
-        for command in result.commands {
-            let mut command = self
-                .apply_extensions_before_command_emit(command, &event)
-                .await?;
-            self.maybe_enrich_speech(&mut command, &event).await?;
-            let appended_command = self
-                .event_log
-                .append(NewEventLogRecord::from(command.clone()))?;
-            self.set_cursor(appended_command.sequence)?;
-            self.apply_command_to_snapshot(&command)?;
-            let _ = self.command_tx.send(command.clone());
-            emitted_commands.push(command);
+        let commands = if result.is_empty() {
+            self.maybe_generate_dialogue_fallback(&event, &aliases)
+                .await?
+        } else {
+            result.commands
+        };
+        let mut emitted_commands = Vec::with_capacity(commands.len());
+        for command in commands {
+            emitted_commands.push(self.emit_command_for_event(command, &event).await?);
         }
         Ok(emitted_commands)
+    }
+
+    async fn emit_command_for_event(
+        &self,
+        command: RuntimeCommand,
+        source_event: &RuntimeEvent,
+    ) -> Result<RuntimeCommand> {
+        let mut command = self
+            .apply_extensions_before_command_emit(command, source_event)
+            .await?;
+        self.maybe_enrich_speech(&mut command, source_event).await?;
+        let appended_command = self
+            .event_log
+            .append(NewEventLogRecord::from(command.clone()))?;
+        self.set_cursor(appended_command.sequence)?;
+        self.apply_command_to_snapshot(&command)?;
+        let _ = self.command_tx.send(command.clone());
+        Ok(command)
+    }
+
+    async fn maybe_generate_dialogue_fallback(
+        &self,
+        event: &RuntimeEvent,
+        aliases: &SignalAliasTable,
+    ) -> Result<Vec<RuntimeCommand>> {
+        let Some(delegation) = self
+            .world_pack
+            .llm_delegation_for_signal_with_aliases(&event.kind, aliases)
+        else {
+            return Ok(Vec::new());
+        };
+        let canonical_signal = aliases.canonicalize(&delegation.signal);
+        if !self.try_start_llm_delegation(&canonical_signal, delegation.cooldown_seconds)? {
+            return Ok(Vec::new());
+        }
+
+        let input = self.dialogue_generate_input(event)?;
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
+            method: "generate".to_string(),
+            resident_id: event.resident_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+            input: json_map_from_value(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, event, None)?;
+
+        let result = {
+            let router = self
+                .capabilities
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?
+                .clone();
+            router.invoke(invocation.clone()).await
+        };
+        let Ok(result) = result else {
+            return Ok(Vec::new());
+        };
+
+        let output_value = Value::Object(result.output.clone().into_iter().collect());
+        let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
+            return Ok(Vec::new());
+        };
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output,
+            result.metadata,
+            event,
+            None,
+            invocation.actor_id.as_deref(),
+        )?;
+        self.commands_from_dialogue_generate_output(output, event)
+    }
+
+    fn try_start_llm_delegation(
+        &self,
+        signal: &str,
+        cooldown_seconds: Option<u64>,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        if let Some(limit) = self.world_pack.llm_delegation.daily_budget {
+            let today = now.date_naive();
+            let counter = state
+                .llm_delegation
+                .daily_budget
+                .get_or_insert(DailyBudgetCounter {
+                    date: today,
+                    used: 0,
+                });
+            if counter.date != today {
+                counter.date = today;
+                counter.used = 0;
+            }
+            if counter.used >= limit {
+                return Ok(false);
+            }
+        }
+        if let Some(cooldown_seconds) = cooldown_seconds {
+            if let Some(last_called_at) = state.llm_delegation.cooldowns.get(signal) {
+                if now.signed_duration_since(*last_called_at).num_seconds()
+                    < cooldown_seconds as i64
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        state
+            .llm_delegation
+            .cooldowns
+            .insert(signal.to_string(), now);
+        Ok(true)
+    }
+
+    fn record_llm_speech_budget_use(&self) -> Result<()> {
+        if self.world_pack.llm_delegation.daily_budget.is_none() {
+            return Ok(());
+        }
+        let today = Utc::now().date_naive();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        let counter = state
+            .llm_delegation
+            .daily_budget
+            .get_or_insert(DailyBudgetCounter {
+                date: today,
+                used: 0,
+            });
+        if counter.date != today {
+            counter.date = today;
+            counter.used = 0;
+        }
+        counter.used = counter.used.saturating_add(1);
+        Ok(())
+    }
+
+    fn dialogue_generate_input(&self, event: &RuntimeEvent) -> Result<DialogueGenerateInput> {
+        let actor = self
+            .world_pack
+            .actors
+            .iter()
+            .find(|actor| actor.id == self.world_pack.default_actor_id)
+            .ok_or_else(|| {
+                ResidentHomeError::MissingRequiredCapabilities(format!(
+                    "default actor is not declared: {}",
+                    self.world_pack.default_actor_id
+                ))
+            })?;
+        Ok(DialogueGenerateInput {
+            event: DialogueGenerateEvent {
+                kind: event.kind.clone(),
+                payload: event.payload.clone(),
+            },
+            persona: DialogueGeneratePersona {
+                actor_id: actor.id.clone(),
+                display_name: actor.display_name.clone(),
+                profile: actor.profile.clone(),
+            },
+            recent_context: self.recent_dialogue_context(&event.resident_id)?,
+            constraints: DialogueGenerateConstraints { max_length: 120 },
+        })
+    }
+
+    fn recent_dialogue_context(
+        &self,
+        resident_id: &str,
+    ) -> Result<Vec<DialogueGenerateRecentContext>> {
+        let mut records = self
+            .event_log
+            .read(EventLogQuery {
+                resident_id: Some(resident_id.to_string()),
+                kind: None,
+                after_sequence: None,
+                limit: None,
+                extension_readable_only: false,
+            })?
+            .records;
+        if records.len() > 20 {
+            records = records.split_off(records.len() - 20);
+        }
+        Ok(records
+            .into_iter()
+            .map(|record| DialogueGenerateRecentContext {
+                kind: record.kind,
+                timestamp: record.timestamp,
+                payload: major_payload(record.payload),
+            })
+            .collect())
+    }
+
+    fn commands_from_dialogue_generate_output(
+        &self,
+        output: DialogueGenerateOutput,
+        source_event: &RuntimeEvent,
+    ) -> Result<Vec<RuntimeCommand>> {
+        if !output.speak {
+            return Ok(Vec::new());
+        }
+        let Some(text) = output.text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(Vec::new());
+        };
+        self.record_llm_speech_budget_use()?;
+
+        let actor_id = self.world_pack.default_actor_id.clone();
+        let mut commands = Vec::new();
+        if let Some(expression) = output.expression.filter(|value| !value.trim().is_empty()) {
+            let mut command =
+                generated_command("avatar.expression", source_event, actor_id.clone());
+            command.payload = JsonMap::from([
+                ("expression".to_string(), Value::String(expression)),
+                ("speakerId".to_string(), Value::String(actor_id.clone())),
+                (
+                    "sourceCapability".to_string(),
+                    Value::String(DIALOGUE_GENERATE_CAPABILITY.to_string()),
+                ),
+            ]);
+            commands.push(command);
+        }
+        if let Some(motion) = output.motion.filter(|value| !value.trim().is_empty()) {
+            let mut command = generated_command("avatar.motion", source_event, actor_id.clone());
+            command.payload = JsonMap::from([
+                ("motion".to_string(), Value::String(motion)),
+                ("speakerId".to_string(), Value::String(actor_id.clone())),
+                (
+                    "sourceCapability".to_string(),
+                    Value::String(DIALOGUE_GENERATE_CAPABILITY.to_string()),
+                ),
+            ]);
+            commands.push(command);
+        }
+        let mut command = generated_command("dialogue.say", source_event, actor_id.clone());
+        command.payload = JsonMap::from([
+            ("text".to_string(), Value::String(text)),
+            ("speakerId".to_string(), Value::String(actor_id)),
+            ("emotion".to_string(), Value::String("neutral".to_string())),
+            (
+                "sourceCapability".to_string(),
+                Value::String(DIALOGUE_GENERATE_CAPABILITY.to_string()),
+            ),
+        ]);
+        commands.push(command);
+        Ok(commands)
     }
 
     fn resident_id(&self) -> Result<String> {
@@ -901,29 +1164,7 @@ impl ResidentHome {
             context: None,
         };
 
-        let request_payload = serde_json::to_value(&invocation)?;
-        let request = NewEventLogRecord {
-            id: new_id("evt"),
-            kind: "capability.invocation.request".to_string(),
-            timestamp: yuukei_protocol::now_timestamp(),
-            resident_id: command.resident_id.clone(),
-            source: "resident-home".to_string(),
-            device_id: source_event.device_id.clone(),
-            surface_id: source_event.surface_id.clone(),
-            actor_id: invocation.actor_id.clone(),
-            payload: json_map_from_value(request_payload),
-            causality: Some(Causality {
-                source_event_id: Some(source_event.id.clone()),
-                source_command_id: Some(command.id.clone()),
-                trace_id: source_event
-                    .causality
-                    .as_ref()
-                    .and_then(|causality| causality.trace_id.clone()),
-            }),
-            privacy: None,
-        };
-        let appended_request = self.event_log.append(request)?;
-        self.set_cursor(appended_request.sequence)?;
+        self.record_capability_request(&invocation, source_event, Some(&command.id))?;
 
         let result = {
             let router = self
@@ -938,41 +1179,91 @@ impl ResidentHome {
             command.payload.insert("speechRef".to_string(), speech_ref);
         }
 
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output,
+            result.metadata,
+            source_event,
+            Some(&command.id),
+            command
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+        )?;
+        Ok(())
+    }
+
+    fn record_capability_request(
+        &self,
+        invocation: &CapabilityInvocation,
+        source_event: &RuntimeEvent,
+        source_command_id: Option<&str>,
+    ) -> Result<()> {
+        let request_payload = serde_json::to_value(invocation)?;
+        let request = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "capability.invocation.request".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: invocation.resident_id.clone(),
+            source: "resident-home".to_string(),
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: invocation.actor_id.clone(),
+            payload: json_map_from_value(request_payload),
+            causality: Some(Causality {
+                source_event_id: Some(source_event.id.clone()),
+                source_command_id: source_command_id.map(ToOwned::to_owned),
+                trace_id: source_event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended_request = self.event_log.append(request)?;
+        self.set_cursor(appended_request.sequence)?;
+        Ok(())
+    }
+
+    fn record_capability_result(
+        &self,
+        invocation_id: String,
+        extension_id: String,
+        capability: String,
+        output: JsonMap,
+        metadata: JsonMap,
+        source_event: &RuntimeEvent,
+        source_command_id: Option<&str>,
+        actor_id: Option<&str>,
+    ) -> Result<()> {
         let result_payload = JsonMap::from([
-            (
-                "invocationId".to_string(),
-                Value::String(result.invocation_id),
-            ),
-            (
-                "extensionId".to_string(),
-                Value::String(result.extension_id),
-            ),
-            ("capability".to_string(), Value::String(result.capability)),
+            ("invocationId".to_string(), Value::String(invocation_id)),
+            ("extensionId".to_string(), Value::String(extension_id)),
+            ("capability".to_string(), Value::String(capability)),
             (
                 "output".to_string(),
-                Value::Object(result.output.into_iter().collect()),
+                Value::Object(output.into_iter().collect()),
             ),
             (
                 "metadata".to_string(),
-                Value::Object(result.metadata.into_iter().collect()),
+                Value::Object(metadata.into_iter().collect()),
             ),
         ]);
         let result_record = NewEventLogRecord {
             id: new_id("evt"),
             kind: "capability.invocation.result".to_string(),
             timestamp: yuukei_protocol::now_timestamp(),
-            resident_id: command.resident_id.clone(),
+            resident_id: source_event.resident_id.clone(),
             source: "capability".to_string(),
             device_id: source_event.device_id.clone(),
             surface_id: source_event.surface_id.clone(),
-            actor_id: command
-                .target
-                .as_ref()
-                .and_then(|target| target.actor_id.clone()),
+            actor_id: actor_id.map(ToOwned::to_owned),
             payload: result_payload,
             causality: Some(Causality {
                 source_event_id: Some(source_event.id.clone()),
-                source_command_id: Some(command.id.clone()),
+                source_command_id: source_command_id.map(ToOwned::to_owned),
                 trace_id: source_event
                     .causality
                     .as_ref()
@@ -991,6 +1282,58 @@ fn json_map_from_value(value: Value) -> JsonMap {
         Value::Object(map) => map.into_iter().collect(),
         other => JsonMap::from([("value".to_string(), other)]),
     }
+}
+
+fn generated_command(
+    kind: impl Into<String>,
+    source_event: &RuntimeEvent,
+    actor_id: String,
+) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new(
+        kind,
+        "capability.dialogue.generate",
+        source_event.resident_id.clone(),
+    );
+    command.causality = Some(Causality {
+        source_event_id: Some(source_event.id.clone()),
+        source_command_id: None,
+        trace_id: source_event
+            .causality
+            .as_ref()
+            .and_then(|causality| causality.trace_id.clone()),
+    });
+    command.target = Some(CommandTarget {
+        device_id: source_event.device_id.clone(),
+        surface_id: source_event.surface_id.clone(),
+        actor_id: Some(actor_id),
+    });
+    command
+}
+
+fn major_payload(payload: JsonMap) -> JsonMap {
+    const KEYS: &[&str] = &[
+        "text",
+        "speakerId",
+        "emotion",
+        "expression",
+        "motion",
+        "anchor",
+        "timePeriod",
+        "localHour",
+        "localMinute",
+        "sourceCapability",
+    ];
+    payload
+        .into_iter()
+        .filter(|(key, value)| KEYS.contains(&key.as_str()) && is_small_context_value(value))
+        .collect()
+}
+
+fn is_small_context_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1059,6 +1402,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use serde_json::{json, Value};
     use tempfile::tempdir;
+    use yuukei_capability::{CapabilityResult, ProviderRegistration};
     use yuukei_event_log::EventLogQuery;
     use yuukei_extension::{
         DialogueSuffixExtension, ProcessCommandSpec, ProcessExtensionManifest,
@@ -1072,7 +1416,8 @@ mod tests {
         SurfacePresentation, SurfaceRenderer,
     };
     use yuukei_world::{
-        ActorDefinition, CapabilityDeclarations, DaihonConfig, DaihonScriptSource, SignalAllowlist,
+        ActorDefinition, CapabilityDeclarations, DaihonConfig, DaihonScriptSource, LlmDelegation,
+        LlmDelegationSignal, SignalAllowlist,
     };
 
     use super::*;
@@ -1100,6 +1445,7 @@ mod tests {
                 required: Vec::new(),
                 optional: vec!["speech.synthesis".to_string()],
             },
+            llm_delegation: LlmDelegation::default(),
             daihon: DaihonConfig {
                 scripts: vec!["scripts/reactions.daihon".to_string()],
                 loaded_scripts: vec![DaihonScriptSource {
@@ -1259,6 +1605,78 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DialogueGenerateProvider {
+        output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    }
+
+    impl DialogueGenerateProvider {
+        fn new(output: JsonMap) -> Self {
+            Self {
+                output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for DialogueGenerateProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "fake-dialogue".to_string(),
+                capabilities: vec![DIALOGUE_GENERATE_CAPABILITY.to_string()],
+                methods: vec!["generate".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("dialogue generate calls lock")
+                .push(invocation.clone());
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "fake-dialogue".to_string(),
+                capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
+                output: self.output.clone(),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
+    fn llm_fallback_world() -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### attach
+合図: ＠surface.attach
+話者: yuukei
+「ここにいます。」
+"#
+        .to_string();
+        world.llm_delegation = LlmDelegation {
+            signals: vec![LlmDelegationSignal {
+                signal: "conversation.text".to_string(),
+                cooldown_seconds: Some(60),
+            }],
+            daily_budget: None,
+        };
+        world
+    }
+
     #[tokio::test]
     async fn headless_text_event_is_logged_and_broadcasts_dialogue() -> Result<()> {
         let home =
@@ -1385,6 +1803,205 @@ mod tests {
                 .records
                 .len(),
             1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn declared_signal_without_daihon_result_generates_dialogue() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("少しだけ返します。")),
+            ("expression".to_string(), json!("smile")),
+            ("motion".to_string(), json!("nod")),
+        ]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+        let mut receiver = home.subscribe_commands();
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_generate".to_string();
+        event.surface_id = Some("surface-main".to_string());
+        event.payload.insert("text".to_string(), json!("ねえ"));
+        let commands = home.ingest_event(event).await?;
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0].kind, "avatar.expression");
+        assert_eq!(commands[1].kind, "avatar.motion");
+        assert_eq!(commands[2].kind, "dialogue.say");
+        assert_eq!(commands[2].payload["text"], "少しだけ返します。");
+        assert_eq!(commands[2].source, "capability.dialogue.generate");
+        assert_eq!(
+            calls.lock().expect("calls lock")[0].input["persona"]["displayName"],
+            "Yuukei"
+        );
+        assert_eq!(
+            receiver.recv().await.expect("expression broadcast").kind,
+            "avatar.expression"
+        );
+        assert_eq!(
+            receiver.recv().await.expect("motion broadcast").kind,
+            "avatar.motion"
+        );
+        assert_eq!(
+            receiver.recv().await.expect("dialogue broadcast").kind,
+            "dialogue.say"
+        );
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        let dialogue = records
+            .iter()
+            .find(|record| record.kind == "dialogue.say")
+            .expect("generated dialogue record");
+        assert_eq!(dialogue.source, "capability.dialogue.generate");
+        assert_eq!(
+            dialogue
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_event_id.as_deref()),
+            Some("evt_generate")
+        );
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == DIALOGUE_GENERATE_CAPABILITY));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.result"
+                && record.payload["capability"] == DIALOGUE_GENERATE_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn undeclared_signal_does_not_call_dialogue_generate() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("呼ばれません。")),
+        ]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+        let commands = home.ingest_event(event).await?;
+
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        assert!(calls.lock().expect("calls lock").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_cooldown_suppresses_second_call() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("一度だけ。")),
+        ]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+
+        let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        first.payload.insert("text".to_string(), json!("一つ目"));
+        let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        second.payload.insert("text".to_string(), json!("二つ目"));
+
+        assert_eq!(home.ingest_event(first).await?.len(), 1);
+        assert!(home.ingest_event(second).await?.is_empty());
+        assert_eq!(calls.lock().expect("calls lock").len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_daily_budget_suppresses_after_limit() -> Result<()> {
+        let mut world = llm_fallback_world();
+        world.llm_delegation.signals[0].cooldown_seconds = None;
+        world.llm_delegation.daily_budget = Some(1);
+        let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("一日一度だけ。")),
+        ]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+
+        let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        first.payload.insert("text".to_string(), json!("一つ目"));
+        let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        second.payload.insert("text".to_string(), json!("二つ目"));
+
+        assert_eq!(home.ingest_event(first).await?.len(), 1);
+        assert!(home.ingest_event(second).await?.is_empty());
+        assert_eq!(calls.lock().expect("calls lock").len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_generate_speak_false_is_silent() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let provider =
+            DialogueGenerateProvider::new(JsonMap::from([("speak".to_string(), json!(false))]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("今？"));
+        let commands = home.ingest_event(event).await?;
+
+        assert!(commands.is_empty());
+        assert_eq!(calls.lock().expect("calls lock").len(), 1);
+        assert!(!home
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .iter()
+            .any(|record| record.kind == "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_dialogue_generate_provider_is_silent() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("いる？"));
+
+        let commands = home.ingest_event(event).await?;
+
+        assert!(commands.is_empty());
+        assert_eq!(
+            home.event_log()
+                .read(EventLogQuery::default())?
+                .records
+                .iter()
+                .filter(|record| record.kind == "dialogue.say")
+                .count(),
+            0
         );
         Ok(())
     }

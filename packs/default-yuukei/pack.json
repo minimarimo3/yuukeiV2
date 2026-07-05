@@ -76,7 +76,10 @@
   },
   "capabilities": {
     "required": [],
-    "optional": ["speech.synthesis"]
+    "optional": ["speech.synthesis", "dialogue.generate"]
+  },
+  "llmDelegation": {
+    "signals": [{ "signal": "conversation.text", "cooldownSeconds": 60 }]
   },
   "daihon": {
     "scripts": ["scripts/desktop_reactions.daihon"]

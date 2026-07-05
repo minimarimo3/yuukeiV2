@@ -530,6 +530,67 @@ pub struct CapabilityInvocation {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGenerateInput {
+    pub event: DialogueGenerateEvent,
+    pub persona: DialogueGeneratePersona,
+    #[serde(default)]
+    pub recent_context: Vec<DialogueGenerateRecentContext>,
+    pub constraints: DialogueGenerateConstraints,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGenerateEvent {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[ts(type = "{ [key: string]: unknown }")]
+    pub payload: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGeneratePersona {
+    pub actor_id: String,
+    pub display_name: String,
+    #[ts(type = "{ [key: string]: unknown }")]
+    pub profile: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGenerateRecentContext {
+    pub kind: String,
+    pub timestamp: String,
+    #[ts(type = "{ [key: string]: unknown }")]
+    pub payload: JsonMap,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGenerateConstraints {
+    pub max_length: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueGenerateOutput {
+    pub speak: bool,
+    #[ts(optional)]
+    pub text: Option<String>,
+    #[ts(optional)]
+    pub expression: Option<String>,
+    #[ts(optional)]
+    pub motion: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct ActorSnapshot {
     pub display_name: String,
     pub expression: String,
