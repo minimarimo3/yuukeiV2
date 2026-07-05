@@ -215,9 +215,8 @@ impl<'a> Lexer<'a> {
             '.' | '．' => self.emit_char(TokenKind::Dot, Some(".".to_owned())),
             '(' | '（' => self.emit_char(TokenKind::Operator, Some("(".to_owned())),
             ')' | '）' => self.emit_char(TokenKind::Operator, Some(")".to_owned())),
-            '=' | '＝' | '!' | '！' | '<' | '>' | '+' | '-' | '*' | '/' | '%' | '~' | '～' => {
-                self.lex_operator();
-            }
+            '=' | '＝' | '!' | '！' | '<' | '>' | '+' | '＋' | '-' | '－' | '*' | '＊' | '/'
+            | '／' | '%' | '％' | '~' | '～' | '〜' => self.lex_operator(),
             _ if is_number_start(ch) => self.lex_number_or_time(),
             _ if is_identifier_start(ch) => self.lex_identifier(),
             _ => {
@@ -311,8 +310,8 @@ impl<'a> Lexer<'a> {
                 self.push_mode(Mode::FunctionString, start);
             }
             '\n' | '\r' => self.lex_newline(),
-            '=' | '＝' | '!' | '！' | '<' | '>' | '+' | '-' | '*' | '/' | '%' | '(' | '（'
-            | ')' | '）' => self.lex_operator(),
+            '=' | '＝' | '!' | '！' | '<' | '>' | '+' | '＋' | '-' | '－' | '*' | '＊' | '/'
+            | '／' | '%' | '％' | '(' | '（' | ')' | '）' => self.lex_operator(),
             _ if is_number_start(ch) => self.lex_number_or_time(),
             _ if is_identifier_start(ch) => self.lex_identifier(),
             _ => {
@@ -424,8 +423,9 @@ impl<'a> Lexer<'a> {
         let kind = match normalized.as_str() {
             "はい" | "いいえ" => TokenKind::Boolean,
             "おわり" | "シーンおわり" | "未満" | "以下" | "以上" | "超える" | "かつ" | "または"
-            | "前提条件" | "初期値" | "合図" | "条件" | "なら" | "あるいは" | "それ以外"
-            | "優先度" | "重み" | "クールダウン" | "話者" => TokenKind::Keyword,
+            | "でない" | "を含む" | "で始まる" | "で終わる" | "前提条件" | "初期値" | "合図"
+            | "条件" | "なら" | "あるいは" | "それ以外" | "優先度" | "重み" | "クールダウン"
+            | "話者" => TokenKind::Keyword,
             _ => TokenKind::Identifier,
         };
         self.emit(kind, text, Some(normalized), span);
@@ -469,7 +469,12 @@ pub(crate) fn normalize_char(ch: char) -> char {
         '＄' => '$',
         '＿' => '_',
         '！' => '!',
-        '～' => '~',
+        '～' | '〜' => '~',
+        '＋' => '+',
+        '－' => '-',
+        '＊' => '*',
+        '／' => '/',
+        '％' => '%',
         '＠' => '@',
         '．' => '.',
         '（' => '(',

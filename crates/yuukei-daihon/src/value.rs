@@ -35,24 +35,30 @@ impl DaihonNumber {
         matches!(self, Self::Integer(_))
     }
 
-    pub fn checked_add(self, other: Self) -> Self {
+    pub fn checked_add(self, other: Self) -> Option<Self> {
         match (self, other) {
-            (Self::Integer(left), Self::Integer(right)) => Self::Integer(left + right),
-            (left, right) => Self::Float(left.as_f64() + right.as_f64()),
+            (Self::Integer(left), Self::Integer(right)) => {
+                left.checked_add(right).map(Self::Integer)
+            }
+            (left, right) => Some(Self::Float(left.as_f64() + right.as_f64())),
         }
     }
 
-    pub fn checked_sub(self, other: Self) -> Self {
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
         match (self, other) {
-            (Self::Integer(left), Self::Integer(right)) => Self::Integer(left - right),
-            (left, right) => Self::Float(left.as_f64() - right.as_f64()),
+            (Self::Integer(left), Self::Integer(right)) => {
+                left.checked_sub(right).map(Self::Integer)
+            }
+            (left, right) => Some(Self::Float(left.as_f64() - right.as_f64())),
         }
     }
 
-    pub fn checked_mul(self, other: Self) -> Self {
+    pub fn checked_mul(self, other: Self) -> Option<Self> {
         match (self, other) {
-            (Self::Integer(left), Self::Integer(right)) => Self::Integer(left * right),
-            (left, right) => Self::Float(left.as_f64() * right.as_f64()),
+            (Self::Integer(left), Self::Integer(right)) => {
+                left.checked_mul(right).map(Self::Integer)
+            }
+            (left, right) => Some(Self::Float(left.as_f64() * right.as_f64())),
         }
     }
 
@@ -61,7 +67,9 @@ impl DaihonNumber {
             return None;
         }
         match (self, other) {
-            (Self::Integer(left), Self::Integer(right)) => Some(Self::Integer(left / right)),
+            (Self::Integer(left), Self::Integer(right)) => {
+                left.checked_div(right).map(Self::Integer)
+            }
             (left, right) => Some(Self::Float(left.as_f64() / right.as_f64())),
         }
     }
@@ -71,7 +79,9 @@ impl DaihonNumber {
             return None;
         }
         match (self, other) {
-            (Self::Integer(left), Self::Integer(right)) => Some(Self::Integer(left % right)),
+            (Self::Integer(left), Self::Integer(right)) => {
+                left.checked_rem(right).map(Self::Integer)
+            }
             (left, right) => Some(Self::Float(left.as_f64() % right.as_f64())),
         }
     }

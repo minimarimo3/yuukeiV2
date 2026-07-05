@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::*;
 use crate::diagnostic::{DaihonDiagnostic, Severity};
 use crate::function::FunctionRegistry;
+use crate::parser::parse_variable_ref;
 use crate::runtime::{INTERPRET_FUNCTION_NAME, UNKNOWN_INTERPRETATION};
+use crate::span::Spanned;
 use crate::value::DaihonValue;
 use crate::variable::VariableRef;
 
@@ -103,7 +105,7 @@ impl<'a> Validator<'a> {
                     scene
                         .metadata
                         .raw
-                        .signal_text
+                        .condition_text
                         .as_ref()
                         .map(|raw| raw.span)
                         .unwrap_or(scene.span),
@@ -137,8 +139,20 @@ impl<'a> Validator<'a> {
                         "クールダウンの単位が不正です。",
                         raw.span,
                     )
-                    .with_help("秒、分、時間、s、m、h のいずれかを使ってください。"),
+                    .with_help("秒、分、時間、日、s、m、h、d のいずれかを使ってください。"),
                 );
+            }
+        }
+        for key in &scene.metadata.raw.unknown_metadata_keys {
+            if let Some(suggestion) = suggest_metadata_key(&key.value) {
+                self.diagnostics.push(DaihonDiagnostic::warning(
+                    "W-DHN-SEM-051",
+                    format!(
+                        "話者「{}」はメタデータ名の誤りかもしれません。もしかして: {}",
+                        key.value, suggestion
+                    ),
+                    key.span,
+                ));
             }
         }
         if let Some(condition) = &scene.metadata.condition {
@@ -189,7 +203,10 @@ impl<'a> Validator<'a> {
     fn validate_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Display(display) => self.validate_display(display),
-            Stmt::SpeakerDisplay { display, .. } => self.validate_display(display),
+            Stmt::SpeakerDisplay { speaker, display } => {
+                self.validate_metadata_key_typo(speaker);
+                self.validate_display(display);
+            }
             Stmt::Assignment(assignment) => self.validate_assignment(assignment),
             Stmt::Jump(jump) => self.validate_jump(jump),
             Stmt::Conditional(block) => self.validate_conditional_block(block),
@@ -202,7 +219,11 @@ impl<'a> Validator<'a> {
                 DisplayPart::Dialogue(dialogue) => {
                     for part in &dialogue.parts {
                         if let DialoguePart::Embed(function) = part {
-                            if !function.positional.is_empty() || !function.named.is_empty() {
+                            if function.positional.is_empty() && function.named.is_empty() {
+                                let reference =
+                                    parse_variable_ref(&function.name.value, function.name.span);
+                                self.validate_variable_ref(&reference, false);
+                            } else {
                                 self.validate_function(function, FunctionContext::Statement);
                             }
                         }
@@ -217,6 +238,21 @@ impl<'a> Validator<'a> {
 
     fn validate_assignment(&mut self, assignment: &Assignment) {
         self.validate_variable_ref(&assignment.target, true);
+        if let VariableRef::EventLocal { name } = &assignment.target {
+            if is_builtin_time_name(&name.value) {
+                self.diagnostics.push(
+                    DaihonDiagnostic::error(
+                        "E-DHN-SEM-049",
+                        format!(
+                            "「{}」は組み込みの時刻変数なので代入できません。",
+                            name.value
+                        ),
+                        name.span,
+                    )
+                    .with_help("別の変数名を使ってください。"),
+                );
+            }
+        }
         if assignment.target.is_read_only() {
             self.diagnostics.push(
                 DaihonDiagnostic::error(
@@ -281,14 +317,14 @@ impl<'a> Validator<'a> {
             Expr::Value(_) => {}
             Expr::Variable(reference) => self.validate_variable_ref(reference, false),
             Expr::FunctionCall(function) => self.validate_function(function, context),
-            Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => {
+            Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } | Expr::Not { expr, .. } => {
                 self.validate_expr(expr, FunctionContext::Expr)
             }
             Expr::Binary { left, right, .. } | Expr::Comparison { left, right, .. } => {
                 self.validate_expr(left, FunctionContext::Expr);
                 self.validate_expr(right, FunctionContext::Expr);
             }
-            Expr::PostfixComparison { left, value, .. } => {
+            Expr::PostfixComparison { left, value, .. } | Expr::StringMatch { left, value, .. } => {
                 if !matches!(**left, Expr::Variable(_)) {
                     self.diagnostics.push(
                         DaihonDiagnostic::error(
@@ -364,6 +400,65 @@ impl<'a> Validator<'a> {
                 .push(DaihonDiagnostic::error(code, message, reference.span()).with_help(help));
         }
     }
+
+    fn validate_metadata_key_typo(&mut self, speaker: &Spanned<String>) {
+        if let Some(suggestion) = suggest_metadata_key(&speaker.value) {
+            self.diagnostics.push(DaihonDiagnostic::warning(
+                "W-DHN-SEM-051",
+                format!(
+                    "話者「{}」はメタデータ名の誤りかもしれません。もしかして: {}",
+                    speaker.value, suggestion
+                ),
+                speaker.span,
+            ));
+        }
+    }
+}
+
+fn is_builtin_time_name(name: &str) -> bool {
+    matches!(
+        name,
+        "年" | "月" | "日" | "曜日" | "週" | "時" | "分" | "秒" | "ミリ秒"
+    )
+}
+
+fn suggest_metadata_key(value: &str) -> Option<&'static str> {
+    const KEYS: &[&str] = &[
+        "合図",
+        "条件",
+        "優先度",
+        "重み",
+        "クールダウン",
+        "話者",
+        "前提条件",
+        "初期値",
+    ];
+    KEYS.iter()
+        .copied()
+        .find(|candidate| metadata_key_maybe_typo(value, candidate))
+}
+
+fn metadata_key_maybe_typo(value: &str, candidate: &str) -> bool {
+    value.chars().next() == candidate.chars().next()
+        && char_levenshtein(value, candidate) <= if candidate.chars().count() <= 3 { 1 } else { 3 }
+}
+
+fn char_levenshtein(left: &str, right: &str) -> usize {
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut current = vec![left_index + 1];
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let cost = usize::from(left_char != *right_char);
+            current.push(
+                (previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1)
+                    .min(previous[right_index] + cost),
+            );
+        }
+        previous = current;
+    }
+    previous[right_chars.len()]
 }
 
 fn expr_is_interpret_call(expr: &Expr) -> bool {
@@ -420,11 +515,13 @@ fn expr_uses_variable(expr: &Expr, variable: &VariableRef) -> bool {
                 FuncArg::BareWord(_) => false,
             })
         }
-        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => expr_uses_variable(expr, variable),
+        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } | Expr::Not { expr, .. } => {
+            expr_uses_variable(expr, variable)
+        }
         Expr::Binary { left, right, .. } | Expr::Comparison { left, right, .. } => {
             expr_uses_variable(left, variable) || expr_uses_variable(right, variable)
         }
-        Expr::PostfixComparison { left, value, .. } => {
+        Expr::PostfixComparison { left, value, .. } | Expr::StringMatch { left, value, .. } => {
             expr_uses_variable(left, variable) || expr_uses_variable(value, variable)
         }
         Expr::Range {
@@ -454,11 +551,13 @@ fn expr_contains_string(expr: &Expr, needle: &str) -> bool {
                 FuncArg::BareWord(word) => word.value == needle,
             })
         }
-        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => expr_contains_string(expr, needle),
+        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } | Expr::Not { expr, .. } => {
+            expr_contains_string(expr, needle)
+        }
         Expr::Binary { left, right, .. } | Expr::Comparison { left, right, .. } => {
             expr_contains_string(left, needle) || expr_contains_string(right, needle)
         }
-        Expr::PostfixComparison { left, value, .. } => {
+        Expr::PostfixComparison { left, value, .. } | Expr::StringMatch { left, value, .. } => {
             expr_contains_string(left, needle) || expr_contains_string(value, needle)
         }
         Expr::Range {

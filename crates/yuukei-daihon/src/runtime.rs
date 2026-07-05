@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::ast::*;
 use crate::diagnostic::{DaihonDiagnostic, DaihonRuntimeError};
 use crate::function::{FunctionRegistry, ValidationMode};
+use crate::parser::parse_variable_ref;
 use crate::span::Span;
 use crate::validate::{has_errors, validate_script};
 use crate::value::{DaihonNumber, DaihonValue};
@@ -479,12 +480,24 @@ where
             match part {
                 DialoguePart::Text(text) => output.push_str(&text.value),
                 DialoguePart::Embed(function) => {
-                    let variable_ref = VariableRef::EventLocal {
-                        name: function.name.clone(),
-                    };
-                    if self.variable_store.is_defined(&variable_ref) {
+                    let variable_ref = parse_variable_ref(&function.name.value, function.name.span);
+                    if !function.positional.is_empty() || !function.named.is_empty() {
+                        let value = self.call_function(function, speaker).await?;
+                        output.push_str(&value.to_display_string());
+                    } else if builtin_time_value(&variable_ref, self.now()).is_some()
+                        || self.variable_store.is_defined(&variable_ref)
+                    {
                         let value = self.get_variable(&variable_ref)?;
                         output.push_str(&value.to_display_string());
+                    } else if function.name.value.contains('#') {
+                        self.diagnostics.push(DaihonDiagnostic::warning(
+                            "W-DHN-RUN-054",
+                            format!(
+                                "＜{}＞ は未定義のため空文字になります。",
+                                function.name.value
+                            ),
+                            function.name.span,
+                        ));
                     } else {
                         let value = self.call_function(function, speaker).await?;
                         output.push_str(&value.to_display_string());
@@ -517,19 +530,36 @@ where
             } => Ok(self.eval_condition(left, speaker).await?
                 || self.eval_condition(right, speaker).await?),
             Expr::Comparison {
-                left, op, right, ..
+                left,
+                op,
+                right,
+                span,
             } => {
                 let left = self.eval_expr(left, speaker).await?;
                 let right = self.eval_expr(right, speaker).await?;
-                Ok(compare_values(&left, *op, &right))
+                Ok(self.compare_values(&left, *op, &right, *span))
             }
             Expr::PostfixComparison {
-                left, op, value, ..
+                left,
+                op,
+                value,
+                span,
             } => {
                 let left = self.eval_expr(left, speaker).await?;
                 let right = self.eval_expr(value, speaker).await?;
-                Ok(compare_values(&left, *op, &right))
+                Ok(self.compare_values(&left, *op, &right, *span))
             }
+            Expr::StringMatch {
+                left,
+                op,
+                value,
+                span,
+            } => {
+                let left = self.eval_expr(left, speaker).await?;
+                let right = self.eval_expr(value, speaker).await?;
+                Ok(self.match_strings(&left, *op, &right, *span))
+            }
+            Expr::Not { expr, .. } => Ok(!self.eval_condition(expr, speaker).await?),
             Expr::Range {
                 left, start, end, ..
             } => {
@@ -575,18 +605,17 @@ where
             }
             Expr::Truthy { expr, .. } => match self.eval_expr(expr, speaker).await? {
                 DaihonValue::Boolean(value) => Ok(value),
-                other => Err(DaihonRuntimeError::new(
-                    "E-DHN-RUN-040",
-                    format!(
-                        "{:?} 型の値は真偽値として評価できません。",
-                        other.value_type()
-                    ),
-                    expr.span(),
-                )),
+                _ => {
+                    self.warn_non_boolean_condition(expr.span());
+                    Ok(false)
+                }
             },
             other => match self.eval_expr(other, speaker).await? {
                 DaihonValue::Boolean(value) => Ok(value),
-                _ => Ok(false),
+                _ => {
+                    self.warn_non_boolean_condition(other.span());
+                    Ok(false)
+                }
             },
         }
     }
@@ -613,7 +642,11 @@ where
                 Ok(DaihonValue::Number(match op {
                     UnaryOp::Plus => number,
                     UnaryOp::Minus => match number {
-                        DaihonNumber::Integer(value) => DaihonNumber::Integer(-value),
+                        DaihonNumber::Integer(value) => DaihonNumber::Integer(
+                            value
+                                .checked_neg()
+                                .ok_or_else(|| number_overflow_error(*span))?,
+                        ),
                         DaihonNumber::Float(value) => DaihonNumber::Float(-value),
                     },
                 }))
@@ -624,18 +657,73 @@ where
                 right,
                 span,
             } => {
+                if matches!(op, BinaryOp::And | BinaryOp::Or) {
+                    return Ok(DaihonValue::Boolean(
+                        self.eval_condition(expr, speaker).await?,
+                    ));
+                }
                 let left_value = self.eval_expr(left, speaker).await?;
                 let right_value = self.eval_expr(right, speaker).await?;
                 self.eval_binary(left_value, *op, right_value, *span)
             }
             Expr::Truthy { expr, .. } => self.eval_expr(expr, speaker).await,
-            Expr::Comparison { .. }
+            Expr::Not { .. }
+            | Expr::Comparison { .. }
             | Expr::PostfixComparison { .. }
+            | Expr::StringMatch { .. }
             | Expr::Range { .. }
             | Expr::TimeRange { .. } => Ok(DaihonValue::Boolean(
                 self.eval_condition(expr, speaker).await?,
             )),
         }
+    }
+
+    fn compare_values(
+        &mut self,
+        left: &DaihonValue,
+        op: ComparisonOp,
+        right: &DaihonValue,
+        span: Span,
+    ) -> bool {
+        let Some(result) = compare_values(left, op, right) else {
+            self.warn_comparison_type_mismatch(span);
+            return false;
+        };
+        result
+    }
+
+    fn match_strings(
+        &mut self,
+        left: &DaihonValue,
+        op: StringMatchOp,
+        right: &DaihonValue,
+        span: Span,
+    ) -> bool {
+        let (DaihonValue::String(left), DaihonValue::String(right)) = (left, right) else {
+            self.warn_comparison_type_mismatch(span);
+            return false;
+        };
+        match op {
+            StringMatchOp::Contains => left.contains(right),
+            StringMatchOp::StartsWith => left.starts_with(right),
+            StringMatchOp::EndsWith => left.ends_with(right),
+        }
+    }
+
+    fn warn_comparison_type_mismatch(&mut self, span: Span) {
+        self.diagnostics.push(DaihonDiagnostic::warning(
+            "W-DHN-RUN-052",
+            "型が違う値を比較したため、この条件は常に「いいえ」になります。",
+            span,
+        ));
+    }
+
+    fn warn_non_boolean_condition(&mut self, span: Span) {
+        self.diagnostics.push(DaihonDiagnostic::warning(
+            "W-DHN-RUN-055",
+            "真偽値ではない値が条件に使われたため「いいえ」として扱います。",
+            span,
+        ));
     }
 
     fn eval_binary(
@@ -656,7 +744,10 @@ where
                     )));
                 }
                 match (left.as_number(), right.as_number()) {
-                    (Some(left), Some(right)) => Ok(DaihonValue::Number(left.checked_add(right))),
+                    (Some(left), Some(right)) => left
+                        .checked_add(right)
+                        .map(DaihonValue::Number)
+                        .ok_or_else(|| number_overflow_error(span)),
                     _ => Err(DaihonRuntimeError::new(
                         "E-DHN-RUN-042",
                         "+ は数値加算または文字列結合にだけ使えます。",
@@ -673,16 +764,24 @@ where
                     ));
                 };
                 let result = match op {
-                    BinaryOp::Subtract => Some(left.checked_sub(right)),
-                    BinaryOp::Multiply => Some(left.checked_mul(right)),
+                    BinaryOp::Subtract => left.checked_sub(right),
+                    BinaryOp::Multiply => left.checked_mul(right),
                     BinaryOp::Divide => left.checked_div(right),
                     BinaryOp::Modulo => left.checked_rem(right),
                     _ => None,
                 };
-                result.map(DaihonValue::Number).ok_or_else(|| {
-                    DaihonRuntimeError::new("E-DHN-RUN-044", "0で除算することはできません。", span)
+                result.map(DaihonValue::Number).ok_or_else(|| match op {
+                    BinaryOp::Divide | BinaryOp::Modulo if right.as_f64() == 0.0 => {
+                        DaihonRuntimeError::new(
+                            "E-DHN-RUN-044",
+                            "0で除算することはできません。",
+                            span,
+                        )
+                    }
+                    _ => number_overflow_error(span),
                 })
             }
+            // Logical binary expressions are delegated to eval_condition from eval_expr.
             BinaryOp::And | BinaryOp::Or => unreachable!("logical operators are conditions"),
         }
     }
@@ -850,18 +949,20 @@ pub fn parse_interpret_choices(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn compare_values(left: &DaihonValue, op: ComparisonOp, right: &DaihonValue) -> bool {
-    let Some(ordering) = left.compare_same_type(right) else {
-        return false;
-    };
-    match op {
+fn number_overflow_error(span: Span) -> DaihonRuntimeError {
+    DaihonRuntimeError::new("E-DHN-RUN-045", "数値が大きすぎて計算できません。", span)
+}
+
+fn compare_values(left: &DaihonValue, op: ComparisonOp, right: &DaihonValue) -> Option<bool> {
+    let ordering = left.compare_same_type(right)?;
+    Some(match op {
         ComparisonOp::Eq => ordering == Ordering::Equal,
         ComparisonOp::Ne => ordering != Ordering::Equal,
         ComparisonOp::Lt => ordering == Ordering::Less,
         ComparisonOp::Lte => matches!(ordering, Ordering::Less | Ordering::Equal),
         ComparisonOp::Gt => ordering == Ordering::Greater,
         ComparisonOp::Gte => matches!(ordering, Ordering::Greater | Ordering::Equal),
-    }
+    })
 }
 
 fn weighted_pick<'a>(scenes: &[&'a Scene], seed: Option<u64>) -> Option<&'a Scene> {

@@ -220,6 +220,22 @@ fn lexer_preserves_dialogue_comments_and_reports_unclosed() {
 }
 
 #[test]
+fn parser_ignores_line_and_trailing_comments() {
+    for source in [
+        "## t\n$$ c\n### s\n「a」\n",
+        "## t\n＄＄ c\n### s\n「a」\n",
+        "## t\n### s\n$$ c\n「a」\n",
+        "## t\n### s\n＄＄ c\n「a」\n",
+        "## t\n### s\n好感度=1 $$ c\n「a」\n",
+        "## t\n### s\n好感度=1 ＄＄ c",
+    ] {
+        parse_script(source).unwrap_or_else(|diagnostics| {
+            panic!("expected comments to parse, got diagnostics: {diagnostics:?}")
+        });
+    }
+}
+
+#[test]
 fn parser_reads_metadata_speaker_scoped_display_and_bareword() {
     let script = parse_script(
         r#"
@@ -284,6 +300,239 @@ fn parser_reads_scoped_variables_and_dialogue_embed() {
         &script.event.scenes[0].statements[2],
         Stmt::Assignment(assignment) if matches!(assignment.target, VariableRef::Relation { .. })
     ));
+}
+
+#[test]
+fn parser_accepts_fullwidth_arithmetic_operators_in_assignments_and_conditions() {
+    let script = parse_script(
+        r#"
+## 全角演算
+初期値:
+好感度=5
+### 通常
+条件:（好感度 ＊ 2 >= 10）
+好感度=好感度＋1
+差=好感度－2
+積=好感度＊2
+商=好感度／2
+余=好感度％2
+「ok」
+"#,
+    )
+    .unwrap();
+
+    match script.event.scenes[0].metadata.condition.as_ref().unwrap() {
+        Expr::Comparison { left, op, .. } => {
+            assert_eq!(*op, ComparisonOp::Gte);
+            assert!(matches!(
+                left.as_ref(),
+                Expr::Binary {
+                    op: BinaryOp::Multiply,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected comparison, got {other:?}"),
+    }
+    let expected = [
+        BinaryOp::Add,
+        BinaryOp::Subtract,
+        BinaryOp::Multiply,
+        BinaryOp::Divide,
+        BinaryOp::Modulo,
+    ];
+    for (statement, expected_op) in script.event.scenes[0]
+        .statements
+        .iter()
+        .take(expected.len())
+        .zip(expected)
+    {
+        match statement {
+            Stmt::Assignment(assignment) => {
+                assert!(matches!(
+                    assignment.value,
+                    Expr::Binary {
+                        op,
+                        ..
+                    } if op == expected_op
+                ));
+            }
+            other => panic!("expected assignment, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn parser_reads_postfix_not_string_match_and_day_cooldown() {
+    let script = parse_script(
+        r#"
+## 条件
+初期値:
+好感度=5
+### 否定
+条件:（好感度 10以上 でない）
+クールダウン: 1日
+「not」
+### 含む
+条件:（入力#ファイル名 「レポート」を含む）
+「contains」
+### 始まる
+条件:（入力#ファイル名 「月次」で始まる）
+「starts」
+### 終わる
+条件:（入力#ファイル名 「.xlsx」で終わる）
+「ends」
+"#,
+    )
+    .unwrap();
+
+    match script.event.scenes[0].metadata.condition.as_ref().unwrap() {
+        Expr::Not { expr, .. } => {
+            assert!(matches!(
+                expr.as_ref(),
+                Expr::PostfixComparison {
+                    op: ComparisonOp::Gte,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected not expression, got {other:?}"),
+    }
+    assert_eq!(
+        script.event.scenes[0].metadata.cooldown.unwrap().as_secs(),
+        86_400
+    );
+
+    let expected = [
+        StringMatchOp::Contains,
+        StringMatchOp::StartsWith,
+        StringMatchOp::EndsWith,
+    ];
+    for (scene, expected_op) in script.event.scenes.iter().skip(1).zip(expected) {
+        match scene.metadata.condition.as_ref().unwrap() {
+            Expr::StringMatch { op, .. } => assert_eq!(*op, expected_op),
+            other => panic!("expected string match, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn parser_accepts_wave_dash_and_fullwidth_tilde_ranges() {
+    for separator in ["〜", "～"] {
+        let script = parse_script(&format!(
+            r#"
+## 範囲
+### 時刻
+条件: 9:00{separator}12:00
+「ok」
+"#
+        ))
+        .unwrap();
+
+        match script.event.scenes[0].metadata.condition.as_ref().unwrap() {
+            Expr::TimeRange { start, end, .. } => {
+                assert_eq!(start.as_ref().map(|time| time.hour), Some(9));
+                assert_eq!(start.as_ref().map(|time| time.minute), Some(0));
+                assert_eq!(end.as_ref().map(|time| time.hour), Some(12));
+                assert_eq!(end.as_ref().map(|time| time.minute), Some(0));
+            }
+            other => panic!("expected time range, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn diagnostics_use_character_columns_in_japanese_lines() {
+    let script = parse_script(
+        r#"
+## 検証
+### A
+「あいう＜端末#OS＞」
+"#,
+    )
+    .unwrap();
+    let diagnostics = validate_script(&script, Some(&registry()));
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "E-DHN-SEM-021")
+        .unwrap();
+
+    assert_eq!(diagnostic.labels[0].span.line, 4);
+    assert_eq!(diagnostic.labels[0].span.column, 5);
+}
+
+#[test]
+fn validator_points_condition_marker_error_at_condition_line() {
+    let script = parse_script(
+        r#"
+## 検証
+### A
+合図: @x
+条件:※（はい）
+「x」
+"#,
+    )
+    .unwrap();
+    let diagnostics = validate_script(&script, Some(&registry()));
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "E-DHN-SEM-011")
+        .unwrap();
+    let condition_span = script.event.scenes[0]
+        .metadata
+        .raw
+        .condition_text
+        .as_ref()
+        .unwrap()
+        .span;
+    let signal_span = script.event.scenes[0]
+        .metadata
+        .raw
+        .signal_text
+        .as_ref()
+        .unwrap()
+        .span;
+
+    assert_eq!(diagnostic.labels[0].span, condition_span);
+    assert_ne!(diagnostic.labels[0].span, signal_span);
+}
+
+#[test]
+fn validator_rejects_assignment_to_builtin_time_variables() {
+    let script = parse_script(
+        r#"
+## 検証
+初期値:
+時=5
+### A
+「x」
+"#,
+    )
+    .unwrap();
+    let diagnostics = validate_script(&script, Some(&registry()));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E-DHN-SEM-049"));
+}
+
+#[test]
+fn validator_warns_for_metadata_key_typos() {
+    let script = parse_script(
+        r#"
+## 検証
+### A
+クールタイム: 30秒
+「x」
+"#,
+    )
+    .unwrap();
+    let diagnostics = validate_script(&script, Some(&registry()));
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "W-DHN-SEM-051")
+        .unwrap();
+
+    assert!(diagnostic.message.contains("もしかして: クールダウン"));
 }
 
 #[test]
@@ -381,6 +630,71 @@ fn validator_requires_interpret_result_to_have_unknown_or_catch_all_branch() {
     assert!(diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "E-DHN-SEM-048"));
+}
+
+#[tokio::test]
+async fn docs_ai_examples_match_strict_registry() {
+    let interpret_script = parse_script(
+        r#"
+## 解釈
+### 解釈の例
+話者: ゆうけい
+_意図 = ＜解釈 (入力#発言) 「発言の意図は何ですか」 「挨拶/質問/終了」＞
+
+※（_意図 = 「挨拶」）なら:
+「こんにちは。」
+※あるいは（_意図 = 「質問」）:
+「質問ですね。」
+※あるいは（_意図 = 「終了」）:
+「またあとで。」
+※それ以外:
+「うまく読み取れませんでした。」
+おわり
+"#,
+    )
+    .unwrap();
+
+    let generate_script = parse_script(
+        r#"
+## 生成
+### 生成の例
+話者: ゆうけい
+「おはようございます。」
+＜生成 「朝の気分をひとことつぶやく」 「今日もいい天気ですね。」＞
+"#,
+    )
+    .unwrap();
+
+    for script in [&interpret_script, &generate_script] {
+        let diagnostics = validate_script(script, Some(&registry()));
+        assert!(
+            diagnostics.is_empty(),
+            "expected docs examples to validate, got {diagnostics:?}"
+        );
+    }
+
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_responses(["挨拶".to_owned()]);
+    let mut variables =
+        InMemoryVariableStore::new().with_input("発言", DaihonValue::String("こんにちは".into()));
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    interpreter.run_script(&interpret_script).await.unwrap();
+    assert_eq!(interpret.requests.len(), 1);
+    assert_eq!(interpret.requests[0].input_text, "こんにちは");
+    assert_eq!(interpret.requests[0].question, "発言の意図は何ですか");
+    assert_eq!(interpret.requests[0].choices, ["挨拶", "質問", "終了"]);
 }
 
 #[tokio::test]
@@ -768,6 +1082,379 @@ async fn runtime_uses_defaults_preconditions_and_assignments() {
         DaihonValue::Number(DaihonNumber::Integer(3))
     );
     assert_eq!(action.dialogues[0].1, "値3");
+}
+
+#[tokio::test]
+async fn runtime_ignores_trailing_comments_but_keeps_dialogue_dollars() {
+    let script = parse_script(
+        r#"
+## コメント
+### 通常
+好感度=1 $$ ここはコメント
+「価格は$$です。好感度は＜好感度＞です。」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    interpreter.run_script(&script).await.unwrap();
+    assert_eq!(action.dialogues[0].1, "価格は$$です。好感度は1です。");
+    assert_eq!(
+        variables
+            .get_value(&VariableRef::EventLocal {
+                name: Spanned::new("好感度".to_owned(), Span::empty())
+            })
+            .unwrap(),
+        DaihonValue::Number(DaihonNumber::Integer(1))
+    );
+}
+
+#[tokio::test]
+async fn runtime_resolves_scoped_dialogue_embeds_as_variables() {
+    let script = parse_script(
+        r#"
+## 起動
+### 通常
+「今は＜入力#時間帯＞です。天気は＜全体#天気＞、ミカは＜住人#ミカ#機嫌＞。」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables =
+        InMemoryVariableStore::new().with_input("時間帯", DaihonValue::String("朝".to_owned()));
+    variables
+        .set_value(
+            &VariableRef::Global {
+                name: Spanned::new("天気".to_owned(), Span::empty()),
+            },
+            DaihonValue::String("晴れ".to_owned()),
+        )
+        .unwrap();
+    variables
+        .set_value(
+            &VariableRef::Resident {
+                actor: Spanned::new("ミカ".to_owned(), Span::empty()),
+                name: Spanned::new("機嫌".to_owned(), Span::empty()),
+            },
+            DaihonValue::String("ごきげん".to_owned()),
+        )
+        .unwrap();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(
+        action.dialogues[0].1,
+        "今は朝です。天気は晴れ、ミカはごきげん。"
+    );
+    assert!(action.calls.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_warns_for_missing_scoped_dialogue_embed_without_function_fallback() {
+    let script = parse_script(
+        r#"
+## 起動
+### 通常
+「今は＜入力#時間帯＞です」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(action.dialogues[0].1, "今はです");
+    assert!(action.calls.is_empty());
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-054"));
+}
+
+#[tokio::test]
+async fn runtime_evaluates_postfix_not_condition() {
+    let script = parse_script(
+        r#"
+## 否定
+初期値:
+好感度=5
+### 低い
+条件:（好感度 10以上 でない）
+優先度: 10
+「低い」
+### 高い
+「高い」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    interpreter.run_script(&script).await.unwrap();
+    assert_eq!(action.dialogues[0].1, "低い");
+}
+
+#[tokio::test]
+async fn runtime_evaluates_nested_logical_conditions_without_panicking() {
+    let cases = [("（a かつ b）", "false"), ("（a かつ b）でない", "true")];
+
+    for (condition, expected) in cases {
+        let script = parse_script(&format!(
+            r#"
+## 論理
+初期値:
+a=はい
+b=いいえ
+### 条件
+条件:（{condition}）
+優先度: 10
+「true」
+### 既定
+「false」
+"#
+        ))
+        .unwrap();
+        let mut action = MockActionHandler::default();
+        let mut interpret = NoopInterpretHandler;
+        let mut variables = InMemoryVariableStore::new();
+        let mut history = InMemorySceneHistory::new();
+        let mut interpreter = Interpreter {
+            action_handler: &mut action,
+            interpret_handler: &mut interpret,
+            variable_store: &mut variables,
+            scene_history: &mut history,
+            function_registry: &FunctionRegistry::permissive(),
+            options: RunOptions::default(),
+            interpretation_count: 0,
+            generation_count: 0,
+            diagnostics: Vec::new(),
+        };
+
+        interpreter.run_script(&script).await.unwrap();
+        assert_eq!(action.dialogues[0].1, expected);
+    }
+}
+
+#[tokio::test]
+async fn runtime_evaluates_string_match_conditions() {
+    let cases = [
+        ("「レポート」を含む", "月次レポート.xlsx", "matched"),
+        ("「レポート」を含む", "写真.png", "fallback"),
+        ("「月次」で始まる", "月次レポート.xlsx", "matched"),
+        ("「月次」で始まる", "年次レポート.xlsx", "fallback"),
+        ("「.xlsx」で終わる", "月次レポート.xlsx", "matched"),
+        ("「.xlsx」で終わる", "写真.png", "fallback"),
+    ];
+
+    for (condition, input, expected) in cases {
+        let script = parse_script(&format!(
+            r#"
+## 文字列
+### 一致
+条件:（入力#ファイル名 {condition}）
+優先度: 10
+「matched」
+### 既定
+「fallback」
+"#
+        ))
+        .unwrap();
+        let mut action = MockActionHandler::default();
+        let mut interpret = NoopInterpretHandler;
+        let mut variables = InMemoryVariableStore::new()
+            .with_input("ファイル名", DaihonValue::String(input.to_owned()));
+        let mut history = InMemorySceneHistory::new();
+        let mut interpreter = Interpreter {
+            action_handler: &mut action,
+            interpret_handler: &mut interpret,
+            variable_store: &mut variables,
+            scene_history: &mut history,
+            function_registry: &FunctionRegistry::permissive(),
+            options: RunOptions::default(),
+            interpretation_count: 0,
+            generation_count: 0,
+            diagnostics: Vec::new(),
+        };
+
+        interpreter.run_script(&script).await.unwrap();
+        assert_eq!(action.dialogues[0].1, expected);
+    }
+}
+
+#[tokio::test]
+async fn runtime_warns_when_comparing_different_types() {
+    let script = parse_script(
+        r#"
+## 型
+初期値:
+好感度=10
+### 不一致
+条件:（好感度 = 「高い」）
+優先度: 10
+「bad」
+### 既定
+「ok」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(action.dialogues[0].1, "ok");
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-052"));
+}
+
+#[tokio::test]
+async fn runtime_warns_and_treats_non_boolean_conditions_as_false() {
+    let script = parse_script(
+        r#"
+## 真偽
+初期値:
+好感度=10
+### 非bool
+条件:（好感度）
+優先度: 10
+「bad」
+### 既定
+「ok」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(action.dialogues[0].1, "ok");
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-055"));
+}
+
+#[tokio::test]
+async fn runtime_reports_number_overflow_without_panicking() {
+    let scripts = [
+        r#"
+## 桁あふれ
+### 加算
+結果=9223372036854775807 + 1
+"#,
+        r#"
+## 桁あふれ
+### 乗算
+結果=9223372036854775807 * 2
+"#,
+        r#"
+## 桁あふれ
+### 単項
+結果=-(0 - 9223372036854775807 - 1)
+"#,
+    ];
+
+    for source in scripts {
+        let script = parse_script(source).unwrap();
+        let mut action = MockActionHandler::default();
+        let mut interpret = NoopInterpretHandler;
+        let mut variables = InMemoryVariableStore::new();
+        let mut history = InMemorySceneHistory::new();
+        let mut interpreter = Interpreter {
+            action_handler: &mut action,
+            interpret_handler: &mut interpret,
+            variable_store: &mut variables,
+            scene_history: &mut history,
+            function_registry: &FunctionRegistry::permissive(),
+            options: RunOptions::default(),
+            interpretation_count: 0,
+            generation_count: 0,
+            diagnostics: Vec::new(),
+        };
+
+        let err = interpreter.run_script(&script).await.unwrap_err();
+        assert_eq!(err.diagnostic.code, "E-DHN-RUN-045");
+    }
 }
 
 #[tokio::test]

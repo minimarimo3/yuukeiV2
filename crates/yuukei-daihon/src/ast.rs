@@ -73,6 +73,8 @@ pub struct SceneMetadataRaw {
     pub signal_text: Option<Spanned<String>>,
     pub signal_used_and: bool,
     pub condition_had_marker: bool,
+    pub condition_text: Option<Spanned<String>>,
+    pub unknown_metadata_keys: Vec<Spanned<String>>,
     pub priority_text: Option<Spanned<String>>,
     pub weight_text: Option<Spanned<String>>,
     pub cooldown_text: Option<Spanned<String>>,
@@ -211,6 +213,10 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    Not {
+        expr: Box<Expr>,
+        span: Span,
+    },
     Comparison {
         left: Box<Expr>,
         op: ComparisonOp,
@@ -221,6 +227,12 @@ pub enum Expr {
         left: Box<Expr>,
         value: Box<Expr>,
         op: ComparisonOp,
+        span: Span,
+    },
+    StringMatch {
+        left: Box<Expr>,
+        value: Box<Expr>,
+        op: StringMatchOp,
         span: Span,
     },
     Range {
@@ -245,8 +257,10 @@ impl Expr {
             Self::Unary { span, .. }
             | Self::Binary { span, .. }
             | Self::Truthy { span, .. }
+            | Self::Not { span, .. }
             | Self::Comparison { span, .. }
             | Self::PostfixComparison { span, .. }
+            | Self::StringMatch { span, .. }
             | Self::Range { span, .. }
             | Self::TimeRange { span, .. } => *span,
         }
@@ -278,6 +292,13 @@ pub enum ComparisonOp {
     Lte,
     Gt,
     Gte,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StringMatchOp {
+    Contains,
+    StartsWith,
+    EndsWith,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 4. [04-event-log-and-memory.md](04-event-log-and-memory.md): 本体が持つ「記録」と、Extensionが作る「記憶」。
 5. [05-world-pack-and-daihon.md](05-world-pack-and-daihon.md): 世界観パック、Daihon、台本とAIの関係。
 6. [06-build-guidance-for-codex.md](06-build-guidance-for-codex.md): 新規実装時の判断基準と作る順番。
+7. [08-daihon-language-reference.md](08-daihon-language-reference.md): World Pack作者向けのDaihon言語リファレンス。
 
 ## Non-Negotiable Product Intent
 

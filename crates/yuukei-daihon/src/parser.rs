@@ -230,6 +230,15 @@ impl DaihonParser {
                 key.as_str(),
                 "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "話者"
             ) {
+                if suggest_metadata_key(&key).is_some() {
+                    let line = self.next_line().unwrap();
+                    let key_span = span_for_substr(&line, &key);
+                    metadata
+                        .raw
+                        .unknown_metadata_keys
+                        .push(Spanned::new(key, key_span));
+                    continue;
+                }
                 break;
             }
             let line = self.next_line().unwrap();
@@ -256,6 +265,8 @@ impl DaihonParser {
                 }
                 "条件" => {
                     metadata.raw.condition_had_marker = value.trim_start().starts_with('※');
+                    metadata.raw.condition_text =
+                        Some(Spanned::new(value.trim().to_owned(), value_span));
                     let cond_text = trim_condition_wrapper(value.trim().trim_start_matches('※'));
                     match parse_condition_expr(cond_text, value_span) {
                         Ok(expr) => metadata.condition = Some(expr),
@@ -426,11 +437,17 @@ fn parse_stmt_from_line(line: &LogicalLine, parser: &mut DaihonParser) -> Option
     if let Some(assignment) = parse_assignment(line, &mut parser.diagnostics) {
         return Some(Stmt::Assignment(Box::new(assignment)));
     }
+    let help = if split_metadata_line(&normalize_line_head(&line.text))
+        .map(|(key, _)| is_known_metadata_key(&key))
+        .unwrap_or(false)
+    {
+        "合図・条件などのメタデータ行はシーン見出しの直後にまとめて書いてください。"
+    } else {
+        "セリフは 「」 で囲んでください。地の文(裸のテキスト行)は書けません。セリフ、関数呼び出し、代入、ジャンプ、条件ブロックのいずれかを書いてください。"
+    };
     parser.diagnostics.push(
         DaihonDiagnostic::error("E-DHN-SYN-031", "文として解釈できませんでした。", line.span)
-            .with_help(
-                "セリフ、関数呼び出し、代入、ジャンプ、条件ブロックのいずれかを書いてください。",
-            ),
+            .with_help(help),
     );
     None
 }
@@ -712,14 +729,14 @@ fn parse_dialogue_at(
             if !text.is_empty() {
                 parts.push(DialoguePart::Text(Spanned::new(
                     text.clone(),
-                    relative_span(base_span, text_start, byte),
+                    relative_span(base_span, source, text_start, byte),
                 )));
             }
             let end = byte + ch.len_utf8();
             return Ok((
                 Dialogue {
                     parts,
-                    span: relative_span(base_span, start_byte, end),
+                    span: relative_span(base_span, source, start_byte, end),
                 },
                 end,
             ));
@@ -738,7 +755,7 @@ fn parse_dialogue_at(
             if !text.is_empty() {
                 parts.push(DialoguePart::Text(Spanned::new(
                     text.clone(),
-                    relative_span(base_span, text_start, byte),
+                    relative_span(base_span, source, text_start, byte),
                 )));
                 text.clear();
             }
@@ -759,7 +776,7 @@ fn parse_dialogue_at(
     Err(DaihonDiagnostic::error(
         "E-DHN-LEX-001",
         "セリフが閉じられていません。",
-        relative_span(base_span, start_byte, source.len()),
+        relative_span(base_span, source, start_byte, source.len()),
     ))
 }
 
@@ -799,8 +816,10 @@ fn parse_function_call_at(
                 if depth == 0 {
                     let content = &source[content_start..byte];
                     let end = byte + ch.len_utf8();
-                    let call =
-                        parse_function_content(content, relative_span(base_span, start_byte, end))?;
+                    let call = parse_function_content(
+                        content,
+                        relative_span(base_span, source, start_byte, end),
+                    )?;
                     return Ok((call, end));
                 }
                 byte += ch.len_utf8();
@@ -811,7 +830,7 @@ fn parse_function_call_at(
     Err(DaihonDiagnostic::error(
         "E-DHN-LEX-002",
         "関数呼び出しが閉じられていません。",
-        relative_span(base_span, start_byte, source.len()),
+        relative_span(base_span, source, start_byte, source.len()),
     ))
 }
 
@@ -941,6 +960,18 @@ impl ExprStream {
     }
 
     fn parse_condition_primary(&mut self) -> Result<Expr, DaihonDiagnostic> {
+        let mut expr = self.parse_condition_primary_base()?;
+        while let Some(token) = self.consume_op("でない") {
+            let span = expr.span().join(token.span);
+            expr = Expr::Not {
+                expr: Box::new(expr),
+                span,
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_condition_primary_base(&mut self) -> Result<Expr, DaihonDiagnostic> {
         if let Some(token) = self.peek().cloned() {
             if let ExprTokenKind::Time(start) = token.kind {
                 if self
@@ -1034,6 +1065,15 @@ impl ExprStream {
                     if let Some(op) = self.consume_postfix_op() {
                         let span = left.span().join(value.span());
                         return Ok(Expr::PostfixComparison {
+                            left: Box::new(left),
+                            value: Box::new(value),
+                            op,
+                            span,
+                        });
+                    }
+                    if let Some(op) = self.consume_string_match_op() {
+                        let span = left.span().join(value.span());
+                        return Ok(Expr::StringMatch {
                             left: Box::new(left),
                             value: Box::new(value),
                             op,
@@ -1202,6 +1242,18 @@ impl ExprStream {
         Some(op)
     }
 
+    fn consume_string_match_op(&mut self) -> Option<StringMatchOp> {
+        let token = self.peek()?.clone();
+        let op = match &token.kind {
+            ExprTokenKind::Op(op) if op == "を含む" => StringMatchOp::Contains,
+            ExprTokenKind::Op(op) if op == "で始まる" => StringMatchOp::StartsWith,
+            ExprTokenKind::Op(op) if op == "で終わる" => StringMatchOp::EndsWith,
+            _ => return None,
+        };
+        self.index += 1;
+        Some(op)
+    }
+
     fn consume_op(&mut self, op: &str) -> Option<ExprToken> {
         self.consume_kind(|kind| matches!(kind, ExprTokenKind::Op(value) if value == op))
     }
@@ -1249,7 +1301,7 @@ fn expr_tokens(text: &str, base_span: Span) -> Result<Vec<ExprToken>, DaihonDiag
             byte += ch.len_utf8();
             continue;
         }
-        let span_from = |start: usize, end: usize| relative_span(base_span, start, end);
+        let span_from = |start: usize, end: usize| relative_span(base_span, text, start, end);
         if ch == '「' {
             let (dialogue, next) = parse_dialogue_at(text, byte, base_span)?;
             let value = dialogue
@@ -1346,7 +1398,16 @@ fn expr_tokens(text: &str, base_span: Span) -> Result<Vec<ExprToken>, DaihonDiag
                     }
                 }
                 if !saw_colon {
-                    for word in ["未満", "以下", "以上", "超える"] {
+                    for word in [
+                        "未満",
+                        "以下",
+                        "以上",
+                        "超える",
+                        "でない",
+                        "を含む",
+                        "で始まる",
+                        "で終わる",
+                    ] {
                         if normalize_syntax(&text[byte..]).starts_with(word) {
                             break;
                         }
@@ -1383,9 +1444,8 @@ fn expr_tokens(text: &str, base_span: Span) -> Result<Vec<ExprToken>, DaihonDiag
             let kind = match ident.as_str() {
                 "はい" => ExprTokenKind::Bool(true),
                 "いいえ" => ExprTokenKind::Bool(false),
-                "かつ" | "または" | "未満" | "以下" | "以上" | "超える" => {
-                    ExprTokenKind::Op(ident)
-                }
+                "かつ" | "または" | "未満" | "以下" | "以上" | "超える" | "でない" | "を含む"
+                | "で始まる" | "で終わる" => ExprTokenKind::Op(ident),
                 _ => ExprTokenKind::Ident(ident),
             };
             tokens.push(ExprToken {
@@ -1414,6 +1474,7 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
     let mut dialogue = false;
     let mut function_depth = 0usize;
     let mut in_function_string = false;
+    let mut line_text_end = None;
     let chars: Vec<(usize, char)> = source.char_indices().collect();
     let mut index = 0usize;
     while let Some((pos, ch)) = chars.get(index).copied() {
@@ -1421,8 +1482,9 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
         if !dialogue
             && !in_function_string
             && function_depth == 0
-            && source[pos..].starts_with("$$")
+            && (source[pos..].starts_with("$$") || source[pos..].starts_with("＄＄"))
         {
+            line_text_end.get_or_insert(pos);
             while let Some((_, c)) = chars.get(index).copied() {
                 if c == '\n' || c == '\r' {
                     break;
@@ -1487,7 +1549,7 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
         }
 
         if (ch == '\n' || ch == '\r') && !dialogue && !in_function_string && function_depth == 0 {
-            let end = pos;
+            let end = line_text_end.unwrap_or(pos);
             let text = source[start..end].to_owned();
             lines.push(LogicalLine {
                 text,
@@ -1505,6 +1567,7 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
             current_line = line;
             current_column = 1;
             column = 1;
+            line_text_end = None;
             continue;
         }
         if ch == '\n' || ch == '\r' {
@@ -1516,11 +1579,12 @@ fn logical_lines(source: &str) -> Vec<LogicalLine> {
         index += 1;
     }
     if start <= source.len() {
-        let text = source[start..].to_owned();
+        let end = line_text_end.unwrap_or(source.len());
+        let text = source[start..end].to_owned();
         if !text.is_empty() {
             lines.push(LogicalLine {
                 text,
-                span: Span::new(start, source.len(), line, column),
+                span: Span::new(start, end, line, column),
             });
         }
     }
@@ -1632,7 +1696,7 @@ fn split_function_args(content: &str) -> Vec<String> {
     args
 }
 
-fn parse_variable_ref(text: &str, span: Span) -> VariableRef {
+pub(crate) fn parse_variable_ref(text: &str, span: Span) -> VariableRef {
     let normalized = normalize_syntax(text.trim());
     let spanned = |value: &str| Spanned::new(value.to_owned(), span);
     let parts = normalized.split('#').collect::<Vec<_>>();
@@ -1735,6 +1799,7 @@ fn parse_duration(text: &str) -> Option<Duration> {
         "秒" | "s" => Some(Duration::from_secs(value)),
         "分" | "m" => Some(Duration::from_secs(value * 60)),
         "時間" | "h" => Some(Duration::from_secs(value * 60 * 60)),
+        "日" | "d" => Some(Duration::from_secs(value * 60 * 60 * 24)),
         _ => None,
     }
 }
@@ -1781,6 +1846,43 @@ fn split_metadata_line(normalized_line: &str) -> Option<(String, &str)> {
     Some((key.trim().to_owned(), rest))
 }
 
+fn is_known_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "話者" | "前提条件" | "初期値"
+    )
+}
+
+fn suggest_metadata_key(key: &str) -> Option<String> {
+    const KEYS: &[&str] = &["合図", "条件", "優先度", "重み", "クールダウン", "話者"];
+    KEYS.iter()
+        .find(|candidate| metadata_key_maybe_typo(key, candidate))
+        .map(|candidate| (*candidate).to_owned())
+}
+
+fn metadata_key_maybe_typo(value: &str, candidate: &str) -> bool {
+    value.chars().next() == candidate.chars().next()
+        && char_levenshtein(value, candidate) <= if candidate.chars().count() <= 3 { 1 } else { 3 }
+}
+
+fn char_levenshtein(left: &str, right: &str) -> usize {
+    let right_chars = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right_chars.len()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut current = vec![left_index + 1];
+        for (right_index, right_char) in right_chars.iter().enumerate() {
+            let cost = usize::from(left_char != *right_char);
+            current.push(
+                (previous[right_index + 1] + 1)
+                    .min(current[right_index] + 1)
+                    .min(previous[right_index] + cost),
+            );
+        }
+        previous = current;
+    }
+    previous[right_chars.len()]
+}
+
 fn normalize_line_head(text: &str) -> String {
     normalize_syntax(text.trim())
 }
@@ -1816,15 +1918,19 @@ fn span_for_substr(line: &LogicalLine, needle: &str) -> Span {
         return line.span;
     }
     let offset = line.text.find(needle).unwrap_or(0);
-    relative_span(line.span, offset, offset + needle.len())
+    relative_span(line.span, &line.text, offset, offset + needle.len())
 }
 
-fn relative_span(base: Span, start: usize, end: usize) -> Span {
+fn relative_span(base: Span, source: &str, start: usize, end: usize) -> Span {
+    let column_offset = source
+        .get(..start)
+        .map(|text| text.chars().count())
+        .unwrap_or(start);
     Span::new(
         base.start + start,
         base.start + end,
         base.line,
-        base.column + start,
+        base.column + column_offset,
     )
 }
 

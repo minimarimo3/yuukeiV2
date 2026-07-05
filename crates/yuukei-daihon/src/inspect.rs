@@ -139,10 +139,15 @@ impl InspectVisitor {
                 self.variables_read.insert(reference.clone());
             }
             Expr::FunctionCall(function) => self.visit_function(function),
-            Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => self.visit_expr(expr),
+            Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } | Expr::Not { expr, .. } => {
+                self.visit_expr(expr)
+            }
             Expr::Binary { left, right, .. }
             | Expr::Comparison { left, right, .. }
             | Expr::PostfixComparison {
+                left, value: right, ..
+            }
+            | Expr::StringMatch {
                 left, value: right, ..
             } => {
                 self.visit_expr(left);
