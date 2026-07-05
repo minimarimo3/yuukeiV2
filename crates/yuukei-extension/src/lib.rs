@@ -20,8 +20,8 @@ use yuukei_protocol::{
     ExtensionCapabilityDeclaration, ExtensionEventInvocation, ExtensionEventLogReadPermission,
     ExtensionEventResult, ExtensionEventSubscription, ExtensionHealth, ExtensionHookAction,
     ExtensionHookInvocation, ExtensionHookPoint, ExtensionHookResult, ExtensionHookSubscription,
-    ExtensionPermissions, ExtensionRuntimeKind, ExtensionSignalAlias, ExtensionSummary, JsonMap,
-    RuntimeCommand,
+    ExtensionPermissions, ExtensionRuntimeKind, ExtensionSettingsSchema, ExtensionSignalAlias,
+    ExtensionSummary, JsonMap, RuntimeCommand,
 };
 
 #[derive(Debug, Error)]
@@ -538,6 +538,8 @@ pub struct ProcessExtensionManifest {
     pub capabilities: Vec<ExtensionCapabilityDeclaration>,
     #[serde(default)]
     pub signal_aliases: Vec<ExtensionSignalAlias>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ExtensionSettingsSchema>,
     pub process: ProcessCommandSpec,
 }
 
@@ -558,6 +560,7 @@ pub struct ProcessHookExtension {
     manifest: ProcessExtensionManifest,
     install_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
+    settings_json: Option<String>,
     enabled: bool,
 }
 
@@ -567,6 +570,7 @@ impl ProcessHookExtension {
             manifest,
             install_dir: None,
             data_dir: None,
+            settings_json: None,
             enabled: true,
         }
     }
@@ -580,12 +584,18 @@ impl ProcessHookExtension {
             manifest,
             install_dir: Some(install_dir.into()),
             data_dir: None,
+            settings_json: None,
             enabled,
         }
     }
 
     pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    pub fn with_settings_json(mut self, settings_json: impl Into<String>) -> Self {
+        self.settings_json = Some(settings_json.into());
         self
     }
 }
@@ -615,6 +625,9 @@ impl YuukeiExtension for ProcessHookExtension {
         command.kill_on_drop(true);
         if let Some(data_dir) = &self.data_dir {
             command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        }
+        if let Some(settings_json) = &self.settings_json {
+            command.env("YUUKEI_EXTENSION_SETTINGS_JSON", settings_json);
         }
         if let Some(cwd) = self.resolved_cwd() {
             command.current_dir(cwd);
@@ -709,6 +722,9 @@ impl ProcessHookExtension {
         command.kill_on_drop(true);
         if let Some(data_dir) = &self.data_dir {
             command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        }
+        if let Some(settings_json) = &self.settings_json {
+            command.env("YUUKEI_EXTENSION_SETTINGS_JSON", settings_json);
         }
         if let Some(cwd) = self.resolved_cwd() {
             command.current_dir(cwd);
@@ -898,6 +914,7 @@ mod tests {
             emitted_events: Vec::new(),
             capabilities: Vec::new(),
             signal_aliases: Vec::new(),
+            settings: None,
             process: ProcessCommandSpec {
                 command: "missing-extension-command".to_string(),
                 args: Vec::new(),

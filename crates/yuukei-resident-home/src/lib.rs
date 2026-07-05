@@ -3530,6 +3530,7 @@ process.stdout.write(JSON.stringify({
             emitted_events: vec!["ext.process.*".to_string()],
             capabilities: Vec::new(),
             signal_aliases: Vec::new(),
+            settings: None,
             process: ProcessCommandSpec {
                 command: "node".to_string(),
                 args: vec!["emit.js".to_string()],

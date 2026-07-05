@@ -351,6 +351,158 @@ pub struct ExtensionSignalAlias {
     pub signal: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionSettingsSchema {
+    #[serde(default)]
+    pub fields: Vec<ExtensionSettingField>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionSettingVisibleWhen {
+    pub key: String,
+    #[ts(type = "unknown")]
+    pub equals: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ExtensionSettingSelectOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase", tag = "type")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum ExtensionSettingField {
+    String {
+        key: String,
+        label: String,
+        #[serde(default)]
+        #[ts(optional)]
+        description: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        default: Option<String>,
+        #[serde(default)]
+        #[serde(rename = "visibleWhen")]
+        #[ts(optional)]
+        #[ts(rename = "visibleWhen")]
+        visible_when: Option<ExtensionSettingVisibleWhen>,
+    },
+    Number {
+        key: String,
+        label: String,
+        #[serde(default)]
+        #[ts(optional)]
+        description: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        default: Option<f64>,
+        #[serde(default)]
+        #[serde(rename = "visibleWhen")]
+        #[ts(optional)]
+        #[ts(rename = "visibleWhen")]
+        visible_when: Option<ExtensionSettingVisibleWhen>,
+        #[serde(default)]
+        #[ts(optional)]
+        min: Option<f64>,
+        #[serde(default)]
+        #[ts(optional)]
+        max: Option<f64>,
+    },
+    Boolean {
+        key: String,
+        label: String,
+        #[serde(default)]
+        #[ts(optional)]
+        description: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        default: Option<bool>,
+        #[serde(default)]
+        #[serde(rename = "visibleWhen")]
+        #[ts(optional)]
+        #[ts(rename = "visibleWhen")]
+        visible_when: Option<ExtensionSettingVisibleWhen>,
+    },
+    Select {
+        key: String,
+        label: String,
+        #[serde(default)]
+        #[ts(optional)]
+        description: Option<String>,
+        options: Vec<ExtensionSettingSelectOption>,
+        #[serde(default)]
+        #[ts(optional)]
+        default: Option<String>,
+        #[serde(default)]
+        #[serde(rename = "visibleWhen")]
+        #[ts(optional)]
+        #[ts(rename = "visibleWhen")]
+        visible_when: Option<ExtensionSettingVisibleWhen>,
+    },
+    Secret {
+        key: String,
+        label: String,
+        #[serde(default)]
+        #[serde(skip_serializing)]
+        #[ts(skip)]
+        default: Option<Value>,
+        #[serde(default)]
+        #[ts(optional)]
+        description: Option<String>,
+        #[serde(default)]
+        #[serde(rename = "visibleWhen")]
+        #[ts(optional)]
+        #[ts(rename = "visibleWhen")]
+        visible_when: Option<ExtensionSettingVisibleWhen>,
+    },
+}
+
+impl ExtensionSettingField {
+    pub fn key(&self) -> &str {
+        match self {
+            ExtensionSettingField::String { key, .. }
+            | ExtensionSettingField::Number { key, .. }
+            | ExtensionSettingField::Boolean { key, .. }
+            | ExtensionSettingField::Select { key, .. }
+            | ExtensionSettingField::Secret { key, .. } => key,
+        }
+    }
+
+    pub fn visible_when(&self) -> Option<&ExtensionSettingVisibleWhen> {
+        match self {
+            ExtensionSettingField::String { visible_when, .. }
+            | ExtensionSettingField::Number { visible_when, .. }
+            | ExtensionSettingField::Boolean { visible_when, .. }
+            | ExtensionSettingField::Select { visible_when, .. }
+            | ExtensionSettingField::Secret { visible_when, .. } => visible_when.as_ref(),
+        }
+    }
+
+    pub fn default_value(&self) -> Option<Value> {
+        match self {
+            ExtensionSettingField::String { default, .. } => {
+                default.as_ref().map(|value| Value::String(value.clone()))
+            }
+            ExtensionSettingField::Number { default, .. } => default
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            ExtensionSettingField::Boolean { default, .. } => default.map(Value::Bool),
+            ExtensionSettingField::Select { default, .. } => {
+                default.as_ref().map(|value| Value::String(value.clone()))
+            }
+            ExtensionSettingField::Secret { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
