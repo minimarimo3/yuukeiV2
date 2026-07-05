@@ -3,7 +3,8 @@ use std::{env, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use yuukei_device_host::{
-    cli_surface_session, LocalYuukeiRuntime, RuntimePaths, WorldPackSelectionState, CLI_SURFACE_ID,
+    cli_surface_session, InstalledExtension, LocalYuukeiRuntime, RuntimePaths,
+    WorldPackSelectionState, CLI_SURFACE_ID,
 };
 use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
 
@@ -15,6 +16,7 @@ enum CliMode {
     ExportEvents(PathBuf),
     SelectWorldPack(PathBuf),
     ResetWorldPack,
+    InstallExtension(PathBuf),
     Help,
 }
 
@@ -23,6 +25,10 @@ async fn main() -> Result<()> {
     let mode = parse_args(env::args().skip(1))?;
     if mode == CliMode::Help {
         print_usage();
+        return Ok(());
+    }
+    if let CliMode::InstallExtension(path) = &mode {
+        install_extension(path)?;
         return Ok(());
     }
 
@@ -87,6 +93,7 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        CliMode::InstallExtension(_) => unreachable!("handled before runtime startup"),
         CliMode::Help => unreachable!("handled before runtime startup"),
     }
 }
@@ -118,9 +125,42 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliMode> {
             Ok(CliMode::SelectWorldPack(PathBuf::from(path)))
         }
         "--reset-world-pack" => Ok(CliMode::ResetWorldPack),
+        "--install-extension" => {
+            let Some(path) = args.get(1) else {
+                bail!("missing directory after --install-extension");
+            };
+            Ok(CliMode::InstallExtension(PathBuf::from(path)))
+        }
         "-h" | "--help" => Ok(CliMode::Help),
         other => bail!("unknown argument: {other}"),
     }
+}
+
+fn install_extension(path: &PathBuf) -> Result<()> {
+    let state = LocalYuukeiRuntime::install_extension_directory(path)
+        .with_context(|| format!("failed to install Extension from {}", path.display()))?;
+    let installed = most_recent_installed_extension(&state.installed)
+        .context("Extension was installed, but no installed entry was returned")?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "extensionId": installed.extension_id,
+            "displayName": installed.display_name,
+            "enabled": installed.enabled,
+            "installedPath": installed.installed_path.display().to_string()
+        }))?
+    );
+    Ok(())
+}
+
+fn most_recent_installed_extension(
+    installed: &[InstalledExtension],
+) -> Option<&InstalledExtension> {
+    installed.iter().max_by(|a, b| {
+        a.updated_at
+            .cmp(&b.updated_at)
+            .then_with(|| a.extension_id.cmp(&b.extension_id))
+    })
 }
 
 async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> Result<()> {
@@ -367,7 +407,8 @@ fn print_usage() {
   yuukei-cli-surface --snapshot
   yuukei-cli-surface --export-events <path>
   yuukei-cli-surface --world-pack <dir>
-  yuukei-cli-surface --reset-world-pack"
+  yuukei-cli-surface --reset-world-pack
+  yuukei-cli-surface --install-extension <dir>"
     );
 }
 
@@ -416,6 +457,18 @@ mod tests {
         assert_eq!(
             parse_args(vec!["--reset-world-pack".to_string()])?,
             CliMode::ResetWorldPack
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn install_extension_mode_captures_directory() -> Result<()> {
+        assert_eq!(
+            parse_args(vec![
+                "--install-extension".to_string(),
+                "packages/yuukei-intelligence".to_string()
+            ])?,
+            CliMode::InstallExtension(PathBuf::from("packages/yuukei-intelligence"))
         );
         Ok(())
     }

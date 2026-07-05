@@ -48,6 +48,7 @@ CLI Surfaceは手動確認だけでなく、機械的なテストに使える非
 - `cargo run -p yuukei-cli-surface -- --say "こんにちは"`: `conversation.text` を送り、発行された `RuntimeCommand` をJSONで出力する。
 - `cargo run -p yuukei-cli-surface -- --snapshot`: Surface attach後の `ResidentSnapshot` をJSONで出力する。
 - `cargo run -p yuukei-cli-surface -- --export-events target/events.jsonl`: canonical event logをJSONLで書き出す。
+- `cargo run -p yuukei-cli-surface -- --install-extension packages/yuukei-intelligence`: ローカルExtensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
 
 アプリ動作ログは `YUUKEI_DATA_DIR` が指定されていればその中、未指定ならOSの一時ディレクトリ配下の `yuukei-v2/app-activity.jsonl` に保存する。canonical event logは同じデータディレクトリの `events.sqlite3` に保存する。
 
@@ -108,7 +109,7 @@ Extensionは信頼したローカルコードとして実行する。YuukeiはCo
 
 ### Official Default Extension: yuukei-intelligence
 
-`packages/yuukei-intelligence` は `dialogue.generate` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案を生成する。設定画面からこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
+`packages/yuukei-intelligence` は `dialogue.generate` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案を生成する。`cargo run -p yuukei-cli-surface -- --install-extension packages/yuukei-intelligence` でこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
 
 LM StudioなどのOpenAI互換APIを使う場合は、ローカルサーバーを `http://127.0.0.1:1234/v1` で起動し、必要に応じて `OPENAI_COMPATIBLE_MODEL` またはmanifest内の `config.openaiCompatible.model` を設定する。ChatGPT互換の別endpointを使う場合も `openai-compatible` providerの `baseUrl`、`apiKey`、`model` を差し替えるだけでよい。
 
