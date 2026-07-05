@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "yuukei-intelligence",
+  "displayName": "Yuukei Intelligence",
+  "runtime": "process",
+  "permissions": {
+    "broadEventSubscription": false
+  },
+  "capabilities": [
+    {
+      "capability": "dialogue.generate",
+      "methods": ["generate"]
+    }
+  ],
+  "process": {
+    "command": "node",
+    "args": ["src/main.mjs"],
+    "timeoutMs": 15000
+  },
+  "config": {
+    "provider": "openai-compatible",
+    "timeoutMs": 10000,
+    "gemini": {
+      "model": "gemini-2.5-flash"
+    },
+    "openaiCompatible": {
+      "baseUrl": "http://192.168.0.126:1234/v1",
+      "model": "gemma-4-26b-a4b-it-ultra-uncensored-heretic"
+    }
+  },
+  "configSchema": {
+    "provider": ["gemini", "openai-compatible"],
+    "timeoutMs": "number",
+    "gemini": {
+      "apiKey": "string",
+      "model": "string"
+    },
+    "openaiCompatible": {
+      "baseUrl": "string",
+      "apiKey": "string",
+      "model": "string"
+    }
+  }
+}

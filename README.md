@@ -105,3 +105,19 @@ Extensionは信頼したローカルコードとして実行する。YuukeiはCo
 外部プロセスはデフォルトでインストール済みExtensionディレクトリをcwdとして起動する。stdinで `ExtensionHookInvocation` を受け取り、stdoutへ `ExtensionHookResult` をJSONで返す。たとえば `dialogue.say` の `payload.text` を変更した `replaceCommand` を返すと、Resident Homeが検証して `extension.hook.result` と変換後commandをevent logへ記録する。
 
 `onEventAppended` を購読するExtensionは、event logへ追記された `RuntimeEvent` のコピーを受け取り、必要なら `ext.<extensionId>.` で始まる新しい `RuntimeEvent` を提案できる。Resident Homeはsource、causality、hop countを付与し、自己購読とhop上限を検証してからcanonical event logへ追記する。`eventTypes: ["*"]` は広域購読権限として `permissions.broadEventSubscription: true` をmanifestで明示する。
+
+### Official Default Extension: yuukei-intelligence
+
+`packages/yuukei-intelligence` は `dialogue.generate` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案を生成する。設定画面からこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
+
+LM StudioなどのOpenAI互換APIを使う場合は、ローカルサーバーを `http://127.0.0.1:1234/v1` で起動し、必要に応じて `OPENAI_COMPATIBLE_MODEL` またはmanifest内の `config.openaiCompatible.model` を設定する。ChatGPT互換の別endpointを使う場合も `openai-compatible` providerの `baseUrl`、`apiKey`、`model` を差し替えるだけでよい。
+
+Geminiを使う場合は、`YUUKEI_INTELLIGENCE_PROVIDER=gemini` と `GEMINI_API_KEY` を設定する。モデルは既定で `gemini-2.5-flash`、必要なら `GEMINI_MODEL` またはmanifest内の `config.gemini.model` で変更できる。
+
+Extensionをインストールした同じ `YUUKEI_DATA_DIR` で、以下のようにCLIから `conversation.text` を送ると、World Packの `llmDelegation` とDaihon不一致条件を満たした場合だけ `dialogue.generate` が呼ばれる。
+
+```sh
+YUUKEI_DATA_DIR=/path/to/yuukei-data \
+OPENAI_COMPATIBLE_MODEL=local-model \
+cargo run -p yuukei-cli-surface -- --say "こんにちは"
+```

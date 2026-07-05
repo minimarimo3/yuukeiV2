@@ -82,6 +82,8 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/yuukei-intelligence: {}
+
 packages:
 
   '@adobe/css-tools@4.5.0':

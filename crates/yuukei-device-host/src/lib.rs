@@ -2358,6 +2358,43 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn yuukei_intelligence_process_generates_dialogue_through_device_host() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_llm_fallback_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let source = workspace
+            .path()
+            .join("downloads")
+            .join("yuukei-intelligence");
+        write_yuukei_intelligence_extension_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "何か言う？")
+            .await?;
+
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("generated dialogue command");
+        assert_eq!(dialogue.payload["text"], json!("スタブから返事します。"));
+        assert_eq!(dialogue.source, "capability.dialogue.generate");
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["extensionId"] == json!("yuukei-intelligence")
+                && record.payload["capability"] == json!("dialogue.generate")
+        }));
+        Ok(())
+    }
+
     #[test]
     fn process_extension_manifest_rejects_non_process_runtime() -> Result<()> {
         let workspace = tempdir()?;
@@ -2446,6 +2483,42 @@ mod tests {
                 },
                 "daihon": {
                     "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_llm_fallback_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root)?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Yuukei",
+                        "profile": {
+                            "role": "UI resident",
+                            "speechStyle": "short and present"
+                        }
+                    }
+                ],
+                "signals": {
+                    "allow": ["conversation.text", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": ["speech.synthesis", "dialogue.generate"]
+                },
+                "llmDelegation": {
+                    "signals": [{ "signal": "conversation.text" }]
                 },
                 "initialVariables": {},
                 "uiSpace": {}
@@ -2770,6 +2843,98 @@ process.stdout.write(JSON.stringify({{
 "#
             ),
         )?;
+        Ok(())
+    }
+
+    fn write_yuukei_intelligence_extension_source(root: &Path) -> Result<()> {
+        fs::create_dir_all(root)?;
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root");
+        copy_dir_for_test(
+            &repo_root
+                .join("packages")
+                .join("yuukei-intelligence")
+                .join("src"),
+            &root.join("src"),
+        )?;
+        fs::write(
+            root.join("fetch-stub.mjs"),
+            r#"
+globalThis.fetch = async (url, init) => {
+  const body = JSON.parse(init.body);
+  if (String(url) !== "http://stub.local/v1/chat/completions") {
+    throw new Error(`unexpected URL: ${url}`);
+  }
+  if (body.model !== "stub-model") {
+    throw new Error(`unexpected model: ${body.model}`);
+  }
+  if (!JSON.stringify(body).includes("何か言う？")) {
+    throw new Error("prompt did not include source text");
+  }
+  return new Response(JSON.stringify({
+    choices: [
+      {
+        message: {
+          content: "{\"speak\":true,\"text\":\"スタブから返事します。\",\"expression\":\"smile\"}"
+        }
+      }
+    ]
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+};
+"#,
+        )?;
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "yuukei-intelligence",
+                "displayName": "Yuukei Intelligence",
+                "runtime": "process",
+                "permissions": {
+                    "broadEventSubscription": false
+                },
+                "capabilities": [
+                    {
+                        "capability": "dialogue.generate",
+                        "methods": ["generate"]
+                    }
+                ],
+                "process": {
+                    "command": "node",
+                    "args": ["--import", "./fetch-stub.mjs", "src/main.mjs"],
+                    "timeoutMs": 5000
+                },
+                "config": {
+                    "provider": "openai-compatible",
+                    "timeoutMs": 1000,
+                    "openaiCompatible": {
+                        "baseUrl": "http://stub.local/v1",
+                        "model": "stub-model"
+                    }
+                }
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn copy_dir_for_test(source: &Path, destination: &Path) -> Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata = fs::metadata(&source_path)?;
+            if metadata.is_dir() {
+                copy_dir_for_test(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                fs::copy(&source_path, &destination_path)?;
+            }
+        }
         Ok(())
     }
 }
