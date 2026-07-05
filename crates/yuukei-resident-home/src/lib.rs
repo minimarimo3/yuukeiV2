@@ -1,16 +1,18 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::timeout};
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
-    DIALOGUE_GENERATE_CAPABILITY,
+    DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -20,13 +22,14 @@ use yuukei_extension::{
 use yuukei_protocol::{
     new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget,
     DialogueGenerateConstraints, DialogueGenerateEvent, DialogueGenerateInput,
-    DialogueGenerateOutput, DialogueGeneratePersona, DialogueGenerateRecentContext, EventLogRecord,
+    DialogueGenerateOutput, DialogueGeneratePersona, DialogueGenerateRecentContext,
+    DialogueInterpretInput, DialogueInterpretOutput, DialogueInterpretTextInput, EventLogRecord,
     ExtensionHookPoint, JsonMap, NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent,
     SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
-    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, WorldError, WorldPack,
-    YuukeiDaihonAdapter,
+    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonInterpretHandler,
+    DaihonInterpretRequest, WorldError, WorldPack, YuukeiDaihonAdapter,
 };
 
 #[derive(Debug, Error)]
@@ -52,6 +55,9 @@ pub enum ResidentHomeError {
 pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
+const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_QUEUED_CONVERSATION_EVENTS_DURING_INTERPRET: usize = 16;
+const UNKNOWN_INTERPRETATION: &str = "不明";
 
 impl ResidentHomeError {
     pub fn daihon_report(&self) -> Option<&DaihonDiagnosticReport> {
@@ -88,6 +94,7 @@ struct HomeState {
     recent_event_cursor: i64,
     daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
     llm_delegation: LlmDelegationCounters,
+    interpretation: InterpretationState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -100,6 +107,12 @@ struct LlmDelegationCounters {
 struct DailyBudgetCounter {
     date: NaiveDate,
     used: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct InterpretationState {
+    in_flight: bool,
+    queued_events: VecDeque<(RuntimeEvent, EventLogRecord)>,
 }
 
 impl ResidentHome {
@@ -200,6 +213,7 @@ impl ResidentHome {
                 recent_event_cursor: 0,
                 daihon_diagnostics: Vec::new(),
                 llm_delegation: LlmDelegationCounters::default(),
+                interpretation: InterpretationState::default(),
             })),
             command_tx,
         })
@@ -454,8 +468,118 @@ impl ResidentHome {
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
         self.set_cursor(appended_event.sequence)?;
-        self.process_appended_runtime_event(event, appended_event)
-            .await
+        if self.defer_event_while_interpreting(event.clone(), appended_event.clone())? {
+            return Ok(Vec::new());
+        }
+        let mut emitted = self
+            .process_appended_runtime_event(event, appended_event)
+            .await?;
+        emitted.extend(self.drain_interpretation_queue().await?);
+        Ok(emitted)
+    }
+
+    fn defer_event_while_interpreting(
+        &self,
+        event: RuntimeEvent,
+        record: EventLogRecord,
+    ) -> Result<bool> {
+        let dropped = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            if !state.interpretation.in_flight {
+                return Ok(false);
+            }
+            if !event.kind.starts_with("conversation.") {
+                return Ok(true);
+            }
+            let dropped = if state.interpretation.queued_events.len()
+                >= MAX_QUEUED_CONVERSATION_EVENTS_DURING_INTERPRET
+            {
+                state.interpretation.queued_events.pop_front()
+            } else {
+                None
+            };
+            state
+                .interpretation
+                .queued_events
+                .push_back((event, record));
+            dropped
+        };
+        if let Some((dropped_event, dropped_record)) = dropped {
+            self.record_interpretation_queue_drop(&dropped_event, &dropped_record)?;
+        }
+        Ok(true)
+    }
+
+    async fn drain_interpretation_queue(&self) -> Result<Vec<RuntimeCommand>> {
+        let mut emitted = Vec::new();
+        loop {
+            let next = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| ResidentHomeError::PoisonedLock)?;
+                if state.interpretation.in_flight {
+                    None
+                } else {
+                    state.interpretation.queued_events.pop_front()
+                }
+            };
+            let Some((event, record)) = next else {
+                break;
+            };
+            emitted.extend(self.process_appended_runtime_event(event, record).await?);
+        }
+        Ok(emitted)
+    }
+
+    fn record_interpretation_queue_drop(
+        &self,
+        dropped_event: &RuntimeEvent,
+        dropped_record: &EventLogRecord,
+    ) -> Result<()> {
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "daihon.interpretation.queue.dropped".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: dropped_event.resident_id.clone(),
+            source: "resident-home".to_string(),
+            device_id: dropped_event.device_id.clone(),
+            surface_id: dropped_event.surface_id.clone(),
+            actor_id: dropped_event.actor_id.clone(),
+            payload: JsonMap::from([
+                (
+                    "droppedEventId".to_string(),
+                    Value::String(dropped_event.id.clone()),
+                ),
+                (
+                    "droppedEventType".to_string(),
+                    Value::String(dropped_event.kind.clone()),
+                ),
+                (
+                    "droppedSequence".to_string(),
+                    Value::Number(dropped_record.sequence.into()),
+                ),
+                (
+                    "reason".to_string(),
+                    Value::String("interpretation queue overflow".to_string()),
+                ),
+            ]),
+            causality: Some(Causality {
+                source_event_id: Some(dropped_event.id.clone()),
+                source_command_id: None,
+                trace_id: dropped_event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(())
     }
 
     async fn process_appended_runtime_event(
@@ -618,7 +742,15 @@ impl ResidentHome {
             return Ok(Vec::new());
         }
 
-        let result = match self.daihon.dispatch(&event, &self.world_pack).await {
+        let mut interpret_handler = ResidentHomeInterpretHandler {
+            home: self.clone(),
+            source_event: event.clone(),
+        };
+        let result = match self
+            .daihon
+            .dispatch_with_interpret(&event, &self.world_pack, &mut interpret_handler)
+            .await
+        {
             Ok(result) => result,
             Err(error) => {
                 if let Some(report) = error.daihon_report() {
@@ -1117,6 +1249,90 @@ impl ResidentHome {
         Ok(())
     }
 
+    async fn interpret_dialogue(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonInterpretRequest,
+    ) -> Result<String> {
+        self.set_interpretation_in_flight(true)?;
+        let result = self
+            .invoke_dialogue_interpret(source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string());
+        self.set_interpretation_in_flight(false)?;
+        Ok(result)
+    }
+
+    async fn invoke_dialogue_interpret(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonInterpretRequest,
+    ) -> Result<String> {
+        let input = DialogueInterpretInput {
+            question: request.question,
+            choices: request.choices.clone(),
+            input: DialogueInterpretTextInput {
+                text: request.input_text,
+            },
+        };
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: DIALOGUE_INTERPRET_CAPABILITY.to_string(),
+            method: "interpret".to_string(),
+            resident_id: source_event.resident_id.clone(),
+            actor_id: None,
+            input: json_map_from_value(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, source_event, None)?;
+
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let result = timeout(
+            DIALOGUE_INTERPRET_TIMEOUT,
+            router.invoke(invocation.clone()),
+        )
+        .await;
+        let Ok(Ok(result)) = result else {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        };
+
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output.clone(),
+            result.metadata,
+            source_event,
+            None,
+            None,
+        )?;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<DialogueInterpretOutput>(output_value) else {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        };
+        let choice = output.choice.trim();
+        if choice == UNKNOWN_INTERPRETATION
+            || request.choices.iter().any(|candidate| candidate == choice)
+        {
+            Ok(choice.to_string())
+        } else {
+            Ok(UNKNOWN_INTERPRETATION.to_string())
+        }
+    }
+
+    fn set_interpretation_in_flight(&self, in_flight: bool) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        state.interpretation.in_flight = in_flight;
+        Ok(())
+    }
+
     async fn maybe_enrich_speech(
         &self,
         command: &mut RuntimeCommand,
@@ -1274,6 +1490,21 @@ impl ResidentHome {
         let appended_result = self.event_log.append(result_record)?;
         self.set_cursor(appended_result.sequence)?;
         Ok(())
+    }
+}
+
+struct ResidentHomeInterpretHandler {
+    home: ResidentHome,
+    source_event: RuntimeEvent,
+}
+
+#[async_trait]
+impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
+    async fn interpret(&mut self, request: DaihonInterpretRequest) -> String {
+        self.home
+            .interpret_dialogue(&self.source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
 }
 
@@ -1657,6 +1888,68 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DialogueInterpretProvider {
+        output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        delay: Option<std::time::Duration>,
+    }
+
+    impl DialogueInterpretProvider {
+        fn new(output: JsonMap) -> Self {
+            Self {
+                output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                delay: None,
+            }
+        }
+
+        fn delayed(mut self, delay: std::time::Duration) -> Self {
+            self.delay = Some(delay);
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for DialogueInterpretProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "fake-interpret".to_string(),
+                capabilities: vec![DIALOGUE_INTERPRET_CAPABILITY.to_string()],
+                methods: vec!["interpret".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("dialogue interpret calls lock")
+                .push(invocation.clone());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "fake-interpret".to_string(),
+                capability: DIALOGUE_INTERPRET_CAPABILITY.to_string(),
+                output: self.output.clone(),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
     fn llm_fallback_world() -> WorldPack {
         let mut world = world_pack();
         world.daihon.loaded_scripts[0].source = r#"
@@ -1674,6 +1967,31 @@ mod tests {
             }],
             daily_budget: None,
         };
+        world
+    }
+
+    fn interpret_world() -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+判定=＜解釈 (入力#ユーザー発言) 「返事は肯定ですか？」 「はい/いいえ」＞
+※（判定 = 「はい」）なら:
+「はい枝」
+※あるいは（判定 = 「不明」）なら:
+「不明枝」
+※それ以外:
+「いいえ枝」
+おわり
+### device
+合図: ＠device.wake
+話者: yuukei
+「起きました」
+"#
+        .to_string();
+        world.signals.allow.push("device.wake".to_string());
         world
     }
 
@@ -1738,6 +2056,170 @@ mod tests {
             snapshot.actors["yuukei"].bubble.as_deref(),
             Some("聞こえています。こんにちは")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_interpret_choice_drives_daihon_branch() -> Result<()> {
+        let provider =
+            DialogueInterpretProvider::new(JsonMap::from([("choice".to_string(), json!("はい"))]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            interpret_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("うん、いいよ"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "はい枝");
+        let calls = calls.lock().expect("interpret calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].capability, DIALOGUE_INTERPRET_CAPABILITY);
+        assert_eq!(calls[0].input["question"], "返事は肯定ですか？");
+        assert_eq!(calls[0].input["choices"], json!(["はい", "いいえ"]));
+        assert_eq!(calls[0].input["input"]["text"], "うん、いいよ");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_dialogue_interpret_provider_falls_to_unknown_branch() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            interpret_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("曖昧"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "不明枝");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dialogue_interpret_out_of_choice_output_is_normalized_to_unknown() -> Result<()> {
+        let provider =
+            DialogueInterpretProvider::new(JsonMap::from([("choice".to_string(), json!("maybe"))]));
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            interpret_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("曖昧"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "不明枝");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_events_are_queued_while_dialogue_interpret_is_in_flight() -> Result<()> {
+        let provider =
+            DialogueInterpretProvider::new(JsonMap::from([("choice".to_string(), json!("はい"))]))
+                .delayed(std::time::Duration::from_millis(80));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            interpret_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        first.id = "evt_first".to_string();
+        first.payload.insert("text".to_string(), json!("うん"));
+        let first_home = home.clone();
+        let first_task = tokio::spawn(async move { first_home.ingest_event(first).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        second.id = "evt_second".to_string();
+        second.payload.insert("text".to_string(), json!("うん2"));
+        let second_commands = home.ingest_event(second).await?;
+        assert!(second_commands.is_empty());
+
+        let first_commands = first_task.await.expect("first ingest task")?;
+        let dialogue_texts = first_commands
+            .iter()
+            .filter(|command| command.kind == "dialogue.say")
+            .map(|command| command.payload["text"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(dialogue_texts, vec![json!("はい枝"), json!("はい枝")]);
+        assert_eq!(calls.lock().expect("interpret calls lock").len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_conversation_events_are_record_only_while_dialogue_interpret_is_in_flight(
+    ) -> Result<()> {
+        let provider =
+            DialogueInterpretProvider::new(JsonMap::from([("choice".to_string(), json!("はい"))]))
+                .delayed(std::time::Duration::from_millis(80));
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            interpret_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut conversation =
+            RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        conversation
+            .payload
+            .insert("text".to_string(), json!("うん"));
+        let first_home = home.clone();
+        let first_task = tokio::spawn(async move { first_home.ingest_event(conversation).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let wake = RuntimeEvent::new("device.wake", "device", "resident-default");
+        let wake_commands = home.ingest_event(wake).await?;
+        assert!(wake_commands.is_empty());
+
+        let first_commands = first_task.await.expect("first ingest task")?;
+        assert!(first_commands.iter().all(|command| {
+            command.kind != "dialogue.say" || command.payload["text"] != json!("起きました")
+        }));
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| record.kind == "device.wake"));
+        assert!(!records.iter().any(|record| {
+            record.kind == "dialogue.say" && record.payload["text"] == json!("起きました")
+        }));
         Ok(())
     }
 

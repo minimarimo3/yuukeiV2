@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
-import { generateWithGemini } from "../src/providers/gemini.mjs";
-import { generateWithOpenAiCompatible } from "../src/providers/openai-compatible.mjs";
-import { capabilityResult, parseJsonOutput } from "../src/output.mjs";
+import { generateWithGemini, interpretWithGemini } from "../src/providers/gemini.mjs";
+import {
+  generateWithOpenAiCompatible,
+  interpretWithOpenAiCompatible
+} from "../src/providers/openai-compatible.mjs";
+import { capabilityResult, parseJsonInterpretOutput, parseJsonOutput } from "../src/output.mjs";
 
 const sampleInput = {
   event: {
@@ -23,6 +26,12 @@ const sampleInput = {
     }
   ],
   constraints: { maxLength: 20 }
+};
+
+const sampleInterpretInput = {
+  question: "返事は肯定ですか？",
+  choices: ["はい", "いいえ"],
+  input: { text: "あ〜うん。いやちょっと忙しくて..." }
 };
 
 test("openai-compatible formats request and maps JSON response", async () => {
@@ -202,6 +211,131 @@ test("openai-compatible returns speak false for API errors, timeout, and invalid
   });
 });
 
+test("openai-compatible interprets request and normalizes choices", async (t) => {
+  await t.test("formats request and maps choice", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+      return response(200, {
+        choices: [{ message: { content: JSON.stringify({ choice: "いいえ", confidence: 0.82 }) } }]
+      });
+    };
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 1000,
+        openaiCompatible: {
+          baseUrl: "http://127.0.0.1:1234/v1",
+          apiKey: "secret",
+          model: "local-test"
+        }
+      });
+
+      assert.deepEqual(result.output, { choice: "いいえ", confidence: 0.82 });
+      assert.equal(calls[0].url, "http://127.0.0.1:1234/v1/chat/completions");
+      assert.equal(calls[0].body.model, "local-test");
+      assert.equal(calls[0].body.temperature, 0.1);
+      assert.equal(calls[0].body.response_format, undefined);
+      assert.match(calls[0].body.messages[0].content, /dialogue\.interpret/);
+      assert.match(calls[0].body.messages[1].content, /返事は肯定ですか/);
+      assert.match(calls[0].body.messages[1].content, /あ〜うん/);
+      assert.match(calls[0].body.messages[1].content, /不明/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("json_schema format and retry preserve interpret output", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+      if (calls.length === 1) {
+        return response(400, { error: "schema rejected" });
+      }
+      return response(200, {
+        choices: [{ message: { content: "```json\n{\"choice\":\"はい\"}\n```" } }]
+      });
+    };
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 1000,
+        openaiCompatible: {
+          baseUrl: "http://127.0.0.1:1234/v1",
+          model: "local-test",
+          responseFormat: "json_schema"
+        }
+      });
+
+      assert.deepEqual(result.output, { choice: "はい" });
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0].body.response_format.type, "json_schema");
+      assert.equal(calls[0].body.response_format.json_schema.name, "dialogue_interpret_output");
+      assert.equal(calls[1].body.response_format, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("out-of-choice and invalid JSON become unknown", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      response(200, { choices: [{ message: { content: "{\"choice\":\"maybe\"}" } }] });
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 1000,
+        openaiCompatible: { baseUrl: "http://127.0.0.1:1234/v1", model: "local-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    globalThis.fetch = async () =>
+      response(200, { choices: [{ message: { content: "not json" } }] });
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 1000,
+        openaiCompatible: { baseUrl: "http://127.0.0.1:1234/v1", model: "local-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("API error becomes unknown", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => response(500, { error: "nope" });
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 1000,
+        openaiCompatible: { baseUrl: "http://127.0.0.1:1234/v1", model: "local-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("timeout becomes unknown", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      await once(init.signal, "abort");
+      throw new Error("aborted");
+    };
+    try {
+      const result = await interpretWithOpenAiCompatible(sampleInterpretInput, {
+        timeoutMs: 10,
+        openaiCompatible: { baseUrl: "http://127.0.0.1:1234/v1", model: "local-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 test("gemini formats request and maps JSON response", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -298,6 +432,76 @@ test("gemini returns speak false for missing key, API errors, timeout, and inval
   });
 });
 
+test("gemini interprets request and normalizes choices", async (t) => {
+  await t.test("formats request and maps choice", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+      return response(200, {
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ choice: "いいえ" }) }] } }]
+      });
+    };
+    try {
+      const result = await interpretWithGemini(sampleInterpretInput, {
+        timeoutMs: 1000,
+        gemini: { apiKey: "gem-key", model: "gemini-test" }
+      });
+
+      assert.deepEqual(result.output, { choice: "いいえ" });
+      assert.equal(
+        calls[0].url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent?key=gem-key"
+      );
+      assert.equal(calls[0].body.generationConfig.temperature, 0.1);
+      assert.equal(calls[0].body.generationConfig.responseMimeType, "application/json");
+      assert.equal(calls[0].body.generationConfig.responseSchema.properties.choice.type, "STRING");
+      assert.match(calls[0].body.contents[0].parts[0].text, /返事は肯定ですか/);
+      assert.match(calls[0].body.contents[0].parts[0].text, /不明/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  await t.test("out-of-choice, API error, and invalid JSON become unknown", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      response(200, { candidates: [{ content: { parts: [{ text: "{\"choice\":\"maybe\"}" }] } }] });
+    try {
+      const result = await interpretWithGemini(sampleInterpretInput, {
+        timeoutMs: 1000,
+        gemini: { apiKey: "gem-key", model: "gemini-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    globalThis.fetch = async () => response(500, { error: "nope" });
+    try {
+      const result = await interpretWithGemini(sampleInterpretInput, {
+        timeoutMs: 1000,
+        gemini: { apiKey: "gem-key", model: "gemini-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    globalThis.fetch = async () =>
+      response(200, { candidates: [{ content: { parts: [{ text: "not json" }] } }] });
+    try {
+      const result = await interpretWithGemini(sampleInterpretInput, {
+        timeoutMs: 1000,
+        gemini: { apiKey: "gem-key", model: "gemini-test" }
+      });
+      assert.deepEqual(result.output, { choice: "不明" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 test("capability result preserves invocation envelope", () => {
   const result = capabilityResult(
     { id: "cap_1", capability: "dialogue.generate", input: sampleInput },
@@ -311,6 +515,17 @@ test("capability result preserves invocation envelope", () => {
   assert.equal(result.output.text.length, sampleInput.constraints.maxLength);
 });
 
+test("capability result normalizes dialogue.interpret output", () => {
+  const result = capabilityResult(
+    { id: "cap_2", capability: "dialogue.interpret", input: sampleInterpretInput },
+    { choice: "maybe" },
+    { provider: "test" }
+  );
+  assert.equal(result.invocationId, "cap_2");
+  assert.equal(result.capability, "dialogue.interpret");
+  assert.deepEqual(result.output, { choice: "不明" });
+});
+
 test("parseJsonOutput accepts fenced and embedded JSON but rejects non-JSON text", () => {
   assert.deepEqual(parseJsonOutput("```json\n{\"speak\":true,\"text\":\"フェンス\"}\n```", 20), {
     speak: true,
@@ -321,6 +536,16 @@ test("parseJsonOutput accepts fenced and embedded JSON but rejects non-JSON text
     text: "抽出"
   });
   assert.deepEqual(parseJsonOutput("話すかもしれません", 20), { speak: false });
+});
+
+test("parseJsonInterpretOutput accepts fenced JSON but rejects non-choices", () => {
+  assert.deepEqual(parseJsonInterpretOutput("```json\n{\"choice\":\"はい\"}\n```", ["はい"]), {
+    choice: "はい"
+  });
+  assert.deepEqual(parseJsonInterpretOutput("前置き {\"choice\":\"maybe\"} 後置き", ["はい"]), {
+    choice: "不明"
+  });
+  assert.deepEqual(parseJsonInterpretOutput("分類できません", ["はい"]), { choice: "不明" });
 });
 
 function response(status, body) {

@@ -12,8 +12,9 @@ use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
     DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, InMemorySceneHistory,
-    InMemoryVariableStore, Interpreter, ParamSpec, ParamType, RunOptions, Script,
-    Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
+    InMemoryVariableStore, InterpretHandler, InterpretRequest, Interpreter, ParamSpec, ParamType,
+    RunOptions, Script, Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent,
+    ValidationMode, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -316,6 +317,28 @@ impl DaihonDispatchResult {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonInterpretRequest {
+    pub input_text: String,
+    pub question: String,
+    pub choices: Vec<String>,
+}
+
+#[async_trait]
+pub trait DaihonInterpretHandler: Send {
+    async fn interpret(&mut self, request: DaihonInterpretRequest) -> String;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopDaihonInterpretHandler;
+
+#[async_trait]
+impl DaihonInterpretHandler for NoopDaihonInterpretHandler {
+    async fn interpret(&mut self, _request: DaihonInterpretRequest) -> String {
+        yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+    }
+}
+
 #[async_trait]
 pub trait DaihonAdapter: Send + Sync {
     async fn load_world(&self, world: &WorldPack) -> Result<()>;
@@ -331,6 +354,17 @@ pub trait DaihonAdapter: Send + Sync {
         &self,
         event: &RuntimeEvent,
         world: &WorldPack,
+    ) -> Result<DaihonDispatchResult> {
+        let mut interpret_handler = NoopDaihonInterpretHandler;
+        self.dispatch_with_interpret(event, world, &mut interpret_handler)
+            .await
+    }
+
+    async fn dispatch_with_interpret(
+        &self,
+        event: &RuntimeEvent,
+        world: &WorldPack,
+        interpret_handler: &mut dyn DaihonInterpretHandler,
     ) -> Result<DaihonDispatchResult>;
 }
 
@@ -414,10 +448,11 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         Ok(())
     }
 
-    async fn dispatch(
+    async fn dispatch_with_interpret(
         &self,
         event: &RuntimeEvent,
         world: &WorldPack,
+        interpret_handler: &mut dyn DaihonInterpretHandler,
     ) -> Result<DaihonDispatchResult> {
         let mut state = self.state.lock().await;
         if state.scripts.is_empty() {
@@ -440,8 +475,10 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         {
             let mut action_handler =
                 YuukeiActionHandler::new(event, world.default_actor_id.clone());
+            let mut interpret_bridge = YuukeiInterpretBridge { interpret_handler };
             let mut interpreter = Interpreter {
                 action_handler: &mut action_handler,
+                interpret_handler: &mut interpret_bridge,
                 variable_store: &mut variables,
                 scene_history: &mut state.history,
                 function_registry: &function_registry,
@@ -451,6 +488,8 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     validation_mode: ValidationMode::Strict,
                     ..RunOptions::default()
                 },
+                interpretation_count: 0,
+                diagnostics: Vec::new(),
             };
             let run = interpreter
                 .run_script(&loaded.script)
@@ -497,6 +536,27 @@ struct YuukeiActionHandler {
     event: RuntimeEvent,
     default_actor_id: String,
     commands: Vec<RuntimeCommand>,
+}
+
+struct YuukeiInterpretBridge<'a> {
+    interpret_handler: &'a mut dyn DaihonInterpretHandler,
+}
+
+#[async_trait]
+impl InterpretHandler for YuukeiInterpretBridge<'_> {
+    async fn interpret(
+        &mut self,
+        request: InterpretRequest,
+    ) -> std::result::Result<String, DaihonRuntimeError> {
+        Ok(self
+            .interpret_handler
+            .interpret(DaihonInterpretRequest {
+                input_text: request.input_text,
+                question: request.question,
+                choices: request.choices,
+            })
+            .await)
+    }
 }
 
 impl YuukeiActionHandler {
@@ -839,6 +899,28 @@ fn yuukei_function_registry() -> FunctionRegistry {
             return_type: None,
         });
     }
+    registry.register(FunctionSpec {
+        name: INTERPRET_FUNCTION_NAME.to_string(),
+        positional: vec![
+            ParamSpec {
+                name: Some("入力".to_string()),
+                ty: ParamType::Any,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("質問".to_string()),
+                ty: ParamType::String,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("選択肢".to_string()),
+                ty: ParamType::String,
+                required: true,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: Some(yuukei_daihon::ValueType::String),
+    });
     registry
 }
 
@@ -1474,6 +1556,18 @@ mod tests {
         assert!(loaded.daihon.loaded_scripts[0]
             .source
             .contains("desktop reactions"));
+        Ok(())
+    }
+
+    #[test]
+    fn demo_interpret_pack_loads_from_repo() -> Result<()> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root");
+        let loaded = WorldPack::load_from_dir(repo_root.join("packs").join("demo-interpret"))?;
+        assert_eq!(loaded.id, "demo-interpret");
+        assert_eq!(loaded.daihon.loaded_scripts.len(), 1);
         Ok(())
     }
 

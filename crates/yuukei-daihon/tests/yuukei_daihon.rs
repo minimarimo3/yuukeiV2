@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset};
@@ -16,6 +16,42 @@ type MockFunctionCall = (
     Vec<DaihonValue>,
     BTreeMap<String, DaihonValue>,
 );
+
+#[derive(Default)]
+struct MockInterpretHandler {
+    responses: VecDeque<std::result::Result<String, DaihonRuntimeError>>,
+    requests: Vec<InterpretRequest>,
+}
+
+impl MockInterpretHandler {
+    fn with_responses(responses: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            responses: responses.into_iter().map(Ok).collect(),
+            requests: Vec::new(),
+        }
+    }
+
+    fn with_error() -> Self {
+        Self {
+            responses: VecDeque::from([Err(DaihonRuntimeError::new(
+                "E-TEST-INTERPRET",
+                "interpret failed",
+                Span::empty(),
+            ))]),
+            requests: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl InterpretHandler for MockInterpretHandler {
+    async fn interpret(&mut self, request: InterpretRequest) -> Result<String, DaihonRuntimeError> {
+        self.requests.push(request);
+        self.responses
+            .pop_front()
+            .unwrap_or_else(|| Ok(UNKNOWN_INTERPRETATION.to_string()))
+    }
+}
 
 #[async_trait]
 impl ActionHandler for MockActionHandler {
@@ -94,6 +130,28 @@ fn registry() -> FunctionRegistry {
         ],
         named: BTreeMap::new(),
         return_type: Some(ValueType::Number),
+    });
+    registry.register(FunctionSpec {
+        name: INTERPRET_FUNCTION_NAME.to_owned(),
+        positional: vec![
+            ParamSpec {
+                name: Some("入力".to_owned()),
+                ty: ParamType::Any,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("質問".to_owned()),
+                ty: ParamType::String,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("選択肢".to_owned()),
+                ty: ParamType::String,
+                required: true,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: Some(ValueType::String),
     });
     registry
 }
@@ -260,6 +318,26 @@ fn validator_checks_function_registry() {
     assert!(codes.contains(&"E-DHN-SEM-041"));
 }
 
+#[test]
+fn validator_requires_interpret_result_to_have_unknown_or_catch_all_branch() {
+    let script = parse_script(
+        r#"
+## 解釈
+### 通常
+判定=＜解釈 (入力#ユーザー発言) 「お出かけOK？」 「はい/いいえ」＞
+※（判定 = 「はい」）なら:
+「行こう」
+おわり
+"#,
+    )
+    .unwrap();
+
+    let diagnostics = validate_script(&script, Some(&registry()));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E-DHN-SEM-048"));
+}
+
 #[tokio::test]
 async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
     let script = parse_script(
@@ -279,10 +357,12 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
     )
     .unwrap();
     let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
     let mut variables = InMemoryVariableStore::new();
     let mut history = InMemorySceneHistory::new();
     let mut interpreter = Interpreter {
         action_handler: &mut action,
+        interpret_handler: &mut interpret,
         variable_store: &mut variables,
         scene_history: &mut history,
         function_registry: &registry(),
@@ -291,6 +371,8 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
             now: Some(fixed_now("2026-06-27T10:00:00+09:00")),
             ..RunOptions::default()
         },
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
     };
 
     let result = interpreter.run_script(&script).await.unwrap();
@@ -298,6 +380,139 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
     assert_eq!(action.calls[0].0.as_deref(), Some("ミカ"));
     assert_eq!(action.calls[0].2[0], DaihonValue::String("笑顔".to_owned()));
     assert_eq!(action.dialogues[0].0.as_deref(), Some("ミカ"));
+}
+
+#[tokio::test]
+async fn runtime_interpret_choice_branches_scene() {
+    let script = parse_script(
+        r#"
+## 解釈
+### 通常
+判定=＜解釈 (入力#ユーザー発言) 「お出かけOK？」 「はい/いいえ」＞
+※（判定 = 「はい」）なら:
+「出発」
+※あるいは（判定 = 「不明」）なら:
+「わからない」
+※それ以外:
+「また今度」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_responses(["はい".to_string()]);
+    let mut variables = InMemoryVariableStore::new().with_input(
+        "ユーザー発言",
+        DaihonValue::String("うん、行ける".to_string()),
+    );
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(interpret.requests.len(), 1);
+    assert_eq!(interpret.requests[0].input_text, "うん、行ける");
+    assert_eq!(interpret.requests[0].question, "お出かけOK？");
+    assert_eq!(interpret.requests[0].choices, vec!["はい", "いいえ"]);
+    assert_eq!(action.dialogues[0].1, "出発");
+}
+
+#[tokio::test]
+async fn runtime_interpret_error_becomes_unknown() {
+    let script = parse_script(
+        r#"
+## 解釈
+### 通常
+判定=＜解釈 (入力#ユーザー発言) 「お出かけOK？」 「はい/いいえ」＞
+※（判定 = 「はい」）なら:
+「出発」
+※あるいは（判定 = 「不明」）なら:
+「わからない」
+※それ以外:
+「また今度」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_error();
+    let mut variables = InMemoryVariableStore::new()
+        .with_input("ユーザー発言", DaihonValue::String("無理かも".to_string()));
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(action.dialogues[0].1, "わからない");
+}
+
+#[tokio::test]
+async fn runtime_interpret_limit_returns_unknown_and_warns() {
+    let script = parse_script(
+        r#"
+## 解釈
+### 通常
+一回目=＜解釈 (入力#ユーザー発言) 「一回目？」 「はい/いいえ」＞
+※（一回目 = 「不明」）なら:
+「一回目不明」
+※それ以外:
+「一回目既知」
+おわり
+二回目=＜解釈 (入力#ユーザー発言) 「二回目？」 「はい/いいえ」＞
+※（二回目 = 「不明」）なら:
+「二回目不明」
+※それ以外:
+「二回目既知」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret =
+        MockInterpretHandler::with_responses(["はい".to_string(), "はい".to_string()]);
+    let mut variables = InMemoryVariableStore::new()
+        .with_input("ユーザー発言", DaihonValue::String("うん".to_string()));
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            max_interpretations_per_dispatch: 1,
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(interpret.requests.len(), 1);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-050"));
+    assert_eq!(action.dialogues[0].1, "一回目既知");
+    assert_eq!(action.dialogues[1].1, "二回目不明");
 }
 
 #[tokio::test]
@@ -315,14 +530,18 @@ async fn runtime_uses_defaults_preconditions_and_assignments() {
     )
     .unwrap();
     let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
     let mut variables = InMemoryVariableStore::new();
     let mut history = InMemorySceneHistory::new();
     let mut interpreter = Interpreter {
         action_handler: &mut action,
+        interpret_handler: &mut interpret,
         variable_store: &mut variables,
         scene_history: &mut history,
         function_registry: &FunctionRegistry::permissive(),
         options: RunOptions::default(),
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
     };
 
     interpreter.run_script(&script).await.unwrap();
@@ -354,11 +573,13 @@ async fn runtime_falls_back_to_default_and_respects_cooldown() {
     )
     .unwrap();
     let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
     let mut variables = InMemoryVariableStore::new();
     let mut history = InMemorySceneHistory::new();
     history.record_executed("既定", "既定A", fixed_now("2026-06-27T10:00:00+09:00"));
     let mut interpreter = Interpreter {
         action_handler: &mut action,
+        interpret_handler: &mut interpret,
         variable_store: &mut variables,
         scene_history: &mut history,
         function_registry: &FunctionRegistry::permissive(),
@@ -367,6 +588,8 @@ async fn runtime_falls_back_to_default_and_respects_cooldown() {
             random_seed: Some(1),
             ..RunOptions::default()
         },
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
     };
 
     let result = interpreter.run_script(&script).await.unwrap();
@@ -388,10 +611,12 @@ async fn runtime_supports_overnight_time_range() {
     )
     .unwrap();
     let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
     let mut variables = InMemoryVariableStore::new();
     let mut history = InMemorySceneHistory::new();
     let mut interpreter = Interpreter {
         action_handler: &mut action,
+        interpret_handler: &mut interpret,
         variable_store: &mut variables,
         scene_history: &mut history,
         function_registry: &FunctionRegistry::permissive(),
@@ -399,6 +624,8 @@ async fn runtime_supports_overnight_time_range() {
             now: Some(fixed_now("2026-06-27T01:30:00+09:00")),
             ..RunOptions::default()
         },
+        interpretation_count: 0,
+        diagnostics: Vec::new(),
     };
 
     let result = interpreter.run_script(&script).await.unwrap();

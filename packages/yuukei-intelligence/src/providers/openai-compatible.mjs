@@ -1,5 +1,15 @@
-import { buildDialoguePrompt, buildSystemPrompt } from "../prompt.mjs";
-import { parseJsonOutput, silentOutput } from "../output.mjs";
+import {
+  buildDialoguePrompt,
+  buildInterpretPrompt,
+  buildInterpretSystemPrompt,
+  buildSystemPrompt
+} from "../prompt.mjs";
+import {
+  parseJsonInterpretOutput,
+  parseJsonOutput,
+  silentOutput,
+  unknownChoiceOutput
+} from "../output.mjs";
 
 export async function generateWithOpenAiCompatible(input, config) {
   const providerConfig = config.openaiCompatible ?? {};
@@ -53,6 +63,58 @@ export async function generateWithOpenAiCompatible(input, config) {
   }
 }
 
+export async function interpretWithOpenAiCompatible(input, config) {
+  const providerConfig = config.openaiCompatible ?? {};
+  const baseUrl = trimTrailingSlash(providerConfig.baseUrl ?? "http://127.0.0.1:1234/v1");
+  const model = providerConfig.model ?? "local-model";
+  if (!baseUrl || !model) {
+    console.error("yuukei-intelligence: openai-compatible baseUrl or model is not configured");
+    return { output: unknownChoiceOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+
+  const headers = { "content-type": "application/json" };
+  if (providerConfig.apiKey) {
+    headers.authorization = `Bearer ${providerConfig.apiKey}`;
+  }
+  const body = {
+    model,
+    messages: [
+      { role: "system", content: buildInterpretSystemPrompt() },
+      { role: "user", content: buildInterpretPrompt(input) }
+    ],
+    temperature: 0.1
+  };
+  if (providerConfig.responseFormat === "json_schema") {
+    body.response_format = dialogueInterpretResponseFormat();
+  }
+
+  try {
+    const url = `${baseUrl}/chat/completions`;
+    let response = await postChatCompletion(url, headers, body, config.timeoutMs);
+    if (!response.ok && body.response_format) {
+      console.error(
+        `yuukei-intelligence: openai-compatible API error ${response.status}; retrying without response_format`
+      );
+      const fallbackBody = { ...body };
+      delete fallbackBody.response_format;
+      response = await postChatCompletion(url, headers, fallbackBody, config.timeoutMs);
+    }
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: openai-compatible API error ${response.status}`);
+      return { output: unknownChoiceOutput(), metadata: { provider: "openai-compatible", model } };
+    }
+    const json = await response.json();
+    const text = json?.choices?.[0]?.message?.content;
+    return {
+      output: parseJsonInterpretOutput(text, input?.choices),
+      metadata: { provider: "openai-compatible", model }
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
+    return { output: unknownChoiceOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+}
+
 function dialogueGenerateResponseFormat() {
   return {
     type: "json_schema",
@@ -69,6 +131,25 @@ function dialogueGenerateResponseFormat() {
           motion: { type: "string" }
         },
         required: ["speak"]
+      }
+    }
+  };
+}
+
+function dialogueInterpretResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "dialogue_interpret_output",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          choice: { type: "string" },
+          confidence: { type: "number" }
+        },
+        required: ["choice"]
       }
     }
   };

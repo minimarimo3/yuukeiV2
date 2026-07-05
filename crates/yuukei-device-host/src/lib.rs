@@ -2395,6 +2395,51 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn yuukei_intelligence_process_interprets_dialogue_through_device_host() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_interpret_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let source = workspace
+            .path()
+            .join("downloads")
+            .join("yuukei-intelligence");
+        write_yuukei_intelligence_extension_source(&source)?;
+        let env = test_env(workspace.path(), data.path());
+
+        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let startup = runtime.emit_app_startup().await?;
+        assert!(startup.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"] == json!("今日はお出かけの日だよね！")
+        }));
+
+        let commands = runtime
+            .send_conversation_text(CLI_SURFACE_ID, "あ〜うん。いやちょっと忙しくて...")
+            .await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("interpreted dialogue command");
+        assert_eq!(
+            dialogue.payload["text"],
+            json!("そっか、残念だけど無理しないでね。")
+        );
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["extensionId"] == json!("yuukei-intelligence")
+                && record.payload["capability"] == json!("dialogue.interpret")
+                && record.payload["output"]["choice"] == json!("いいえ")
+        }));
+        Ok(())
+    }
+
     #[test]
     fn process_extension_manifest_rejects_non_process_runtime() -> Result<()> {
         let workspace = tempdir()?;
@@ -2521,6 +2566,71 @@ mod tests {
                     "signals": [{ "signal": "conversation.text" }]
                 },
                 "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_interpret_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("interpret_demo.daihon"),
+            r#"
+## interpret demo
+### startup
+合図: ＠アプリ_起動
+話者: yuukei
+話題=「お出かけ確認」
+「今日はお出かけの日だよね！」
+### reply
+合図: ＠会話_入力
+条件:（話題 = 「お出かけ確認」）
+話者: yuukei
+判定=＜解釈 (入力#ユーザー発言) 「ユーザーは今日のお出かけに行けますか？」 「はい/いいえ」＞
+※（判定 = 「はい」）なら:
+「やった、楽しみにしてるね。」
+話題=「」
+※あるいは（判定 = 「いいえ」）なら:
+「そっか、残念だけど無理しないでね。」
+話題=「」
+※あるいは（判定 = 「不明」）なら:
+「ん、今日は行けそう？それとも難しそう？」
+※それ以外:
+「ん、今日は行けそう？それとも難しそう？」
+おわり
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "default-yuukei",
+                "displayName": "Default Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Yuukei",
+                        "profile": {
+                            "role": "UI resident",
+                            "speechStyle": "short and present"
+                        }
+                    }
+                ],
+                "signals": {
+                    "allow": ["conversation.text", "app.startup"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": ["dialogue.interpret", "dialogue.generate"]
+                },
+                "daihon": {
+                    "scripts": ["scripts/interpret_demo.daihon"]
+                },
+                "initialVariables": {
+                    "話題": ""
+                },
                 "uiSpace": {}
             }))?,
         )?;
@@ -2870,7 +2980,22 @@ globalThis.fetch = async (url, init) => {
   if (body.model !== "stub-model") {
     throw new Error(`unexpected model: ${body.model}`);
   }
-  if (!JSON.stringify(body).includes("何か言う？")) {
+  const bodyText = JSON.stringify(body);
+  if (bodyText.includes("ユーザーは今日のお出かけに行けますか？")) {
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "{\"choice\":\"いいえ\",\"confidence\":0.9}"
+          }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  }
+  if (!bodyText.includes("何か言う？")) {
     throw new Error("prompt did not include source text");
   }
   return new Response(JSON.stringify({
@@ -2902,6 +3027,10 @@ globalThis.fetch = async (url, init) => {
                     {
                         "capability": "dialogue.generate",
                         "methods": ["generate"]
+                    },
+                    {
+                        "capability": "dialogue.interpret",
+                        "methods": ["interpret"]
                     }
                 ],
                 "process": {

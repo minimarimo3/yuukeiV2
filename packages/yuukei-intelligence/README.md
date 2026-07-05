@@ -1,6 +1,6 @@
 # Yuukei Intelligence
 
-Official process Extension that provides `dialogue.generate`.
+Official process Extension that provides `dialogue.generate` and `dialogue.interpret`.
 
 It reads one `CapabilityInvocation` JSON object from stdin and writes one `CapabilityResult` JSON object to stdout. It does not store conversation history or read Yuukei event log files directly.
 
@@ -19,4 +19,4 @@ Provider config is read from `manifest.json` and can be overridden with environm
 - `OPENAI_COMPATIBLE_API_KEY`
 - `OPENAI_COMPATIBLE_MODEL`
 
-Failures return `{ "speak": false }` as a normal capability result.
+Failures return `{ "speak": false }` for `dialogue.generate` and `{ "choice": "不明" }` for `dialogue.interpret` as normal capability results.

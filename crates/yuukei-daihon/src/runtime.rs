@@ -17,6 +17,10 @@ use crate::validate::{has_errors, validate_script};
 use crate::value::{DaihonNumber, DaihonValue};
 use crate::variable::{builtin_time_value, VariableRef, VariableStore};
 
+pub const INTERPRET_FUNCTION_NAME: &str = "解釈";
+pub const UNKNOWN_INTERPRETATION: &str = "不明";
+pub const DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH: usize = 4;
+
 #[async_trait]
 pub trait ActionHandler {
     async fn show_dialogue(
@@ -32,6 +36,31 @@ pub trait ActionHandler {
         positional: Vec<DaihonValue>,
         named: BTreeMap<String, DaihonValue>,
     ) -> Result<DaihonValue, DaihonRuntimeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpretRequest {
+    pub input_text: String,
+    pub question: String,
+    pub choices: Vec<String>,
+}
+
+#[async_trait]
+pub trait InterpretHandler {
+    async fn interpret(&mut self, request: InterpretRequest) -> Result<String, DaihonRuntimeError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopInterpretHandler;
+
+#[async_trait]
+impl InterpretHandler for NoopInterpretHandler {
+    async fn interpret(
+        &mut self,
+        _request: InterpretRequest,
+    ) -> Result<String, DaihonRuntimeError> {
+        Ok(UNKNOWN_INTERPRETATION.to_string())
+    }
 }
 
 pub trait SceneHistoryStore {
@@ -75,6 +104,7 @@ pub struct RunOptions {
     pub default_speaker: Option<String>,
     pub random_seed: Option<u64>,
     pub max_jumps: usize,
+    pub max_interpretations_per_dispatch: usize,
     pub now: Option<DateTime<FixedOffset>>,
     pub validation_mode: ValidationMode,
 }
@@ -86,6 +116,7 @@ impl Default for RunOptions {
             default_speaker: None,
             random_seed: None,
             max_jumps: 1000,
+            max_interpretations_per_dispatch: DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH,
             now: None,
             validation_mode: ValidationMode::Strict,
         }
@@ -118,17 +149,21 @@ pub enum ControlFlow {
     JumpScene(String),
 }
 
-pub struct Interpreter<'a, A, V, H> {
+pub struct Interpreter<'a, A, V, H, I> {
     pub action_handler: &'a mut A,
+    pub interpret_handler: &'a mut I,
     pub variable_store: &'a mut V,
     pub scene_history: &'a mut H,
     pub function_registry: &'a FunctionRegistry,
     pub options: RunOptions,
+    pub interpretation_count: usize,
+    pub diagnostics: Vec<DaihonDiagnostic>,
 }
 
-impl<'a, A, V, H> Interpreter<'a, A, V, H>
+impl<'a, A, V, H, I> Interpreter<'a, A, V, H, I>
 where
     A: ActionHandler + Send,
+    I: InterpretHandler + Send,
     V: VariableStore + Send,
     H: SceneHistoryStore + Send,
 {
@@ -136,6 +171,8 @@ where
         &mut self,
         script: &Script,
     ) -> Result<DaihonRunResult, DaihonRuntimeError> {
+        self.interpretation_count = 0;
+        self.diagnostics.clear();
         let mut registry = self.function_registry.clone();
         registry.set_mode(self.options.validation_mode);
         let diagnostics = validate_script(script, Some(&registry));
@@ -164,7 +201,7 @@ where
                             event_name: script.event.name.value.clone(),
                             selected_scene: None,
                             completed: true,
-                            diagnostics: Vec::new(),
+                            diagnostics: std::mem::take(&mut self.diagnostics),
                         });
                     }
                     ControlFlow::Continue | ControlFlow::EndScene | ControlFlow::JumpScene(_) => {}
@@ -178,7 +215,7 @@ where
                 event_name: script.event.name.value.clone(),
                 selected_scene: None,
                 completed: true,
-                diagnostics: Vec::new(),
+                diagnostics: std::mem::take(&mut self.diagnostics),
             });
         };
 
@@ -240,7 +277,7 @@ where
             event_name: script.event.name.value.clone(),
             selected_scene: Some(executed),
             completed: true,
-            diagnostics: Vec::new(),
+            diagnostics: std::mem::take(&mut self.diagnostics),
         })
     }
 
@@ -636,9 +673,56 @@ where
         for (name, arg) in &function.named {
             named.insert(name.clone(), self.eval_func_arg(arg, speaker).await?);
         }
+        if function.name.value == INTERPRET_FUNCTION_NAME {
+            return self.call_interpret(function, positional, named).await;
+        }
         self.action_handler
             .call_function(speaker, &function.name.value, positional, named)
             .await
+    }
+
+    async fn call_interpret(
+        &mut self,
+        function: &FunctionCall,
+        positional: Vec<DaihonValue>,
+        named: BTreeMap<String, DaihonValue>,
+    ) -> Result<DaihonValue, DaihonRuntimeError> {
+        if !named.is_empty() || positional.len() < 3 {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        if self.interpretation_count >= self.options.max_interpretations_per_dispatch {
+            self.diagnostics.push(
+                DaihonDiagnostic::warning(
+                    "W-DHN-RUN-050",
+                    "解釈関数の呼び出し回数が上限を超えました。",
+                    function.span,
+                )
+                .with_help("同じdispatch内の以後の解釈結果は「不明」になります。"),
+            );
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        self.interpretation_count += 1;
+
+        let input_text = positional[0].to_display_string();
+        let question = positional[1].to_display_string();
+        let choices = parse_interpret_choices(&positional[2].to_display_string());
+        if choices.is_empty() {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        let request = InterpretRequest {
+            input_text,
+            question,
+            choices: choices.clone(),
+        };
+        let Ok(choice) = self.interpret_handler.interpret(request).await else {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        };
+        let choice = choice.trim();
+        if choice == UNKNOWN_INTERPRETATION || choices.iter().any(|candidate| candidate == choice) {
+            Ok(DaihonValue::String(choice.to_string()))
+        } else {
+            Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
+        }
     }
 
     #[async_recursion]
@@ -659,6 +743,14 @@ where
             local.with_timezone(local.offset())
         })
     }
+}
+
+pub fn parse_interpret_choices(text: &str) -> Vec<String> {
+    text.split(['|', '/', '／', '、', ',', '，'])
+        .map(str::trim)
+        .filter(|choice| !choice.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn compare_values(left: &DaihonValue, op: ComparisonOp, right: &DaihonValue) -> bool {

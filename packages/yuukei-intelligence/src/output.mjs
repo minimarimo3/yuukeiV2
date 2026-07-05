@@ -2,6 +2,10 @@ export function silentOutput() {
   return { speak: false };
 }
 
+export function unknownChoiceOutput() {
+  return { choice: "不明" };
+}
+
 export function normalizeOutput(value, maxLength = 120) {
   if (!value || typeof value !== "object" || typeof value.speak !== "boolean") {
     return silentOutput();
@@ -26,6 +30,22 @@ export function normalizeOutput(value, maxLength = 120) {
   return output;
 }
 
+export function normalizeInterpretOutput(value, choices = []) {
+  if (!value || typeof value !== "object" || typeof value.choice !== "string") {
+    return unknownChoiceOutput();
+  }
+  const choice = value.choice.trim();
+  const allowed = new Set([...choices, "不明"]);
+  if (!allowed.has(choice)) {
+    return unknownChoiceOutput();
+  }
+  const output = { choice };
+  if (typeof value.confidence === "number" && Number.isFinite(value.confidence)) {
+    output.confidence = value.confidence;
+  }
+  return output;
+}
+
 export function parseJsonOutput(text, maxLength) {
   if (typeof text !== "string" || !text.trim()) {
     return silentOutput();
@@ -44,6 +64,26 @@ export function parseJsonOutput(text, maxLength) {
     `yuukei-intelligence: failed to parse provider JSON: ${lastError?.message ?? "no JSON object found"}`
   );
   return silentOutput();
+}
+
+export function parseJsonInterpretOutput(text, choices) {
+  if (typeof text !== "string" || !text.trim()) {
+    return unknownChoiceOutput();
+  }
+  const candidates = [stripCodeFence(text), extractJsonObject(text)].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+  let lastError;
+  for (const candidate of uniqueCandidates) {
+    try {
+      return normalizeInterpretOutput(JSON.parse(candidate), choices);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.error(
+    `yuukei-intelligence: failed to parse provider JSON: ${lastError?.message ?? "no JSON object found"}`
+  );
+  return unknownChoiceOutput();
 }
 
 function stripCodeFence(text) {
@@ -88,11 +128,15 @@ function extractJsonObject(text) {
 }
 
 export function capabilityResult(invocation, output, metadata = {}) {
+  const capability = invocation?.capability ?? "dialogue.generate";
   return {
     invocationId: invocation?.id ?? "",
     extensionId: "yuukei-intelligence",
-    capability: invocation?.capability ?? "dialogue.generate",
-    output: normalizeOutput(output, invocation?.input?.constraints?.maxLength),
+    capability,
+    output:
+      capability === "dialogue.interpret"
+        ? normalizeInterpretOutput(output, invocation?.input?.choices)
+        : normalizeOutput(output, invocation?.input?.constraints?.maxLength),
     metadata
   };
 }

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-interpret",
+  "displayName": "Demo Interpret",
+  "defaultActorId": "yuukei",
+  "actors": [
+    {
+      "id": "yuukei",
+      "displayName": "Yuukei",
+      "speakerAliases": ["ゆ"],
+      "profile": {
+        "role": "UI resident",
+        "speechStyle": "short and present"
+      }
+    }
+  ],
+  "signals": {
+    "allow": ["conversation.text", "app.startup"]
+  },
+  "capabilities": {
+    "required": [],
+    "optional": ["dialogue.interpret", "dialogue.generate"]
+  },
+  "daihon": {
+    "scripts": ["scripts/interpret_demo.daihon"]
+  },
+  "initialVariables": {
+    "話題": ""
+  },
+  "uiSpace": {
+    "desktop": "shared-room"
+  }
+}

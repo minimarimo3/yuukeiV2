@@ -12,6 +12,12 @@
       "methods": [
         "generate"
       ]
+    },
+    {
+      "capability": "dialogue.interpret",
+      "methods": [
+        "interpret"
+      ]
     }
   ],
   "process": {

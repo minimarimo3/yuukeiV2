@@ -591,6 +591,31 @@ pub struct DialogueGenerateOutput {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueInterpretInput {
+    pub question: String,
+    pub choices: Vec<String>,
+    pub input: DialogueInterpretTextInput,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueInterpretTextInput {
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueInterpretOutput {
+    pub choice: String,
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct ActorSnapshot {
     pub display_name: String,
     pub expression: String,

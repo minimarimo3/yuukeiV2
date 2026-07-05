@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ast::*;
 use crate::diagnostic::{DaihonDiagnostic, Severity};
 use crate::function::FunctionRegistry;
+use crate::runtime::{INTERPRET_FUNCTION_NAME, UNKNOWN_INTERPRETATION};
+use crate::value::DaihonValue;
 use crate::variable::VariableRef;
 
 pub fn validate_script(
@@ -144,6 +146,38 @@ impl<'a> Validator<'a> {
         }
         for statement in &scene.statements {
             self.validate_stmt(statement);
+        }
+        self.validate_interpret_consumption(scene);
+    }
+
+    fn validate_interpret_consumption(&mut self, scene: &Scene) {
+        for (index, statement) in scene.statements.iter().enumerate() {
+            let Stmt::Assignment(assignment) = statement else {
+                continue;
+            };
+            if !expr_is_interpret_call(&assignment.value) {
+                continue;
+            }
+            let consumed = scene
+                .statements
+                .iter()
+                .skip(index + 1)
+                .any(|statement| stmt_has_interpret_consumer(statement, &assignment.target));
+            if !consumed {
+                self.diagnostics.push(
+                    DaihonDiagnostic::error(
+                        "E-DHN-SEM-048",
+                        format!(
+                            "解釈結果「{}」は同じシーン内の条件分岐で不明時の枝まで処理してください。",
+                            assignment.target.display_name()
+                        ),
+                        assignment.span,
+                    )
+                    .with_help(
+                        "後続に ※（判定 = 不明）なら: または ※それ以外: を持つ条件分岐を追加してください。",
+                    ),
+                );
+            }
         }
     }
 
@@ -328,6 +362,115 @@ impl<'a> Validator<'a> {
             };
             self.diagnostics
                 .push(DaihonDiagnostic::error(code, message, reference.span()).with_help(help));
+        }
+    }
+}
+
+fn expr_is_interpret_call(expr: &Expr) -> bool {
+    matches!(expr, Expr::FunctionCall(function) if function.name.value == INTERPRET_FUNCTION_NAME)
+}
+
+fn stmt_has_interpret_consumer(stmt: &Stmt, variable: &VariableRef) -> bool {
+    match stmt {
+        Stmt::Conditional(block) => {
+            conditional_consumes_interpret(block, variable)
+                || block.branches.iter().any(|branch| {
+                    branch
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_has_interpret_consumer(stmt, variable))
+                })
+                || block.else_branch.as_ref().is_some_and(|statements| {
+                    statements
+                        .iter()
+                        .any(|stmt| stmt_has_interpret_consumer(stmt, variable))
+                })
+        }
+        Stmt::Display(_) | Stmt::SpeakerDisplay { .. } | Stmt::Assignment(_) | Stmt::Jump(_) => {
+            false
+        }
+    }
+}
+
+fn conditional_consumes_interpret(block: &ConditionalBlock, variable: &VariableRef) -> bool {
+    let uses_variable = block
+        .branches
+        .iter()
+        .any(|branch| expr_uses_variable(&branch.condition, variable));
+    if !uses_variable {
+        return false;
+    }
+    block.else_branch.is_some()
+        || block.branches.iter().any(|branch| {
+            expr_uses_variable(&branch.condition, variable)
+                && expr_contains_string(&branch.condition, UNKNOWN_INTERPRETATION)
+        })
+}
+
+fn expr_uses_variable(expr: &Expr, variable: &VariableRef) -> bool {
+    match expr {
+        Expr::Variable(reference) => reference.display_name() == variable.display_name(),
+        Expr::Value(_) | Expr::TimeRange { .. } => false,
+        Expr::FunctionCall(function) => {
+            function.positional.iter().any(|arg| match arg {
+                FuncArg::Expr(expr) => expr_uses_variable(expr, variable),
+                FuncArg::BareWord(_) => false,
+            }) || function.named.values().any(|arg| match arg {
+                FuncArg::Expr(expr) => expr_uses_variable(expr, variable),
+                FuncArg::BareWord(_) => false,
+            })
+        }
+        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => expr_uses_variable(expr, variable),
+        Expr::Binary { left, right, .. } | Expr::Comparison { left, right, .. } => {
+            expr_uses_variable(left, variable) || expr_uses_variable(right, variable)
+        }
+        Expr::PostfixComparison { left, value, .. } => {
+            expr_uses_variable(left, variable) || expr_uses_variable(value, variable)
+        }
+        Expr::Range {
+            left, start, end, ..
+        } => {
+            expr_uses_variable(left, variable)
+                || start
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_variable(expr, variable))
+                || end
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_variable(expr, variable))
+        }
+    }
+}
+
+fn expr_contains_string(expr: &Expr, needle: &str) -> bool {
+    match expr {
+        Expr::Value(value) => matches!(&value.value, DaihonValue::String(text) if text == needle),
+        Expr::Variable(_) | Expr::TimeRange { .. } => false,
+        Expr::FunctionCall(function) => {
+            function.positional.iter().any(|arg| match arg {
+                FuncArg::Expr(expr) => expr_contains_string(expr, needle),
+                FuncArg::BareWord(word) => word.value == needle,
+            }) || function.named.values().any(|arg| match arg {
+                FuncArg::Expr(expr) => expr_contains_string(expr, needle),
+                FuncArg::BareWord(word) => word.value == needle,
+            })
+        }
+        Expr::Unary { expr, .. } | Expr::Truthy { expr, .. } => expr_contains_string(expr, needle),
+        Expr::Binary { left, right, .. } | Expr::Comparison { left, right, .. } => {
+            expr_contains_string(left, needle) || expr_contains_string(right, needle)
+        }
+        Expr::PostfixComparison { left, value, .. } => {
+            expr_contains_string(left, needle) || expr_contains_string(value, needle)
+        }
+        Expr::Range {
+            left, start, end, ..
+        } => {
+            expr_contains_string(left, needle)
+                || start
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_string(expr, needle))
+                || end
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_string(expr, needle))
         }
     }
 }

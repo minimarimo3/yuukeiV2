@@ -13,6 +13,7 @@ use yuukei_protocol::{
 
 pub const SPEECH_SYNTHESIS_CAPABILITY: &str = "speech.synthesis";
 pub const DIALOGUE_GENERATE_CAPABILITY: &str = "dialogue.generate";
+pub const DIALOGUE_INTERPRET_CAPABILITY: &str = "dialogue.interpret";
 pub const DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID: &str = "yuukei.default-tts";
 
 #[derive(Debug, Error)]

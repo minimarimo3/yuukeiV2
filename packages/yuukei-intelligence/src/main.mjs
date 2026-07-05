@@ -1,17 +1,26 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.mjs";
-import { capabilityResult, silentOutput } from "./output.mjs";
-import { generateWithProvider } from "./providers/index.mjs";
+import { capabilityResult, silentOutput, unknownChoiceOutput } from "./output.mjs";
+import { generateWithProvider, interpretWithProvider } from "./providers/index.mjs";
 
 async function main() {
   const invocation = readInvocation();
-  if (invocation.capability !== "dialogue.generate") {
-    writeResult(capabilityResult(invocation, silentOutput(), { reason: "unsupported-capability" }));
-    return;
-  }
   const config = await loadConfig();
-  const { output, metadata } = await generateWithProvider(invocation.input, config);
+  const { output, metadata } = await dispatchInvocation(invocation, config);
   writeResult(capabilityResult(invocation, output, metadata));
+}
+
+async function dispatchInvocation(invocation, config) {
+  if (invocation.capability === "dialogue.generate") {
+    return generateWithProvider(invocation.input, config);
+  }
+  if (invocation.capability === "dialogue.interpret") {
+    return interpretWithProvider(invocation.input, config);
+  }
+  return {
+    output: invocation.capability === "dialogue.interpret" ? unknownChoiceOutput() : silentOutput(),
+    metadata: { reason: "unsupported-capability" }
+  };
 }
 
 function readInvocation() {
