@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { ExtensionSettingField } from "@yuukei/protocol";
 import {
   tauriYuukeiClient,
+  type AppSettingsState,
   type CapabilityUsageState,
   type ExtensionCapabilityUsage,
   type DaihonDiagnosticEntry,
@@ -17,7 +18,7 @@ type AppProps = {
   client?: YuukeiClient;
 };
 
-type SettingsCategoryId = "worldPack" | "extensions";
+type SettingsCategoryId = "app" | "worldPack" | "extensions";
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -34,11 +35,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     useState<SettingsCategoryId>("worldPack");
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
   const [extensionState, setExtensionState] =
     useState<ExtensionSettingsState | null>(null);
   const [capabilityUsage, setCapabilityUsage] =
     useState<CapabilityUsageState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
+  const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
   const [switchingPack, setSwitchingPack] = useState(false);
   const [changingExtensions, setChangingExtensions] = useState(false);
@@ -73,14 +76,21 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
 
     async function refreshSettings() {
-      const [nextWorldPackStatus, nextExtensionState, nextCapabilityUsage] =
+      const [
+        nextWorldPackStatus,
+        nextAppSettings,
+        nextExtensionState,
+        nextCapabilityUsage
+      ] =
         await Promise.all([
           client.getWorldPackStatus(),
+          client.getAppSettings(),
           client.getExtensionSettings(),
           client.getCapabilityUsage()
         ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
+        setAppSettings(nextAppSettings);
         setExtensionState(nextExtensionState);
         setCapabilityUsage(nextCapabilityUsage);
       }
@@ -224,7 +234,54 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function saveTalkInterval(minutes: number) {
+    const normalized = Math.max(0, Math.trunc(minutes || 0));
+    setAppSettingsError(null);
+    try {
+      setAppSettings(await client.setAppTalkIntervalMinutes(normalized));
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   const settingsCategories: SettingsCategory[] = [
+    {
+      id: "app",
+      label: "App",
+      ariaLabel: "App settings",
+      panelId: "settings-app-panel",
+      content: (
+        <>
+          <div className="settings-copy">
+            <h2>App</h2>
+            <p className="settings-title">おしゃべりの間隔</p>
+            <p className="settings-note">
+              分単位で設定します。0分で話さなくなります。
+            </p>
+            <label className="app-setting-field" htmlFor="talk-interval-minutes">
+              <span>
+                <strong>おしゃべりの間隔</strong>
+                <small>{appSettings?.settingsPath ?? ""}</small>
+              </span>
+              <input
+                id="talk-interval-minutes"
+                type="number"
+                min={0}
+                step={1}
+                value={appSettings?.talkIntervalMinutes ?? 5}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  void saveTalkInterval(Number.isFinite(value) ? value : 0);
+                }}
+              />
+            </label>
+            {appSettingsError ? (
+              <p className="settings-error">{appSettingsError}</p>
+            ) : null}
+          </div>
+        </>
+      )
+    },
     {
       id: "worldPack",
       label: "World Pack",

@@ -43,6 +43,9 @@ pub const DEFAULT_DEVICE_ID: &str = "device-local";
 pub const TAURI_SURFACE_ID: &str = "surface-tauri";
 pub const CLI_SURFACE_ID: &str = "surface-cli";
 pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
+const PRESENCE_LOOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum DeviceHostError {
@@ -60,6 +63,8 @@ pub enum DeviceHostError {
     AppLog(#[from] AppLogError),
     #[error("extension settings error: {0}")]
     ExtensionSettings(String),
+    #[error("app settings error: {0}")]
+    AppSettings(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
     #[error("Daihon diagnostic state lock is poisoned")]
@@ -78,6 +83,7 @@ impl DeviceHostError {
             | Self::EventLog(_)
             | Self::AppLog(_)
             | Self::ExtensionSettings(_)
+            | Self::AppSettings(_)
             | Self::PresenceState
             | Self::DaihonDiagnosticState => None,
         }
@@ -143,6 +149,87 @@ impl LocalRuntimeConfig {
 
     fn extension_settings_registry(&self) -> Result<ExtensionSettingsRegistry> {
         ExtensionSettingsRegistry::open(&self.data_dir, &self.extension_root)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsState {
+    pub talk_interval_minutes: u64,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct AppSettingsRegistry {
+    settings_path: PathBuf,
+    stored: StoredAppSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAppSettings {
+    schema_version: u32,
+    talk_interval_minutes: u64,
+}
+
+impl Default for StoredAppSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            talk_interval_minutes: DEFAULT_TALK_INTERVAL_MINUTES,
+        }
+    }
+}
+
+impl AppSettingsRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("app.json");
+        let exists = settings_path.exists();
+        let stored = if exists {
+            let raw = fs::read_to_string(&settings_path)?;
+            let stored: StoredAppSettings = serde_json::from_str(&raw)?;
+            if stored.schema_version != 1 {
+                return Err(DeviceHostError::AppSettings(format!(
+                    "unsupported app settings schemaVersion: {}",
+                    stored.schema_version
+                )));
+            }
+            stored
+        } else {
+            StoredAppSettings::default()
+        };
+        let registry = Self {
+            settings_path,
+            stored,
+        };
+        if !exists {
+            registry.save()?;
+        }
+        Ok(registry)
+    }
+
+    fn state(&self) -> AppSettingsState {
+        AppSettingsState {
+            talk_interval_minutes: self.stored.talk_interval_minutes,
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn set_talk_interval_minutes(&mut self, minutes: u64) -> Result<AppSettingsState> {
+        self.stored.talk_interval_minutes = minutes;
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
     }
 }
 
@@ -292,6 +379,11 @@ pub struct LocalYuukeiRuntime {
 struct PresenceState {
     startup_emitted: bool,
     last_time_period: Option<String>,
+    next_life_tick_at: Option<DateTime<Utc>>,
+    last_user_activity_at: Option<DateTime<Utc>>,
+    talk_interval_minutes: Option<u64>,
+    next_talk_impulse_at: Option<DateTime<Utc>>,
+    talk_rng_state: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,6 +500,111 @@ fn add_usage(totals: &mut TokenUsageTotals, input_tokens: u64, output_tokens: u6
     totals.output_tokens += output_tokens;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TalkImpulseDecision {
+    Disabled,
+    Waiting,
+    SkippedRecentActivity,
+    Emit,
+}
+
+fn evaluate_life_tick(now: DateTime<Utc>, state: &mut PresenceState) -> bool {
+    let next = state
+        .next_life_tick_at
+        .get_or_insert_with(|| add_duration(now, PRESENCE_LIFE_TICK_INTERVAL).unwrap_or(now));
+    if now < *next {
+        return false;
+    }
+    state.next_life_tick_at = Some(add_duration(now, PRESENCE_LIFE_TICK_INTERVAL).unwrap_or(now));
+    true
+}
+
+fn evaluate_talk_impulse(
+    now: DateTime<Utc>,
+    interval_minutes: u64,
+    random_permyriad: u16,
+    state: &mut PresenceState,
+) -> TalkImpulseDecision {
+    if interval_minutes == 0 {
+        state.talk_interval_minutes = Some(0);
+        state.next_talk_impulse_at = None;
+        return TalkImpulseDecision::Disabled;
+    }
+
+    if state.talk_interval_minutes != Some(interval_minutes) || state.next_talk_impulse_at.is_none()
+    {
+        state.talk_interval_minutes = Some(interval_minutes);
+        state.next_talk_impulse_at = Some(schedule_next_talk_impulse(
+            now,
+            interval_minutes,
+            random_permyriad,
+        ));
+        return TalkImpulseDecision::Waiting;
+    }
+
+    let Some(next_due) = state.next_talk_impulse_at else {
+        return TalkImpulseDecision::Waiting;
+    };
+    if now < next_due {
+        return TalkImpulseDecision::Waiting;
+    }
+
+    state.next_talk_impulse_at = Some(schedule_next_talk_impulse(
+        now,
+        interval_minutes,
+        random_permyriad,
+    ));
+    if recently_active(now, state.last_user_activity_at) {
+        return TalkImpulseDecision::SkippedRecentActivity;
+    }
+    TalkImpulseDecision::Emit
+}
+
+fn recently_active(now: DateTime<Utc>, last_user_activity_at: Option<DateTime<Utc>>) -> bool {
+    let Some(last) = last_user_activity_at else {
+        return false;
+    };
+    match now.signed_duration_since(last).to_std() {
+        Ok(elapsed) => elapsed < TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION,
+        Err(_) => true,
+    }
+}
+
+fn schedule_next_talk_impulse(
+    now: DateTime<Utc>,
+    interval_minutes: u64,
+    random_permyriad: u16,
+) -> DateTime<Utc> {
+    let duration = jittered_talk_interval(interval_minutes, random_permyriad);
+    add_duration(now, duration).unwrap_or(now)
+}
+
+fn jittered_talk_interval(interval_minutes: u64, random_permyriad: u16) -> Duration {
+    let base_secs = interval_minutes.saturating_mul(60).max(1);
+    let min_secs = base_secs.saturating_mul(80) / 100;
+    let spread_secs = (base_secs.saturating_mul(40) / 100).max(1);
+    let random = u64::from(random_permyriad.min(9_999));
+    Duration::from_secs(min_secs + (spread_secs * random / 9_999))
+}
+
+fn add_duration(at: DateTime<Utc>, duration: Duration) -> Option<DateTime<Utc>> {
+    chrono::Duration::from_std(duration)
+        .ok()
+        .and_then(|duration| at.checked_add_signed(duration))
+}
+
+fn next_rng_permyriad(state: &mut u64, now: DateTime<Utc>) -> u16 {
+    if *state == 0 {
+        *state = (now.timestamp_nanos_opt().unwrap_or_default() as u64) ^ 0xA5A5_5A5A_D3C1_B2E0;
+    }
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    (x % 10_000) as u16
+}
+
 impl LocalYuukeiRuntime {
     pub async fn open_default() -> Result<Self> {
         Self::open_selected().await
@@ -477,6 +674,27 @@ impl LocalYuukeiRuntime {
     ) -> Result<ExtensionSettingsState> {
         let config = extension_config_for_env(env);
         Ok(config.extension_settings_registry()?.state())
+    }
+
+    pub fn app_settings_state() -> Result<AppSettingsState> {
+        Self::app_settings_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn app_settings_state_in(env: LocalRuntimeEnvironment) -> Result<AppSettingsState> {
+        let registry = AppSettingsRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
+    pub fn set_app_talk_interval_minutes(minutes: u64) -> Result<AppSettingsState> {
+        Self::set_app_talk_interval_minutes_in(LocalRuntimeEnvironment::default_local(), minutes)
+    }
+
+    pub fn set_app_talk_interval_minutes_in(
+        env: LocalRuntimeEnvironment,
+        minutes: u64,
+    ) -> Result<AppSettingsState> {
+        let mut registry = AppSettingsRegistry::open(&env.data_dir)?;
+        registry.set_talk_interval_minutes(minutes)
     }
 
     pub fn install_extension_directory(path: impl AsRef<Path>) -> Result<ExtensionSettingsState> {
@@ -822,6 +1040,10 @@ impl LocalYuukeiRuntime {
             .map(|registry| registry.state())
     }
 
+    pub fn app_settings(&self) -> Result<AppSettingsState> {
+        AppSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
+    }
+
     pub fn record_session_daihon_diagnostics_from_error(
         &self,
         error: &DeviceHostError,
@@ -899,6 +1121,7 @@ impl LocalYuukeiRuntime {
         surface_id: &str,
         text: &str,
     ) -> Result<Vec<RuntimeCommand>> {
+        self.mark_user_activity(Utc::now())?;
         let event = build_conversation_text_event(
             self.resident_id(),
             self.device_id(),
@@ -958,6 +1181,7 @@ impl LocalYuukeiRuntime {
         surface_id: &str,
         gesture: AvatarGesturePoke,
     ) -> Result<Vec<RuntimeCommand>> {
+        self.mark_user_activity(Utc::now())?;
         let event = build_avatar_gesture_poke_event(
             self.resident_id(),
             self.device_id(),
@@ -1073,6 +1297,11 @@ impl LocalYuukeiRuntime {
         Ok(commands)
     }
 
+    pub async fn emit_talk_impulse(&self) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event("presence.talk_impulse", current_presence_payload())
+            .await
+    }
+
     pub async fn emit_device_sleep_before(&self) -> Result<Vec<RuntimeCommand>> {
         self.emit_runtime_event("device.sleep.before", current_presence_payload())
             .await
@@ -1087,8 +1316,8 @@ impl LocalYuukeiRuntime {
         let runtime = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(PRESENCE_LIFE_TICK_INTERVAL).await;
-                if let Err(error) = runtime.emit_presence_tick().await {
+                tokio::time::sleep(PRESENCE_LOOP_POLL_INTERVAL).await;
+                if let Err(error) = runtime.run_presence_loop_step(Utc::now()).await {
                     let _ = runtime.logger.record(
                         "presence.loop.error",
                         "device-host",
@@ -1097,6 +1326,55 @@ impl LocalYuukeiRuntime {
                 }
             }
         })
+    }
+
+    async fn run_presence_loop_step(&self, now: DateTime<Utc>) -> Result<()> {
+        let settings = self.app_settings()?;
+        let random = {
+            let mut state = self
+                .presence_state
+                .lock()
+                .map_err(|_| DeviceHostError::PresenceState)?;
+            next_rng_permyriad(&mut state.talk_rng_state, now)
+        };
+
+        let (emit_life_tick, talk_decision) = {
+            let mut state = self
+                .presence_state
+                .lock()
+                .map_err(|_| DeviceHostError::PresenceState)?;
+            let emit_life_tick = evaluate_life_tick(now, &mut state);
+            let talk_decision =
+                evaluate_talk_impulse(now, settings.talk_interval_minutes, random, &mut state);
+            (emit_life_tick, talk_decision)
+        };
+
+        if emit_life_tick {
+            self.emit_presence_tick().await?;
+        }
+        match talk_decision {
+            TalkImpulseDecision::Emit => {
+                self.emit_talk_impulse().await?;
+            }
+            TalkImpulseDecision::SkippedRecentActivity => {
+                self.logger.record(
+                    "presence.talk_impulse.skipped",
+                    "device-host",
+                    JsonMap::from([("reason".to_string(), json!("recent-user-activity"))]),
+                )?;
+            }
+            TalkImpulseDecision::Disabled | TalkImpulseDecision::Waiting => {}
+        }
+        Ok(())
+    }
+
+    fn mark_user_activity(&self, at: DateTime<Utc>) -> Result<()> {
+        let mut state = self
+            .presence_state
+            .lock()
+            .map_err(|_| DeviceHostError::PresenceState)?;
+        state.last_user_activity_at = Some(at);
+        Ok(())
     }
 
     async fn emit_runtime_event(
@@ -1893,6 +2171,91 @@ mod tests {
     }
 
     #[test]
+    fn app_settings_persist_talk_interval_minutes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = AppSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state().talk_interval_minutes,
+            DEFAULT_TALK_INTERVAL_MINUTES
+        );
+        registry.set_talk_interval_minutes(12)?;
+
+        let reopened = AppSettingsRegistry::open(data.path())?;
+        assert_eq!(reopened.state().talk_interval_minutes, 12);
+        assert!(data.path().join("settings").join("app.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn talk_impulse_jitter_stays_within_twenty_percent() {
+        assert_eq!(jittered_talk_interval(5, 0), Duration::from_secs(240));
+        assert_eq!(jittered_talk_interval(5, 9_999), Duration::from_secs(360));
+    }
+
+    #[test]
+    fn talk_impulse_evaluation_disables_schedules_skips_and_emits() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = PresenceState::default();
+
+        assert_eq!(
+            evaluate_talk_impulse(now, 0, 0, &mut state),
+            TalkImpulseDecision::Disabled
+        );
+        assert_eq!(state.next_talk_impulse_at, None);
+
+        assert_eq!(
+            evaluate_talk_impulse(now, 5, 0, &mut state),
+            TalkImpulseDecision::Waiting
+        );
+        assert_eq!(
+            state.next_talk_impulse_at,
+            Some(now + chrono::Duration::seconds(240))
+        );
+
+        state.last_user_activity_at = Some(now + chrono::Duration::seconds(200));
+        assert_eq!(
+            evaluate_talk_impulse(now + chrono::Duration::seconds(240), 5, 9_999, &mut state),
+            TalkImpulseDecision::SkippedRecentActivity
+        );
+        assert_eq!(
+            state.next_talk_impulse_at,
+            Some(now + chrono::Duration::seconds(240 + 360))
+        );
+
+        state.last_user_activity_at = Some(now);
+        assert_eq!(
+            evaluate_talk_impulse(now + chrono::Duration::seconds(600), 5, 0, &mut state),
+            TalkImpulseDecision::Emit
+        );
+    }
+
+    #[test]
+    fn talk_impulse_setting_change_reschedules_without_emitting() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = PresenceState {
+            talk_interval_minutes: Some(5),
+            next_talk_impulse_at: Some(now - chrono::Duration::seconds(1)),
+            ..PresenceState::default()
+        };
+
+        assert_eq!(
+            evaluate_talk_impulse(now, 10, 0, &mut state),
+            TalkImpulseDecision::Waiting
+        );
+        assert_eq!(state.talk_interval_minutes, Some(10));
+        assert_eq!(
+            state.next_talk_impulse_at,
+            Some(now + chrono::Duration::seconds(480))
+        );
+    }
+
+    #[test]
     fn conversation_event_uses_surface_boundary_fields() {
         let event =
             build_conversation_text_event("resident-test", "device-test", "surface-test", "hello");
@@ -2060,6 +2423,34 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(records.iter().any(|kind| kind == "presence.life_tick"));
         assert!(!records.iter().any(|kind| kind == "presence.idle_tick"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn talk_impulse_uses_standard_alias_and_dispatches_dialogue() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_talk_impulse_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+        let commands = runtime.emit_talk_impulse().await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "少ししゃべります。");
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert!(records.iter().any(|kind| kind == "presence.talk_impulse"));
         Ok(())
     }
 
@@ -3516,6 +3907,49 @@ mod tests {
                 },
                 "daihon": {
                     "scripts": ["scripts/desktop_reactions.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_talk_impulse_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("random_talk.daihon"),
+            r#"
+## 雑談
+### talk
+合図: ＠雑談_定期
+話者: yuukei
+「少ししゃべります。」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "talk-yuukei",
+                "displayName": "Talk Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Talk Yuukei",
+                        "profile": {}
+                    }
+                ],
+                "signals": {
+                    "allow": ["presence.talk_impulse", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": []
+                },
+                "daihon": {
+                    "scripts": ["scripts/random_talk.daihon"]
                 },
                 "initialVariables": {},
                 "uiSpace": {}

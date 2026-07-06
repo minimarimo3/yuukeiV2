@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import { App } from "./App";
 import type {
+  AppSettingsState,
   CapabilityUsageState,
   DaihonDiagnosticEntry,
   ExtensionSettingsState,
@@ -113,6 +114,13 @@ function extensionSettings(
   };
 }
 
+function appSettings(talkIntervalMinutes = 5): AppSettingsState {
+  return {
+    talkIntervalMinutes,
+    settingsPath: "/tmp/yuukei-v2/settings/app.json"
+  };
+}
+
 function capabilityUsage(
   extensions: CapabilityUsageState["extensions"] = []
 ): CapabilityUsageState {
@@ -154,6 +162,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     attachSurface: vi.fn(async () => snapshot("ただいま")),
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
+    getAppSettings: vi.fn(async () => appSettings()),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
     getCapabilityUsage: vi.fn(async () => capabilityUsage()),
     getActorSurfaceAssets: vi.fn(async () => ({
@@ -185,6 +194,9 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),
+    setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
+      appSettings(minutes)
+    ),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
@@ -233,6 +245,23 @@ describe("App", () => {
       "false"
     );
     expect(screen.queryByText("Default Yuukei")).not.toBeInTheDocument();
+  });
+
+  it("saves app talk interval settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const input = await screen.findByRole("spinbutton", {
+      name: /おしゃべりの間隔/
+    });
+    await userEvent.clear(input);
+    await userEvent.type(input, "12");
+
+    await waitFor(() => {
+      expect(client.setAppTalkIntervalMinutes).toHaveBeenLastCalledWith(12);
+    });
   });
 
   it("ignores a canceled World Pack directory dialog", async () => {

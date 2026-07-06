@@ -762,7 +762,8 @@ input {
   gap: 8px;
 }
 
-.extension-setting-field {
+.extension-setting-field,
+.app-setting-field {
   display: grid;
   grid-template-columns: minmax(132px, 0.42fr) minmax(0, 1fr);
   gap: 8px;
@@ -775,17 +776,21 @@ input {
 }
 
 .extension-setting-field strong,
-.extension-setting-field small {
+.extension-setting-field small,
+.app-setting-field strong,
+.app-setting-field small {
   display: block;
   min-width: 0;
 }
 
-.extension-setting-field strong {
+.extension-setting-field strong,
+.app-setting-field strong {
   color: var(--text);
   font-size: 12px;
 }
 
-.extension-setting-field small {
+.extension-setting-field small,
+.app-setting-field small {
   margin-top: 3px;
   color: var(--muted);
   font-size: 11px;
@@ -793,6 +798,7 @@ input {
 }
 
 .extension-setting-field input:not([type="checkbox"]),
+.app-setting-field input,
 .extension-setting-field select {
   min-width: 0;
   width: 100%;
@@ -811,6 +817,7 @@ input {
 }
 
 .extension-setting-field input:focus,
+.app-setting-field input:focus,
 .extension-setting-field select:focus {
   border-color: rgba(37, 99, 235, 0.55);
   outline: 3px solid rgba(37, 99, 235, 0.12);

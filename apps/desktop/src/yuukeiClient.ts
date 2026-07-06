@@ -103,6 +103,11 @@ export type ExtensionSettingsChangeResult = {
   snapshot: ResidentSnapshot;
 };
 
+export type AppSettingsState = {
+  talkIntervalMinutes: number;
+  settingsPath: string;
+};
+
 export type TokenUsageTotals = {
   requests: number;
   inputTokens: number;
@@ -222,6 +227,7 @@ export type YuukeiClient = {
   getSnapshot(): Promise<ResidentSnapshot>;
   getWorldPackStatus(): Promise<WorldPackSelectionState>;
   getExtensionSettings(): Promise<ExtensionSettingsState>;
+  getAppSettings(): Promise<AppSettingsState>;
   getCapabilityUsage(): Promise<CapabilityUsageState>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
@@ -259,6 +265,7 @@ export type YuukeiClient = {
     key: string,
     value: string | null
   ): Promise<ExtensionSettingsChangeResult>;
+  setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
   onWorldPackStatus(
@@ -277,6 +284,7 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<WorldPackSelectionState>("get_world_pack_status"),
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
+  getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
   getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
   getActorSurfaceAssets: () =>
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
@@ -349,6 +357,8 @@ export const tauriYuukeiClient: YuukeiClient = {
       key,
       value
     }),
+  setAppTalkIntervalMinutes: (minutes: number) =>
+    invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),
   onCommand: async (callback) => {
     const unlisten = await listen<RuntimeCommand>("yuukei-command", (event) => {
       callback(event.payload);

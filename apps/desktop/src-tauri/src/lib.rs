@@ -16,9 +16,9 @@ use tauri::{
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AvatarGesturePoke, CapabilityUsageState, ExtensionSettingsChangeResult, ExtensionSettingsState,
-    LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState, WorldPackSwitchResult,
-    TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, ExtensionSettingsChangeResult,
+    ExtensionSettingsState, LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState,
+    WorldPackSwitchResult, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{ExtensionHookPoint, ResidentSnapshot, RuntimeCommand};
 use yuukei_world::resolve_pack_relative_path;
@@ -137,6 +137,12 @@ async fn get_extension_settings(
 ) -> Result<ExtensionSettingsState, String> {
     let runtime = state.runtime.lock().await;
     runtime.extension_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.app_settings().map_err(to_message)
 }
 
 #[tauri::command]
@@ -345,6 +351,15 @@ async fn set_extension_secret(
     reload_runtime_for_extension_change(app, state).await
 }
 
+#[tauri::command]
+async fn set_app_talk_interval_minutes(
+    state: State<'_, AppState>,
+    minutes: u64,
+) -> Result<AppSettingsState, String> {
+    LocalYuukeiRuntime::set_app_talk_interval_minutes_in(state.env.clone(), minutes)
+        .map_err(to_message)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -411,6 +426,7 @@ pub fn run() {
             get_snapshot,
             get_world_pack_status,
             get_extension_settings,
+            get_app_settings,
             get_capability_usage,
             get_actor_surface_assets,
             set_actor_window_click_through,
@@ -428,7 +444,8 @@ pub fn run() {
             set_extension_enabled,
             set_extension_hook_order,
             set_extension_setting_values,
-            set_extension_secret
+            set_extension_secret,
+            set_app_talk_interval_minutes
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");

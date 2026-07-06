@@ -37,6 +37,11 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "生活定期",
     },
     StandardSignalDefinition {
+        canonical_id: "presence.talk_impulse",
+        daihon_alias: "雑談_定期",
+        display_label: "雑談定期",
+    },
+    StandardSignalDefinition {
         canonical_id: "presence.time_period",
         daihon_alias: "時間帯_変化",
         display_label: "時間帯変化",
@@ -988,6 +993,7 @@ mod tests {
     fn standard_signals_resolve_daihon_aliases_to_canonical_ids() {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
         assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
+        assert_eq!(canonical_signal_id("雑談_定期"), "presence.talk_impulse");
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
         assert_eq!(canonical_signal_id("住人_つつく"), "avatar.gesture.poke");
         assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");

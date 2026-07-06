@@ -42,6 +42,8 @@ Device Hostは人格や長期記憶を所有しない。端末が変わっても
 
 ユーザーがWorld Packディレクトリを選ぶ設定UIはDevice Hostに置いてよい。Device Hostはローカルファイルダイアログ、OS権限、選択パスの保存を扱う。ただし、active World Packの解釈、residentId、event logの分離、住人の継続性はResident Home側の起動設定として扱い、Surface Clientへ人格状態を持たせない。
 
+Device Hostは、定期的なひとりごとのきっかけとして `presence.talk_impulse` を発行できる。おしゃべりの間隔は分単位のアプリ本体設定として `YUUKEI_DATA_DIR/settings/app.json` に保存し、既定は5分、0分で無効にする。実際の発火間隔は機械的になりすぎないよう設定値の前後に小さく揺らし、直近の会話や住人へのジェスチャーの直後はその回を見送る。
+
 ### Surface Client
 
 住人の身体と演出を担当する表示クライアント。

@@ -66,6 +66,7 @@
       "conversation.text",
       "app.startup",
       "presence.life_tick",
+      "presence.talk_impulse",
       "presence.time_period",
       "device.sleep.before",
       "device.wake",
@@ -82,7 +83,10 @@
     "signals": [{ "signal": "conversation.text", "cooldownSeconds": 60 }]
   },
   "daihon": {
-    "scripts": ["scripts/desktop_reactions.daihon"]
+    "scripts": [
+      "scripts/desktop_reactions.daihon",
+      "scripts/random_talk.daihon"
+    ]
   },
   "initialVariables": {},
   "uiSpace": {

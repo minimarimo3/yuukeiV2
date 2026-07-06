@@ -152,6 +152,10 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     attachSurface: vi.fn(),
     getSnapshot: vi.fn(),
     getWorldPackStatus: vi.fn(),
+    getAppSettings: vi.fn(async () => ({
+      talkIntervalMinutes: 5,
+      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+    })),
     getExtensionSettings: vi.fn(),
     getCapabilityUsage: vi.fn(),
     getActorSurfaceAssets: vi.fn(),
@@ -170,6 +174,10 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     installExtensionDirectory: vi.fn(),
     uninstallExtension: vi.fn(),
     setExtensionEnabled: vi.fn(),
+    setAppTalkIntervalMinutes: vi.fn(async (minutes: number) => ({
+      talkIntervalMinutes: minutes,
+      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+    })),
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),
