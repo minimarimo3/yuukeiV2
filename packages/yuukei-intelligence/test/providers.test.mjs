@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
-import { generateWithGemini, interpretWithGemini } from "../src/providers/gemini.mjs";
+import { evaluateMoodWithGemini, generateWithGemini, interpretWithGemini } from "../src/providers/gemini.mjs";
 import {
+  evaluateMoodWithOpenAiCompatible,
   generateWithOpenAiCompatible,
   interpretWithOpenAiCompatible
 } from "../src/providers/openai-compatible.mjs";
-import { capabilityResult, parseJsonInterpretOutput, parseJsonOutput } from "../src/output.mjs";
+import {
+  capabilityResult,
+  normalizeMoodEvaluateOutput,
+  parseJsonInterpretOutput,
+  parseJsonMoodEvaluateOutput,
+  parseJsonOutput
+} from "../src/output.mjs";
 
 const sampleInput = {
   event: {
@@ -32,6 +39,20 @@ const sampleInterpretInput = {
   question: "返事は肯定ですか？",
   choices: ["はい", "いいえ"],
   input: { text: "あ〜うん。いやちょっと忙しくて..." }
+};
+
+const sampleMoodInput = {
+  residentId: "resident-default",
+  worldPackId: "default-yuukei",
+  currentTime: "2026-07-06T12:00:00.000Z",
+  timePeriod: "昼",
+  secondsSinceLastUserActivity: 240,
+  persona: {
+    actorId: "yuukei",
+    displayName: "Yuukei",
+    profile: { role: "UI resident", speechStyle: "short" }
+  },
+  recentContext: sampleInput.recentContext
 };
 
 test("openai-compatible formats request and maps JSON response", async () => {
@@ -181,6 +202,48 @@ test("openai-compatible includes retrieved memories in prompt", async () => {
     assert.match(calls[0].body.messages[1].content, /覚えていること/);
     assert.match(calls[0].body.messages[1].content, /唐揚げが好き/);
     assert.match(calls[0].body.messages[1].content, /昨日は公園へ行った/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("openai-compatible evaluates mood without forcing response_format", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      usage: {
+        prompt_tokens: 20,
+        completion_tokens: 7
+      },
+      choices: [
+        {
+          message: {
+            content: "```json\n{\"mood\":\"さみしい\",\"talkDesire\":82,\"topic\":\"静かな画面\"}\n```"
+          }
+        }
+      ]
+    });
+  };
+  try {
+    const result = await evaluateMoodWithOpenAiCompatible(sampleMoodInput, {
+      timeoutMs: 1000,
+      openaiCompatible: {
+        baseUrl: "http://127.0.0.1:1234/v1",
+        model: "local-test",
+        responseFormat: "json_schema"
+      }
+    });
+
+    assert.deepEqual(result.output, {
+      mood: "さみしい",
+      talkDesire: 82,
+      topic: "静かな画面"
+    });
+    assert.equal(calls[0].body.response_format, undefined);
+    assert.match(calls[0].body.messages[1].content, /talkDesire/);
+    assert.match(calls[0].body.messages[1].content, /さみしい/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -456,6 +519,43 @@ test("gemini formats request and maps JSON response", async () => {
   }
 });
 
+test("gemini evaluates mood and maps JSON response", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      usageMetadata: {
+        promptTokenCount: 9,
+        candidatesTokenCount: 4
+      },
+      candidates: [
+        {
+          content: {
+            parts: [{ text: JSON.stringify({ mood: "ねむい", talkDesire: 12, topic: "" }) }]
+          }
+        }
+      ]
+    });
+  };
+  try {
+    const result = await evaluateMoodWithGemini(sampleMoodInput, {
+      timeoutMs: 1000,
+      gemini: { apiKey: "gem-key", model: "gemini-test" }
+    });
+
+    assert.deepEqual(result.output, { mood: "ねむい", talkDesire: 12, topic: "" });
+    assert.equal(calls[0].body.generationConfig.responseMimeType, "application/json");
+    assert.deepEqual(calls[0].body.generationConfig.responseSchema.required, [
+      "mood",
+      "talkDesire",
+      "topic"
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("gemini returns speak false for missing key, API errors, timeout, and invalid JSON", async (t) => {
   await t.test("missing key", async () => {
     const result = await generateWithGemini(sampleInput, {
@@ -604,6 +704,28 @@ test("capability result normalizes dialogue.interpret output", () => {
   assert.equal(result.invocationId, "cap_2");
   assert.equal(result.capability, "dialogue.interpret");
   assert.deepEqual(result.output, { choice: "不明" });
+});
+
+test("capability result normalizes mood.evaluate output", () => {
+  const result = capabilityResult(
+    { id: "cap_3", capability: "mood.evaluate", input: sampleMoodInput },
+    { mood: "謎", talkDesire: 120.8, topic: "  机の上  " },
+    { provider: "test" }
+  );
+  assert.equal(result.invocationId, "cap_3");
+  assert.equal(result.capability, "mood.evaluate");
+  assert.deepEqual(result.output, { mood: "ふつう", talkDesire: 100, topic: "机の上" });
+});
+
+test("mood output parsing normalizes vocabulary and clamps desire", () => {
+  assert.deepEqual(
+    parseJsonMoodEvaluateOutput("前置き {\"mood\":\"うれしい\",\"talkDesire\":88.9,\"topic\":\"散歩\"} 後置き"),
+    { mood: "うれしい", talkDesire: 88, topic: "散歩" }
+  );
+  assert.deepEqual(
+    normalizeMoodEvaluateOutput({ mood: "読めない", talkDesire: -4, topic: 12 }),
+    { mood: "ふつう", talkDesire: 0, topic: "" }
+  );
 });
 
 test("parseJsonOutput accepts fenced and embedded JSON but rejects non-JSON text", () => {

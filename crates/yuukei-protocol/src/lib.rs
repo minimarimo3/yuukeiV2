@@ -837,6 +837,32 @@ pub struct MemoryRetrieveOutput {
     pub memories: Vec<MemorySnippet>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MoodEvaluateInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub current_time: String,
+    #[ts(optional)]
+    pub time_period: Option<String>,
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub seconds_since_last_user_activity: Option<u64>,
+    pub persona: DialogueGeneratePersona,
+    #[serde(default)]
+    pub recent_context: Vec<DialogueGenerateRecentContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MoodEvaluateOutput {
+    pub mood: String,
+    pub talk_desire: u8,
+    pub topic: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]

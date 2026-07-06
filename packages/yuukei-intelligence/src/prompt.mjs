@@ -118,6 +118,55 @@ export function buildMemoryIndexSystemPrompt() {
   ].join(" ");
 }
 
+export function buildMoodEvaluatePrompt(input) {
+  const persona = input?.persona ?? {};
+  const profile = persona.profile && typeof persona.profile === "object" ? persona.profile : {};
+  const recentContext = Array.isArray(input?.recentContext) ? input.recentContext : [];
+  return [
+    `あなたは${persona.displayName ?? persona.actorId ?? "Yuukei"}です。`,
+    "最近の出来事から、今の気分を評価してください。",
+    "これは発話生成ではありません。話すかどうかを調整するための短い状態評価です。",
+    "moodは必ず次のどれかにしてください: ふつう, うれしい, たいくつ, さみしい, 心配, ねむい。",
+    "talkDesireは今ひとりごとを言いたい度合いを0から100の整数で返してください。",
+    "topicは話したいことがあれば短く、なければ空文字にしてください。",
+    "Return JSON only. Do not include Markdown.",
+    "Output shape: {\"mood\":\"ふつう\",\"talkDesire\":50,\"topic\":\"\"}.",
+    "",
+    "Persona:",
+    JSON.stringify(
+      {
+        actorId: persona.actorId,
+        displayName: persona.displayName,
+        profile
+      },
+      null,
+      2
+    ),
+    "",
+    "Current context:",
+    JSON.stringify(
+      {
+        currentTime: input?.currentTime,
+        timePeriod: input?.timePeriod,
+        secondsSinceLastUserActivity: input?.secondsSinceLastUserActivity
+      },
+      null,
+      2
+    ),
+    "",
+    "Recent context:",
+    JSON.stringify(recentContext.slice(-20), null, 2)
+  ].join("\n");
+}
+
+export function buildMoodEvaluateSystemPrompt() {
+  return [
+    "You are a mood.evaluate provider for Yuukei.",
+    "Return only valid JSON.",
+    "Never generate dialogue. Never include Markdown."
+  ].join(" ");
+}
+
 function eventLanguageHint(event) {
   const text = event?.payload?.text;
   if (typeof text !== "string" || !text.trim()) {

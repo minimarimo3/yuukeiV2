@@ -43,6 +43,8 @@ export * from "./generated/MemoryRetrieveOutput";
 export * from "./generated/MemoryRetrieveQuery";
 export * from "./generated/MemorySnippet";
 export * from "./generated/MemorySnippetKind";
+export * from "./generated/MoodEvaluateInput";
+export * from "./generated/MoodEvaluateOutput";
 export * from "./generated/Privacy";
 export * from "./generated/ExtensionHealth";
 export * from "./generated/ResidentSnapshot";

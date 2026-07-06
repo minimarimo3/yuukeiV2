@@ -4,12 +4,16 @@ import {
   buildInterpretSystemPrompt,
   buildMemoryIndexPrompt,
   buildMemoryIndexSystemPrompt,
+  buildMoodEvaluatePrompt,
+  buildMoodEvaluateSystemPrompt,
   buildSystemPrompt
 } from "../prompt.mjs";
 import {
   parseJsonInterpretOutput,
   parseJsonMemoryIndexOutput,
+  parseJsonMoodEvaluateOutput,
   parseJsonOutput,
+  moodEvaluateFailureOutput,
   memoryIndexFailureOutput,
   silentOutput,
   unknownChoiceOutput
@@ -162,6 +166,51 @@ export async function summarizeMemoryIndexWithOpenAiCompatible(input, config) {
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
     return { output: memoryIndexFailureOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+}
+
+export async function evaluateMoodWithOpenAiCompatible(input, config) {
+  const providerConfig = config.openaiCompatible ?? {};
+  const baseUrl = trimTrailingSlash(providerConfig.baseUrl ?? "http://127.0.0.1:1234/v1");
+  const model = providerConfig.model ?? "local-model";
+  if (!baseUrl || !model) {
+    console.error("yuukei-intelligence: openai-compatible baseUrl or model is not configured");
+    return { output: moodEvaluateFailureOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+
+  const headers = { "content-type": "application/json" };
+  if (providerConfig.apiKey) {
+    headers.authorization = `Bearer ${providerConfig.apiKey}`;
+  }
+  const body = {
+    model,
+    messages: [
+      { role: "system", content: buildMoodEvaluateSystemPrompt() },
+      { role: "user", content: buildMoodEvaluatePrompt(input) }
+    ],
+    temperature: 0.2
+  };
+
+  try {
+    const response = await postChatCompletion(
+      `${baseUrl}/chat/completions`,
+      headers,
+      body,
+      config.timeoutMs
+    );
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: openai-compatible API error ${response.status}`);
+      return { output: moodEvaluateFailureOutput(), metadata: { provider: "openai-compatible", model } };
+    }
+    const json = await response.json();
+    const text = json?.choices?.[0]?.message?.content;
+    return {
+      output: parseJsonMoodEvaluateOutput(text),
+      metadata: openAiCompatibleMetadata(json, model)
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
+    return { output: moodEvaluateFailureOutput(), metadata: { provider: "openai-compatible", model } };
   }
 }
 

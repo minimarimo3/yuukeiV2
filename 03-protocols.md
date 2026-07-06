@@ -52,6 +52,7 @@ type RuntimeEvent = YuukeiMessage & {
 - `avatar.gesture.poke`: Surface上で住人に触れた。
 - `presence.life_tick`: 生活時計が進んだ。
 - `presence.talk_impulse`: Device Hostのおしゃべりタイマーが、台本上の定期的なひとりごと候補を起こした。
+- `ext.yuukei-intelligence.mood.changed`: 公式Intelligence Extensionが、最近の出来事から住人の気分を評価した。
 - `device.wake`: 端末が復帰した。
 - `os.file_browser.focused`: Finder/Explorer相当の場所に入った。
 - `mobile.location.changed`: スマホ側で位置文脈が変わった。
@@ -89,6 +90,8 @@ type ExtensionSignalAlias = {
 ```
 
 例: `活動時間_開始` -> `ext.activity.active-period.start`。Resident Homeは有効なExtensionのaliasだけをWorld/Daihon境界へ渡す。World PackやDaihonが未導入または無効なExtensionのaliasに依存している場合、そのaliasはcanonical IDへ解決されず、該当トリガーが発火しないだけにする。
+
+公式Intelligence Extensionは `気分_変化` -> `ext.yuukei-intelligence.mood.changed` を寄贈できる。
 
 ## RuntimeCommand
 
@@ -312,6 +315,7 @@ type CapabilityInvocation = {
 - `speech.recognition`: 音声入力をテキストへ変換。
 - `memory.index`: canonical event logからExtension固有の記憶索引を作る。
 - `memory.retrieve`: 現在文脈から必要な記憶を取り出す。
+- `mood.evaluate`: 最近の出来事から住人の現在の気分を固定語彙、話したい度、短い話題として評価する。
 - `embedding.generate`: Memory Extensionなどが使うembedding生成。
 
 Extensionは内部DBや外部APIを自由に使える。ただし、event logを改変しない。Extensionが生成した派生物はExtensionの所有物であり、再index可能であるべき。

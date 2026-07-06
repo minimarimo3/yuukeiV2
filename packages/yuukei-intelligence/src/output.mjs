@@ -10,6 +10,10 @@ export function memoryIndexFailureOutput() {
   return { indexed: false };
 }
 
+export function moodEvaluateFailureOutput() {
+  return { mood: "ふつう", talkDesire: 50, topic: "" };
+}
+
 export function normalizeOutput(value, maxLength = 120) {
   if (!value || typeof value !== "object" || typeof value.speak !== "boolean") {
     return silentOutput();
@@ -110,6 +114,51 @@ export function parseJsonMemoryIndexOutput(text) {
   return null;
 }
 
+export function parseJsonMoodEvaluateOutput(text) {
+  if (typeof text !== "string" || !text.trim()) {
+    return moodEvaluateFailureOutput();
+  }
+  const candidates = [stripCodeFence(text), extractJsonObject(text)].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+  let lastError;
+  for (const candidate of uniqueCandidates) {
+    try {
+      return normalizeMoodEvaluateOutput(JSON.parse(candidate));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.error(
+    `yuukei-intelligence: failed to parse mood JSON: ${lastError?.message ?? "no JSON object found"}`
+  );
+  return moodEvaluateFailureOutput();
+}
+
+export function normalizeMoodEvaluateOutput(value) {
+  if (!value || typeof value !== "object") {
+    return moodEvaluateFailureOutput();
+  }
+  const mood = normalizeMoodWord(value.mood);
+  const talkDesire = clampTalkDesire(value.talkDesire);
+  const topic = typeof value.topic === "string" ? value.topic.trim().slice(0, 80) : "";
+  return { mood, talkDesire, topic };
+}
+
+export function normalizeMoodWord(value) {
+  const word = typeof value === "string" ? value.trim() : "";
+  return ["ふつう", "うれしい", "たいくつ", "さみしい", "心配", "ねむい"].includes(word)
+    ? word
+    : "ふつう";
+}
+
+function clampTalkDesire(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 50;
+  }
+  return Math.min(100, Math.max(0, Math.trunc(number)));
+}
+
 export function normalizeMemoryIndexSummary(value) {
   if (!value || typeof value !== "object") {
     return null;
@@ -178,6 +227,8 @@ export function capabilityResult(invocation, output, metadata = {}) {
     normalizedOutput = normalizeMemoryIndexCapabilityOutput(output);
   } else if (capability === "memory.retrieve") {
     normalizedOutput = normalizeMemoryRetrieveCapabilityOutput(output);
+  } else if (capability === "mood.evaluate") {
+    normalizedOutput = normalizeMoodEvaluateOutput(output);
   } else {
     normalizedOutput = normalizeOutput(output, invocation?.input?.constraints?.maxLength);
   }

@@ -20,8 +20,8 @@ use yuukei_protocol::{
     ExtensionCapabilityDeclaration, ExtensionEventInvocation, ExtensionEventLogReadPermission,
     ExtensionEventResult, ExtensionEventSubscription, ExtensionHealth, ExtensionHookAction,
     ExtensionHookInvocation, ExtensionHookPoint, ExtensionHookResult, ExtensionHookSubscription,
-    ExtensionPermissions, ExtensionRuntimeKind, ExtensionSettingsSchema, ExtensionSignalAlias,
-    ExtensionSummary, JsonMap, RuntimeCommand,
+    ExtensionPermissions, ExtensionRuntimeKind, ExtensionSettingField, ExtensionSettingsSchema,
+    ExtensionSignalAlias, ExtensionSummary, JsonMap, RuntimeCommand,
 };
 
 #[derive(Debug, Error)]
@@ -695,6 +695,7 @@ impl CapabilityProvider for ProcessHookExtension {
             },
             enabled: self.enabled,
             config_schema: JsonMap::new(),
+            runtime_settings: self.public_runtime_settings(),
         }
     }
 
@@ -708,6 +709,28 @@ impl CapabilityProvider for ProcessHookExtension {
             .map_err(|error| yuukei_capability::CapabilityError::Extension(error.to_string()))?;
         serde_json::from_slice(&output)
             .map_err(|error| yuukei_capability::CapabilityError::Extension(error.to_string()))
+    }
+}
+
+impl ProcessHookExtension {
+    fn public_runtime_settings(&self) -> JsonMap {
+        let Some(settings_json) = &self.settings_json else {
+            return JsonMap::new();
+        };
+        let Ok(serde_json::Value::Object(settings)) = serde_json::from_str(settings_json) else {
+            return JsonMap::new();
+        };
+        let Some(schema) = &self.manifest.settings else {
+            return JsonMap::new();
+        };
+        settings
+            .into_iter()
+            .filter(|(key, _)| {
+                schema.fields.iter().any(|field| {
+                    field.key() == key && !matches!(field, ExtensionSettingField::Secret { .. })
+                })
+            })
+            .collect()
     }
 }
 

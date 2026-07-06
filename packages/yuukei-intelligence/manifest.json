@@ -30,6 +30,21 @@
       "methods": [
         "retrieve"
       ]
+    },
+    {
+      "capability": "mood.evaluate",
+      "methods": [
+        "evaluate"
+      ]
+    }
+  ],
+  "emittedEvents": [
+    "ext.yuukei-intelligence.mood.changed"
+  ],
+  "signalAliases": [
+    {
+      "alias": "気分_変化",
+      "signal": "ext.yuukei-intelligence.mood.changed"
     }
   ],
   "process": {
@@ -75,6 +90,14 @@
         "label": "タイムアウト(ms)",
         "default": 30000,
         "min": 1000
+      },
+      {
+        "key": "mood.intervalMinutes",
+        "type": "number",
+        "label": "気分評価の間隔(分)",
+        "description": "0分で気分評価を無効にします。",
+        "default": 10,
+        "min": 0
       },
       {
         "key": "gemini.apiKey",

@@ -16,6 +16,7 @@ pub const DIALOGUE_GENERATE_CAPABILITY: &str = "dialogue.generate";
 pub const DIALOGUE_INTERPRET_CAPABILITY: &str = "dialogue.interpret";
 pub const MEMORY_INDEX_CAPABILITY: &str = "memory.index";
 pub const MEMORY_RETRIEVE_CAPABILITY: &str = "memory.retrieve";
+pub const MOOD_EVALUATE_CAPABILITY: &str = "mood.evaluate";
 pub const DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID: &str = "yuukei.default-tts";
 
 #[derive(Debug, Error)]
@@ -53,6 +54,8 @@ pub struct ProviderRegistration {
     pub enabled: bool,
     #[serde(default)]
     pub config_schema: JsonMap,
+    #[serde(default)]
+    pub runtime_settings: JsonMap,
 }
 
 impl ProviderRegistration {
@@ -187,6 +190,13 @@ impl CapabilityRouter {
             .any(|registration| registration.is_healthy_for(capability))
     }
 
+    pub fn runtime_settings_for(&self, capability: &str) -> Option<JsonMap> {
+        let extension_id = self.select_provider(capability).ok()?;
+        self.registrations
+            .get(&extension_id)
+            .map(|registration| registration.runtime_settings.clone())
+    }
+
     pub async fn invoke(&self, invocation: CapabilityInvocation) -> Result<CapabilityResult> {
         let extension_id = self.select_provider(&invocation.capability)?;
         let registration = self
@@ -262,6 +272,7 @@ impl CapabilityProvider for StubSpeechSynthesisProvider {
             health: ExtensionHealth::Ready,
             enabled: true,
             config_schema: JsonMap::new(),
+            runtime_settings: JsonMap::new(),
         }
     }
 
@@ -364,6 +375,7 @@ mod tests {
                 health: ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
             }
         }
 
@@ -414,6 +426,7 @@ mod tests {
                 health: ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
             }
         }
 

@@ -77,7 +77,7 @@
   },
   "capabilities": {
     "required": [],
-    "optional": ["speech.synthesis", "dialogue.generate"]
+    "optional": ["speech.synthesis", "dialogue.generate", "mood.evaluate"]
   },
   "llmDelegation": {
     "signals": [{ "signal": "conversation.text", "cooldownSeconds": 60 }]

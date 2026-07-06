@@ -1,9 +1,11 @@
 import {
   generateWithGemini,
   interpretWithGemini,
+  evaluateMoodWithGemini,
   summarizeMemoryIndexWithGemini
 } from "./gemini.mjs";
 import {
+  evaluateMoodWithOpenAiCompatible,
   generateWithOpenAiCompatible,
   interpretWithOpenAiCompatible,
   summarizeMemoryIndexWithOpenAiCompatible
@@ -13,11 +15,13 @@ export const providers = {
   gemini: {
     generate: generateWithGemini,
     interpret: interpretWithGemini,
+    evaluateMood: evaluateMoodWithGemini,
     summarizeMemoryIndex: summarizeMemoryIndexWithGemini
   },
   "openai-compatible": {
     generate: generateWithOpenAiCompatible,
     interpret: interpretWithOpenAiCompatible,
+    evaluateMood: evaluateMoodWithOpenAiCompatible,
     summarizeMemoryIndex: summarizeMemoryIndexWithOpenAiCompatible
   }
 };
@@ -29,6 +33,15 @@ export async function generateWithProvider(input, config) {
     return { output: { speak: false }, metadata: { provider: config.provider } };
   }
   return provider.generate(input, config);
+}
+
+export async function evaluateMoodWithProvider(input, config) {
+  const provider = providers[config.provider];
+  if (!provider?.evaluateMood) {
+    console.error(`yuukei-intelligence: unknown provider: ${config.provider}`);
+    return { output: { mood: "ふつう", talkDesire: 50, topic: "" }, metadata: { provider: config.provider } };
+  }
+  return provider.evaluateMood(input, config);
 }
 
 export async function interpretWithProvider(input, config) {

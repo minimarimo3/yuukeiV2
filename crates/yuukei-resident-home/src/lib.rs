@@ -6,14 +6,14 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{sync::broadcast, time::timeout};
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
     DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY, MEMORY_INDEX_CAPABILITY,
-    MEMORY_RETRIEVE_CAPABILITY,
+    MEMORY_RETRIEVE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -27,8 +27,8 @@ use yuukei_protocol::{
     DialogueInterpretInput, DialogueInterpretOutput, DialogueInterpretTextInput, EventLogRecord,
     ExtensionHookPoint, JsonMap, MemoryIndexEvent, MemoryIndexInput, MemoryIndexOutput,
     MemoryRetrieveInput, MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery,
-    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
-    SurfaceSession,
+    MoodEvaluateInput, MoodEvaluateOutput, NewEventLogRecord, ResidentSnapshot, RuntimeCommand,
+    RuntimeEvent, SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
     DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonGenerateRequest,
@@ -61,11 +61,17 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
 const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const MOOD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_MEMORY_INDEX_DAYS_PER_TRIGGER: usize = 7;
 const MEMORY_RETRIEVE_FACT_LIMIT: usize = 10;
 const MEMORY_RETRIEVE_EPISODE_LIMIT: usize = 5;
 const MAX_QUEUED_CONVERSATION_EVENTS_DURING_INTERPRET: usize = 16;
 const UNKNOWN_INTERPRETATION: &str = "不明";
+const DEFAULT_MOOD_INTERVAL_MINUTES: u64 = 10;
+const LOW_TALK_DESIRE_THRESHOLD: u8 = 30;
+const HIGH_TALK_DESIRE_THRESHOLD: u8 = 80;
+const MOOD_CHANGED_EVENT: &str = "ext.yuukei-intelligence.mood.changed";
+const TALK_IMPULSE_EVENT: &str = "presence.talk_impulse";
 
 impl ResidentHomeError {
     pub fn daihon_report(&self) -> Option<&DaihonDiagnosticReport> {
@@ -103,6 +109,7 @@ struct HomeState {
     daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
     llm_delegation: LlmDelegationCounters,
     interpretation: InterpretationState,
+    mood: MoodState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,6 +128,30 @@ struct DailyBudgetCounter {
 struct InterpretationState {
     in_flight: bool,
     queued_events: VecDeque<(RuntimeEvent, EventLogRecord)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MoodState {
+    last_evaluated_at: Option<DateTime<Utc>>,
+    current: Option<MoodSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MoodSnapshot {
+    mood: String,
+    talk_desire: u8,
+    topic: String,
+}
+
+#[derive(Default)]
+struct DispatchOutcome {
+    commands: Vec<RuntimeCommand>,
+    events: Vec<RuntimeEvent>,
+}
+
+enum TalkImpulseModeration {
+    Dispatch(RuntimeEvent),
+    Skip { source_event: RuntimeEvent },
 }
 
 impl ResidentHome {
@@ -222,6 +253,7 @@ impl ResidentHome {
                 daihon_diagnostics: Vec::new(),
                 llm_delegation: LlmDelegationCounters::default(),
                 interpretation: InterpretationState::default(),
+                mood: MoodState::default(),
             })),
             command_tx,
         })
@@ -607,7 +639,15 @@ impl ResidentHome {
                 self.set_cursor(appended.sequence)?;
                 queue.push_back((proposed, appended));
             }
-            emitted_commands.extend(self.dispatch_recorded_event(event).await?);
+            let outcome = self.dispatch_recorded_event(event, &record).await?;
+            emitted_commands.extend(outcome.commands);
+            for internal_event in outcome.events {
+                let appended = self
+                    .event_log
+                    .append(NewEventLogRecord::from(internal_event.clone()))?;
+                self.set_cursor(appended.sequence)?;
+                queue.push_back((internal_event, appended));
+            }
         }
 
         Ok(emitted_commands)
@@ -741,14 +781,51 @@ impl ResidentHome {
         Ok(())
     }
 
-    async fn dispatch_recorded_event(&self, event: RuntimeEvent) -> Result<Vec<RuntimeCommand>> {
+    async fn dispatch_recorded_event(
+        &self,
+        event: RuntimeEvent,
+        record: &EventLogRecord,
+    ) -> Result<DispatchOutcome> {
         self.maybe_index_memory_for_trigger(&event).await?;
+        let mut internal_events = Vec::new();
+        if event.kind == "presence.life_tick" {
+            if let Some(mood_event) = self.maybe_evaluate_mood(&event).await? {
+                internal_events.push(mood_event);
+            }
+        }
+        if event.kind == MOOD_CHANGED_EVENT {
+            if let Some(talk_event) = self.apply_mood_changed_event(&event, record)? {
+                internal_events.push(talk_event);
+            }
+            return Ok(DispatchOutcome {
+                commands: Vec::new(),
+                events: internal_events,
+            });
+        }
+
+        let event = if event.kind == TALK_IMPULSE_EVENT {
+            match self.moderate_talk_impulse_event(event)? {
+                TalkImpulseModeration::Dispatch(event) => event,
+                TalkImpulseModeration::Skip { source_event } => {
+                    self.record_talk_impulse_skip(&source_event)?;
+                    return Ok(DispatchOutcome {
+                        commands: Vec::new(),
+                        events: internal_events,
+                    });
+                }
+            }
+        } else {
+            event
+        };
         let aliases = self.extension_signal_alias_table()?;
         if !self
             .world_pack
             .allows_signal_with_aliases(&event.kind, &aliases)
         {
-            return Ok(Vec::new());
+            return Ok(DispatchOutcome {
+                commands: Vec::new(),
+                events: internal_events,
+            });
         }
 
         let mut interpret_handler = ResidentHomeInterpretHandler {
@@ -803,7 +880,311 @@ impl ResidentHome {
         for command in commands {
             emitted_commands.push(self.emit_command_for_event(command, &event).await?);
         }
-        Ok(emitted_commands)
+        Ok(DispatchOutcome {
+            commands: emitted_commands,
+            events: internal_events,
+        })
+    }
+
+    async fn maybe_evaluate_mood(
+        &self,
+        source_event: &RuntimeEvent,
+    ) -> Result<Option<RuntimeEvent>> {
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        if !router.has_healthy_provider(MOOD_EVALUATE_CAPABILITY) {
+            return Ok(None);
+        }
+        let interval_minutes =
+            mood_interval_minutes(&router).unwrap_or(DEFAULT_MOOD_INTERVAL_MINUTES);
+        if interval_minutes == 0 {
+            return Ok(None);
+        }
+        let now = event_timestamp_or_now(source_event);
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            if state.mood.last_evaluated_at.is_some_and(|last| {
+                now.signed_duration_since(last).num_minutes() < interval_minutes as i64
+            }) {
+                return Ok(None);
+            }
+        }
+
+        let input = self.mood_evaluate_input(source_event, now)?;
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: MOOD_EVALUATE_CAPABILITY.to_string(),
+            method: "evaluate".to_string(),
+            resident_id: source_event.resident_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+            input: json_map_omitting_null_values(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, source_event, None)?;
+        let result = timeout(MOOD_EVALUATE_TIMEOUT, router.invoke(invocation.clone())).await;
+        let Ok(Ok(result)) = result else {
+            return Ok(None);
+        };
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id.clone(),
+            result.capability,
+            result.output.clone(),
+            result.metadata,
+            source_event,
+            None,
+            invocation.actor_id.as_deref(),
+        )?;
+
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<MoodEvaluateOutput>(output_value) else {
+            return Ok(None);
+        };
+        let snapshot = MoodSnapshot {
+            mood: normalize_mood_word(&output.mood).to_string(),
+            talk_desire: output.talk_desire.min(100),
+            topic: output.topic.trim().to_string(),
+        };
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.mood.last_evaluated_at = Some(now);
+        }
+        if !self.extension_can_emit_mood_changed(&result.extension_id)? {
+            return Ok(None);
+        }
+        Ok(Some(self.mood_changed_event(
+            source_event,
+            &result.extension_id,
+            &snapshot,
+        )))
+    }
+
+    fn mood_evaluate_input(
+        &self,
+        source_event: &RuntimeEvent,
+        now: DateTime<Utc>,
+    ) -> Result<MoodEvaluateInput> {
+        let actor = self
+            .world_pack
+            .actors
+            .iter()
+            .find(|actor| actor.id == self.world_pack.default_actor_id)
+            .ok_or_else(|| {
+                ResidentHomeError::MissingRequiredCapabilities(format!(
+                    "actor is not declared: {}",
+                    self.world_pack.default_actor_id
+                ))
+            })?;
+        Ok(MoodEvaluateInput {
+            resident_id: source_event.resident_id.clone(),
+            world_pack_id: self.world_pack.id.clone(),
+            current_time: source_event.timestamp.clone(),
+            time_period: source_event
+                .payload
+                .get("timePeriod")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            seconds_since_last_user_activity: self
+                .seconds_since_last_user_activity(&source_event.resident_id, now)?,
+            persona: DialogueGeneratePersona {
+                actor_id: actor.id.clone(),
+                display_name: actor.display_name.clone(),
+                profile: actor.profile.clone(),
+            },
+            recent_context: self.recent_dialogue_context(&source_event.resident_id)?,
+        })
+    }
+
+    fn seconds_since_last_user_activity(
+        &self,
+        resident_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<u64>> {
+        let records = self
+            .event_log
+            .read(EventLogQuery {
+                resident_id: Some(resident_id.to_string()),
+                kind: None,
+                after_sequence: None,
+                limit: None,
+                extension_readable_only: false,
+            })?
+            .records;
+        for record in records.into_iter().rev() {
+            if !(record.kind.starts_with("conversation.")
+                || record.kind.starts_with("avatar.gesture."))
+            {
+                continue;
+            }
+            let Some(timestamp) = event_record_timestamp(&record.timestamp) else {
+                continue;
+            };
+            return Ok(now
+                .signed_duration_since(timestamp)
+                .to_std()
+                .ok()
+                .map(|duration| duration.as_secs()));
+        }
+        Ok(None)
+    }
+
+    fn extension_can_emit_mood_changed(&self, extension_id: &str) -> Result<bool> {
+        Ok(self
+            .extensions
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .can_emit_event(extension_id, MOOD_CHANGED_EVENT))
+    }
+
+    fn mood_changed_event(
+        &self,
+        source_event: &RuntimeEvent,
+        extension_id: &str,
+        mood: &MoodSnapshot,
+    ) -> RuntimeEvent {
+        let mut event = RuntimeEvent::new(
+            MOOD_CHANGED_EVENT,
+            "extension",
+            source_event.resident_id.clone(),
+        );
+        event.device_id = source_event.device_id.clone();
+        event.surface_id = source_event.surface_id.clone();
+        event.actor_id = Some(self.world_pack.default_actor_id.clone());
+        event.causality = Some(Causality {
+            source_event_id: Some(source_event.id.clone()),
+            source_command_id: None,
+            trace_id: source_event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        event.payload = JsonMap::from([
+            ("mood".to_string(), json!(mood.mood)),
+            ("talkDesire".to_string(), json!(mood.talk_desire)),
+            ("topic".to_string(), json!(mood.topic)),
+            (
+                "yuukeiExtension".to_string(),
+                json!({ "extensionId": extension_id, "hopCount": 0 }),
+            ),
+        ]);
+        event
+    }
+
+    fn apply_mood_changed_event(
+        &self,
+        event: &RuntimeEvent,
+        record: &EventLogRecord,
+    ) -> Result<Option<RuntimeEvent>> {
+        let snapshot = mood_snapshot_from_payload(&event.payload);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.mood.current = Some(snapshot.clone());
+        }
+        if snapshot.talk_desire < HIGH_TALK_DESIRE_THRESHOLD {
+            return Ok(None);
+        }
+        let mut talk = RuntimeEvent::new(
+            TALK_IMPULSE_EVENT,
+            "resident-home",
+            event.resident_id.clone(),
+        );
+        talk.device_id = event.device_id.clone();
+        talk.surface_id = event.surface_id.clone();
+        talk.actor_id = event.actor_id.clone();
+        talk.payload = current_talk_impulse_payload(&snapshot, Some("mood.changed"));
+        talk.causality = Some(Causality {
+            source_event_id: Some(record.id.clone()),
+            source_command_id: None,
+            trace_id: event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        Ok(Some(talk))
+    }
+
+    fn moderate_talk_impulse_event(
+        &self,
+        mut event: RuntimeEvent,
+    ) -> Result<TalkImpulseModeration> {
+        let mood = {
+            self.state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?
+                .mood
+                .current
+                .clone()
+        };
+        let mood = mood.unwrap_or_else(default_mood_snapshot);
+        event.payload.insert("気分".to_string(), json!(mood.mood));
+        event.payload.insert("話題".to_string(), json!(mood.topic));
+        event.payload.insert("mood".to_string(), json!(mood.mood));
+        event.payload.insert("topic".to_string(), json!(mood.topic));
+        event
+            .payload
+            .insert("talkDesire".to_string(), json!(mood.talk_desire));
+        if mood.talk_desire < LOW_TALK_DESIRE_THRESHOLD {
+            return Ok(TalkImpulseModeration::Skip {
+                source_event: event,
+            });
+        }
+        Ok(TalkImpulseModeration::Dispatch(event))
+    }
+
+    fn record_talk_impulse_skip(&self, event: &RuntimeEvent) -> Result<()> {
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "presence.talk_impulse.skipped".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: event.resident_id.clone(),
+            source: "resident-home".to_string(),
+            device_id: event.device_id.clone(),
+            surface_id: event.surface_id.clone(),
+            actor_id: event.actor_id.clone(),
+            payload: JsonMap::from([
+                ("reason".to_string(), json!("low-talk-desire")),
+                (
+                    "mood".to_string(),
+                    event.payload.get("mood").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "talkDesire".to_string(),
+                    event
+                        .payload
+                        .get("talkDesire")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "topic".to_string(),
+                    event.payload.get("topic").cloned().unwrap_or(Value::Null),
+                ),
+            ]),
+            causality: Some(Causality {
+                source_event_id: Some(event.id.clone()),
+                source_command_id: None,
+                trace_id: event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(())
     }
 
     async fn emit_command_for_event(
@@ -1877,9 +2258,83 @@ fn parse_rfc3339_utc(timestamp: &str) -> Result<DateTime<Utc>> {
 }
 
 fn event_record_date(timestamp: &str) -> Option<NaiveDate> {
+    event_record_timestamp(timestamp).map(|timestamp| timestamp.date_naive())
+}
+
+fn event_record_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
-        .map(|timestamp| timestamp.with_timezone(&Utc).date_naive())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn event_timestamp_or_now(event: &RuntimeEvent) -> DateTime<Utc> {
+    event_record_timestamp(&event.timestamp).unwrap_or_else(Utc::now)
+}
+
+fn mood_interval_minutes(router: &CapabilityRouter) -> Option<u64> {
+    router
+        .runtime_settings_for(MOOD_EVALUATE_CAPABILITY)?
+        .get("mood.intervalMinutes")
+        .and_then(Value::as_u64)
+}
+
+fn normalize_mood_word(value: &str) -> &str {
+    match value.trim() {
+        "うれしい" => "うれしい",
+        "たいくつ" => "たいくつ",
+        "さみしい" => "さみしい",
+        "心配" => "心配",
+        "ねむい" => "ねむい",
+        "ふつう" => "ふつう",
+        _ => "ふつう",
+    }
+}
+
+fn mood_snapshot_from_payload(payload: &JsonMap) -> MoodSnapshot {
+    let mood = payload
+        .get("mood")
+        .and_then(Value::as_str)
+        .map(normalize_mood_word)
+        .unwrap_or("ふつう")
+        .to_string();
+    let talk_desire = payload
+        .get("talkDesire")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value.min(100)).ok())
+        .unwrap_or(50);
+    let topic = payload
+        .get("topic")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    MoodSnapshot {
+        mood,
+        talk_desire,
+        topic,
+    }
+}
+
+fn default_mood_snapshot() -> MoodSnapshot {
+    MoodSnapshot {
+        mood: "ふつう".to_string(),
+        talk_desire: 50,
+        topic: String::new(),
+    }
+}
+
+fn current_talk_impulse_payload(mood: &MoodSnapshot, trigger: Option<&str>) -> JsonMap {
+    let mut payload = JsonMap::from([
+        ("気分".to_string(), json!(mood.mood)),
+        ("話題".to_string(), json!(mood.topic)),
+        ("mood".to_string(), json!(mood.mood)),
+        ("topic".to_string(), json!(mood.topic)),
+        ("talkDesire".to_string(), json!(mood.talk_desire)),
+    ]);
+    if let Some(trigger) = trigger {
+        payload.insert("trigger".to_string(), json!(trigger));
+    }
+    payload
 }
 
 fn indexed_memory_dates(records: &[EventLogRecord]) -> BTreeSet<NaiveDate> {
@@ -2227,6 +2682,7 @@ mod tests {
                 health: yuukei_protocol::ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
             }
         }
 
@@ -2289,6 +2745,7 @@ mod tests {
                 health: yuukei_protocol::ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
             }
         }
 
@@ -2354,6 +2811,7 @@ mod tests {
                 health: yuukei_protocol::ExtensionHealth::Ready,
                 enabled: true,
                 config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
             }
         }
 
@@ -2386,6 +2844,76 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct MoodProvider {
+        output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        runtime_settings: JsonMap,
+        fail: bool,
+    }
+
+    impl MoodProvider {
+        fn new(output: JsonMap) -> Self {
+            Self {
+                output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                runtime_settings: JsonMap::new(),
+                fail: false,
+            }
+        }
+
+        fn with_runtime_settings(mut self, runtime_settings: JsonMap) -> Self {
+            self.runtime_settings = runtime_settings;
+            self
+        }
+
+        fn failing(mut self) -> Self {
+            self.fail = true;
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for MoodProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "yuukei-intelligence".to_string(),
+                capabilities: vec![MOOD_EVALUATE_CAPABILITY.to_string()],
+                methods: vec!["evaluate".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+                runtime_settings: self.runtime_settings.clone(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("mood calls lock")
+                .push(invocation.clone());
+            if self.fail {
+                return Err(CapabilityError::Extension("mood failed".to_string()));
+            }
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "yuukei-intelligence".to_string(),
+                capability: MOOD_EVALUATE_CAPABILITY.to_string(),
+                output: self.output.clone(),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
     fn llm_fallback_world() -> WorldPack {
         let mut world = world_pack();
         world.daihon.loaded_scripts[0].source = r#"
@@ -2404,6 +2932,36 @@ mod tests {
             daily_budget: None,
         };
         world
+    }
+
+    fn random_talk_world() -> WorldPack {
+        let mut world = world_pack();
+        world.signals.allow = vec![
+            TALK_IMPULSE_EVENT.to_string(),
+            "presence.life_tick".to_string(),
+        ];
+        world.daihon.loaded_scripts[0].source = r#"
+## 雑談
+### normal
+合図: ＠雑談_定期
+条件:（入力#気分 = 「ふつう」）
+話者: yuukei
+「ふつうに話します。」
+
+### lonely
+合図: ＠雑談_定期
+条件:（入力#気分 = 「さみしい」）
+話者: yuukei
+「少し静かですね。」
+"#
+        .to_string();
+        world
+    }
+
+    fn yuukei_intelligence_events_extension() -> EventEmitterExtension {
+        EventEmitterExtension::new("yuukei-intelligence")
+            .emits([MOOD_CHANGED_EVENT])
+            .with_signal_alias("気分_変化", MOOD_CHANGED_EVENT)
     }
 
     fn interpret_world() -> WorldPack {
@@ -3147,6 +3705,234 @@ mod tests {
             .any(|command| command.payload["text"] == json!("記憶なしでも返します。")));
         let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
         assert!(dialogue_calls[0].input.get("memories").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn talk_impulse_without_mood_dispatches_with_default_inputs() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+
+        let commands = home
+            .ingest_event(RuntimeEvent::new(
+                TALK_IMPULSE_EVENT,
+                "device",
+                "resident-default",
+            ))
+            .await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "ふつうに話します。");
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        let dispatch = records
+            .iter()
+            .find(|record| record.kind == "daihon.dispatch.result")
+            .expect("dispatch result");
+        assert_eq!(
+            dispatch.payload["commands"][0]["payload"]["text"],
+            "ふつうに話します。"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn low_talk_desire_skips_talk_impulse() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+
+        let mut mood_event = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
+        mood_event.payload = JsonMap::from([
+            ("mood".to_string(), json!("さみしい")),
+            ("talkDesire".to_string(), json!(12)),
+            ("topic".to_string(), json!("静かな画面")),
+        ]);
+        assert!(home.ingest_event(mood_event).await?.is_empty());
+
+        let commands = home
+            .ingest_event(RuntimeEvent::new(
+                TALK_IMPULSE_EVENT,
+                "device",
+                "resident-default",
+            ))
+            .await?;
+        assert!(commands.is_empty());
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        let skipped = records
+            .iter()
+            .find(|record| record.kind == "presence.talk_impulse.skipped")
+            .expect("skip record");
+        assert_eq!(skipped.payload["reason"], "low-talk-desire");
+        assert_eq!(skipped.payload["mood"], "さみしい");
+        assert_eq!(skipped.payload["talkDesire"], 12);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn high_talk_desire_mood_changed_interrupts_with_random_talk() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+
+        let mut mood_event = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
+        mood_event.payload = JsonMap::from([
+            ("mood".to_string(), json!("さみしい")),
+            ("talkDesire".to_string(), json!(92)),
+            ("topic".to_string(), json!("静かな画面")),
+        ]);
+        let commands = home.ingest_event(mood_event).await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "少し静かですね。");
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| {
+            record.kind == TALK_IMPULSE_EVENT
+                && record.source == "resident-home"
+                && record.payload["trigger"] == "mood.changed"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn life_tick_evaluates_mood_and_records_changed_event() -> Result<()> {
+        let mut router = CapabilityRouter::new();
+        let mood = MoodProvider::new(JsonMap::from([
+            ("mood".to_string(), json!("うれしい")),
+            ("talkDesire".to_string(), json!(45)),
+            ("topic".to_string(), json!("机の上")),
+        ]));
+        let calls = mood.calls();
+        router.register(mood)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            router,
+        )
+        .await?;
+        home.register_extension(yuukei_intelligence_events_extension())
+            .await?;
+
+        let mut tick = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        tick.payload = JsonMap::from([("timePeriod".to_string(), json!("昼"))]);
+        let commands = home.ingest_event(tick).await?;
+
+        assert!(commands.is_empty());
+        assert_eq!(calls.lock().expect("mood calls lock").len(), 1);
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| {
+            record.kind == "capability.invocation.result"
+                && record.payload["capability"] == MOOD_EVALUATE_CAPABILITY
+        }));
+        let changed = records
+            .iter()
+            .find(|record| record.kind == MOOD_CHANGED_EVENT)
+            .expect("mood changed event");
+        assert_eq!(changed.payload["mood"], "うれしい");
+        assert_eq!(changed.payload["talkDesire"], 45);
+        assert_eq!(changed.payload["topic"], "机の上");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mood_interval_zero_disables_evaluation() -> Result<()> {
+        let mut router = CapabilityRouter::new();
+        let mood = MoodProvider::new(JsonMap::from([
+            ("mood".to_string(), json!("うれしい")),
+            ("talkDesire".to_string(), json!(45)),
+            ("topic".to_string(), json!("机の上")),
+        ]))
+        .with_runtime_settings(JsonMap::from([(
+            "mood.intervalMinutes".to_string(),
+            json!(0),
+        )]));
+        let calls = mood.calls();
+        router.register(mood)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            router,
+        )
+        .await?;
+        home.register_extension(yuukei_intelligence_events_extension())
+            .await?;
+
+        home.ingest_event(RuntimeEvent::new(
+            "presence.life_tick",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+
+        assert!(calls.lock().expect("mood calls lock").is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mood_evaluate_failure_keeps_previous_mood() -> Result<()> {
+        let mut router = CapabilityRouter::new();
+        let mood = MoodProvider::new(JsonMap::new()).failing();
+        let calls = mood.calls();
+        router.register(mood)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            router,
+        )
+        .await?;
+        home.register_extension(yuukei_intelligence_events_extension())
+            .await?;
+
+        let mut previous = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
+        previous.payload = JsonMap::from([
+            ("mood".to_string(), json!("さみしい")),
+            ("talkDesire".to_string(), json!(10)),
+            ("topic".to_string(), json!("静かな画面")),
+        ]);
+        home.ingest_event(previous).await?;
+        home.ingest_event(RuntimeEvent::new(
+            "presence.life_tick",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+        let commands = home
+            .ingest_event(RuntimeEvent::new(
+                TALK_IMPULSE_EVENT,
+                "device",
+                "resident-default",
+            ))
+            .await?;
+
+        assert!(commands.is_empty());
+        assert_eq!(calls.lock().expect("mood calls lock").len(), 1);
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == MOOD_CHANGED_EVENT)
+                .count(),
+            1
+        );
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "presence.talk_impulse.skipped"
+                && record.payload["mood"] == "さみしい"));
         Ok(())
     }
 

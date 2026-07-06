@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.mjs";
 import { indexMemory, retrieveMemory } from "./memory.mjs";
 import { capabilityResult, silentOutput, unknownChoiceOutput } from "./output.mjs";
-import { generateWithProvider, interpretWithProvider } from "./providers/index.mjs";
+import { evaluateMoodWithProvider, generateWithProvider, interpretWithProvider } from "./providers/index.mjs";
 
 async function main() {
   const invocation = readInvocation();
@@ -23,6 +23,9 @@ async function dispatchInvocation(invocation, config) {
   }
   if (invocation.capability === "memory.retrieve") {
     return retrieveMemory(invocation.input);
+  }
+  if (invocation.capability === "mood.evaluate") {
+    return evaluateMoodWithProvider(invocation.input, config);
   }
   return {
     output: invocation.capability === "dialogue.interpret" ? unknownChoiceOutput() : silentOutput(),

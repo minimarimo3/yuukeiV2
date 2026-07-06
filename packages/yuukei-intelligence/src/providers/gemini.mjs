@@ -1,9 +1,16 @@
-import { buildDialoguePrompt, buildInterpretPrompt, buildMemoryIndexPrompt } from "../prompt.mjs";
 import {
+  buildDialoguePrompt,
+  buildInterpretPrompt,
+  buildMemoryIndexPrompt,
+  buildMoodEvaluatePrompt
+} from "../prompt.mjs";
+import {
+  moodEvaluateFailureOutput,
   memoryIndexFailureOutput,
   normalizeOutput,
   parseJsonInterpretOutput,
   parseJsonMemoryIndexOutput,
+  parseJsonMoodEvaluateOutput,
   parseJsonOutput,
   silentOutput,
   unknownChoiceOutput
@@ -160,6 +167,56 @@ export async function summarizeMemoryIndexWithGemini(input, config) {
   }
 }
 
+export async function evaluateMoodWithGemini(input, config) {
+  const providerConfig = config.gemini ?? {};
+  const apiKey = providerConfig.apiKey;
+  const model = providerConfig.model ?? "gemini-2.5-flash";
+  if (!apiKey) {
+    console.error("yuukei-intelligence: GEMINI_API_KEY is not configured");
+    return { output: moodEvaluateFailureOutput(), metadata: { provider: "gemini", model } };
+  }
+
+  const url = `${GEMINI_ENDPOINT}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: buildMoodEvaluatePrompt(input) }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+      responseSchema: moodEvaluateSchema()
+    }
+  };
+
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      config.timeoutMs
+    );
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: gemini API error ${response.status}`);
+      return { output: moodEvaluateFailureOutput(), metadata: { provider: "gemini", model } };
+    }
+    const json = await response.json();
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return {
+      output: parseJsonMoodEvaluateOutput(text),
+      metadata: geminiMetadata(json, model)
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
+    return { output: moodEvaluateFailureOutput(), metadata: { provider: "gemini", model } };
+  }
+}
+
 function dialogueGenerateSchema() {
   return {
     type: "OBJECT",
@@ -195,6 +252,18 @@ function memoryIndexSchema() {
       }
     },
     required: ["diary", "newFacts"]
+  };
+}
+
+function moodEvaluateSchema() {
+  return {
+    type: "OBJECT",
+    properties: {
+      mood: { type: "STRING" },
+      talkDesire: { type: "NUMBER" },
+      topic: { type: "STRING" }
+    },
+    required: ["mood", "talkDesire", "topic"]
   };
 }
 
