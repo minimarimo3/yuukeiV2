@@ -213,6 +213,7 @@ impl WorldPackRegistry {
             world_root: install.canonical_root.clone(),
             extension_root: self.env.data_dir.join("extensions"),
             event_log_path: resident_dir.join("events.sqlite3"),
+            scene_history_path: resident_dir.join("scene-history.json"),
             app_log_path: self.env.app_log_path(),
         }
     }

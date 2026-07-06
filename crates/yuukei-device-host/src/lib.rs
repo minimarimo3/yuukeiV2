@@ -97,6 +97,7 @@ pub struct RuntimePaths {
     pub world_root: PathBuf,
     pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
+    pub scene_history_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -110,6 +111,7 @@ pub struct LocalRuntimeConfig {
     pub world_root: PathBuf,
     pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
+    pub scene_history_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -128,6 +130,10 @@ impl LocalRuntimeConfig {
                 .join("residents")
                 .join(DEFAULT_WORLD_PACK_INSTALL_ID)
                 .join("events.sqlite3"),
+            scene_history_path: data_dir
+                .join("residents")
+                .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+                .join("scene-history.json"),
             app_log_path: data_dir.join("app-activity.jsonl"),
             workspace_root,
             data_dir,
@@ -143,6 +149,7 @@ impl LocalRuntimeConfig {
             world_root: self.world_root.clone(),
             extension_root: self.extension_root.clone(),
             event_log_path: self.event_log_path.clone(),
+            scene_history_path: self.scene_history_path.clone(),
             app_log_path: self.app_log_path.clone(),
         }
     }
@@ -872,6 +879,9 @@ impl LocalYuukeiRuntime {
         if let Some(parent) = config.event_log_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        if let Some(parent) = config.scene_history_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let logger = AppLogger::open(&config.app_log_path)?;
         let paths = config.paths();
         let initial_session_daihon_diagnostics =
@@ -922,11 +932,27 @@ impl LocalYuukeiRuntime {
         let extension_settings = config.extension_settings_registry()?;
         let capabilities =
             build_extension_capability_router(&extension_settings, &logger, &config.data_dir)?;
+        let scene_history_logger = {
+            let logger = logger.clone();
+            Arc::new(move |error: yuukei_world::SceneHistoryPersistenceError| {
+                let _ = logger.record(
+                    "scene-history.persistence-error",
+                    "device-host",
+                    JsonMap::from([
+                        ("path".to_string(), json!(display_path(&error.path))),
+                        ("message".to_string(), json!(error.message)),
+                    ]),
+                );
+            })
+        };
         let home = match ResidentHome::with_parts(
             &config.resident_id,
             world,
             event_log,
-            Arc::new(YuukeiDaihonAdapter::default()),
+            Arc::new(YuukeiDaihonAdapter::with_persistent_scene_history_logger(
+                config.scene_history_path.clone(),
+                scene_history_logger,
+            )),
             capabilities,
         )
         .await
@@ -1805,6 +1831,10 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         .join("residents")
         .join(DEFAULT_WORLD_PACK_INSTALL_ID)
         .join("events.sqlite3");
+    let scene_history_path = data_dir
+        .join("residents")
+        .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+        .join("scene-history.json");
     let app_log_path = data_dir.join("app-activity.jsonl");
     LocalRuntimeConfig {
         install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
@@ -1814,6 +1844,7 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         world_root,
         extension_root,
         event_log_path,
+        scene_history_path,
         app_log_path,
         data_dir,
     }
@@ -1889,6 +1920,10 @@ fn paths_payload(paths: &RuntimePaths) -> JsonMap {
         (
             "eventLogPath".to_string(),
             json!(display_path(&paths.event_log_path)),
+        ),
+        (
+            "sceneHistoryPath".to_string(),
+            json!(display_path(&paths.scene_history_path)),
         ),
         (
             "appLogPath".to_string(),
@@ -2455,6 +2490,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scene_history_persists_across_runtime_reopen() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_once_talk_impulse_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let first_runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
+        first_runtime
+            .attach_surface(cli_surface_session(first_runtime.device_id()))
+            .await?;
+        let first_commands = first_runtime.emit_talk_impulse().await?;
+        assert_eq!(first_commands.len(), 1);
+        assert!(first_runtime.paths().scene_history_path.exists());
+        drop(first_runtime);
+
+        let second_runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        second_runtime
+            .attach_surface(cli_surface_session(second_runtime.device_id()))
+            .await?;
+        let second_commands = second_runtime.emit_talk_impulse().await?;
+        assert!(second_commands.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn selected_default_uses_per_pack_event_log() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
@@ -2475,6 +2535,10 @@ mod tests {
             .paths()
             .event_log_path
             .ends_with("residents/default-yuukei/events.sqlite3"));
+        assert!(runtime
+            .paths()
+            .scene_history_path
+            .ends_with("residents/default-yuukei/scene-history.json"));
         assert!(runtime.paths().event_log_path.exists());
         assert!(runtime
             .world_pack_status()
@@ -3925,6 +3989,50 @@ mod tests {
 合図: ＠雑談_定期
 話者: yuukei
 「少ししゃべります。」
+"#,
+        )?;
+        fs::write(
+            root.join("pack.json"),
+            serde_json::to_string_pretty(&json!({
+                "schemaVersion": 1,
+                "id": "talk-yuukei",
+                "displayName": "Talk Yuukei",
+                "defaultActorId": "yuukei",
+                "actors": [
+                    {
+                        "id": "yuukei",
+                        "displayName": "Talk Yuukei",
+                        "profile": {}
+                    }
+                ],
+                "signals": {
+                    "allow": ["presence.talk_impulse", "surface.attach"]
+                },
+                "capabilities": {
+                    "required": [],
+                    "optional": []
+                },
+                "daihon": {
+                    "scripts": ["scripts/random_talk.daihon"]
+                },
+                "initialVariables": {},
+                "uiSpace": {}
+            }))?,
+        )?;
+        Ok(())
+    }
+
+    fn write_once_talk_impulse_pack(root: &Path) -> Result<()> {
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("scripts").join("random_talk.daihon"),
+            r#"
+## 雑談
+### talk
+合図: ＠雑談_定期
+頻度: 一度きり
+話者: yuukei
+「一度だけしゃべります。」
 "#,
         )?;
         fs::write(

@@ -2,9 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use thiserror::Error;
@@ -12,10 +14,9 @@ use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
     DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, GenerateRequest,
-    GeneratedDialogue, InMemorySceneHistory, InMemoryVariableStore, InterpretHandler,
-    InterpretRequest, Interpreter, ParamSpec, ParamType, RunOptions, Script,
-    Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
-    GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
+    GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest, Interpreter,
+    ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script, Severity as DaihonSeverity, Span,
+    Spanned, Stmt, SystemEvent, ValidationMode, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -398,7 +399,255 @@ pub struct YuukeiDaihonAdapter {
 struct YuukeiDaihonState {
     scripts: Vec<LoadedDaihonScript>,
     variables: BTreeMap<String, DaihonValue>,
-    history: InMemorySceneHistory,
+    history: YuukeiSceneHistory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SceneHistoryPersistenceError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+pub type SceneHistoryErrorLogger = Arc<dyn Fn(SceneHistoryPersistenceError) + Send + Sync>;
+
+impl YuukeiDaihonAdapter {
+    pub fn with_persistent_scene_history(path: impl Into<PathBuf>) -> Self {
+        Self {
+            state: Mutex::new(YuukeiDaihonState {
+                history: YuukeiSceneHistory::persistent(path.into(), None),
+                ..YuukeiDaihonState::default()
+            }),
+        }
+    }
+
+    pub fn with_persistent_scene_history_logger(
+        path: impl Into<PathBuf>,
+        error_logger: SceneHistoryErrorLogger,
+    ) -> Self {
+        Self {
+            state: Mutex::new(YuukeiDaihonState {
+                history: YuukeiSceneHistory::persistent(path.into(), Some(error_logger)),
+                ..YuukeiDaihonState::default()
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct YuukeiSceneHistory {
+    entries: BTreeMap<(String, String), DateTime<FixedOffset>>,
+    last_by_event: BTreeMap<String, String>,
+    storage: SceneHistoryStorage,
+}
+
+impl fmt::Debug for YuukeiSceneHistory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("YuukeiSceneHistory")
+            .field("entries", &self.entries)
+            .field("last_by_event", &self.last_by_event)
+            .field("storage", &self.storage)
+            .finish()
+    }
+}
+
+impl Default for YuukeiSceneHistory {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            last_by_event: BTreeMap::new(),
+            storage: SceneHistoryStorage::Memory,
+        }
+    }
+}
+
+impl YuukeiSceneHistory {
+    fn persistent(path: PathBuf, error_logger: Option<SceneHistoryErrorLogger>) -> Self {
+        let storage = SceneHistoryStorage::File { path, error_logger };
+        let mut history = Self {
+            storage,
+            ..Self::default()
+        };
+        history.load_from_storage();
+        history
+    }
+
+    fn reload(&mut self) {
+        if matches!(self.storage, SceneHistoryStorage::File { .. }) {
+            self.entries.clear();
+            self.last_by_event.clear();
+            self.load_from_storage();
+        }
+    }
+
+    fn load_from_storage(&mut self) {
+        let SceneHistoryStorage::File { path, .. } = &self.storage else {
+            return;
+        };
+        match fs::read_to_string(path) {
+            Ok(raw) => match serde_json::from_str::<StoredSceneHistory>(&raw) {
+                Ok(stored) if stored.schema_version == 1 => {
+                    self.entries = stored
+                        .executed_scenes
+                        .into_iter()
+                        .map(|entry| ((entry.event_name, entry.scene_name), entry.last_executed_at))
+                        .collect();
+                    self.last_by_event = stored
+                        .last_scenes
+                        .into_iter()
+                        .map(|entry| (entry.event_name, entry.scene_name))
+                        .collect();
+                }
+                Ok(stored) => {
+                    self.report_storage_error(format!(
+                        "unsupported scene history schemaVersion: {}",
+                        stored.schema_version
+                    ));
+                }
+                Err(error) => {
+                    self.report_storage_error(format!("invalid scene history JSON: {error}"));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.report_storage_error(format!("failed to read scene history: {error}"));
+            }
+        }
+    }
+
+    fn save_to_storage(&self) {
+        let SceneHistoryStorage::File { path, .. } = &self.storage else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                self.report_storage_error(format!(
+                    "failed to create scene history directory: {error}"
+                ));
+                return;
+            }
+        }
+        let stored = StoredSceneHistory {
+            schema_version: 1,
+            executed_scenes: self
+                .entries
+                .iter()
+                .map(
+                    |((event_name, scene_name), last_executed_at)| StoredSceneExecution {
+                        event_name: event_name.clone(),
+                        scene_name: scene_name.clone(),
+                        last_executed_at: *last_executed_at,
+                    },
+                )
+                .collect(),
+            last_scenes: self
+                .last_by_event
+                .iter()
+                .map(|(event_name, scene_name)| StoredLastScene {
+                    event_name: event_name.clone(),
+                    scene_name: scene_name.clone(),
+                })
+                .collect(),
+        };
+        match serde_json::to_vec_pretty(&stored) {
+            Ok(bytes) => {
+                if let Err(error) = fs::write(path, bytes) {
+                    self.report_storage_error(format!("failed to write scene history: {error}"));
+                }
+            }
+            Err(error) => {
+                self.report_storage_error(format!("failed to encode scene history: {error}"));
+            }
+        }
+    }
+
+    fn report_storage_error(&self, message: String) {
+        if let SceneHistoryStorage::File { path, error_logger } = &self.storage {
+            let error = SceneHistoryPersistenceError {
+                path: path.clone(),
+                message,
+            };
+            if let Some(error_logger) = error_logger {
+                error_logger(error);
+            } else {
+                eprintln!(
+                    "scene history persistence error at {}: {}",
+                    error.path.display(),
+                    error.message
+                );
+            }
+        }
+    }
+}
+
+impl SceneHistoryStore for YuukeiSceneHistory {
+    fn last_executed_at(
+        &self,
+        event_name: &str,
+        scene_name: &str,
+    ) -> Option<DateTime<FixedOffset>> {
+        self.entries
+            .get(&(event_name.to_owned(), scene_name.to_owned()))
+            .copied()
+    }
+
+    fn last_scene_for_event(&self, event_name: &str) -> Option<String> {
+        self.last_by_event.get(event_name).cloned()
+    }
+
+    fn record_executed(&mut self, event_name: &str, scene_name: &str, at: DateTime<FixedOffset>) {
+        self.entries
+            .insert((event_name.to_owned(), scene_name.to_owned()), at);
+        self.last_by_event
+            .insert(event_name.to_owned(), scene_name.to_owned());
+        self.save_to_storage();
+    }
+}
+
+#[derive(Clone)]
+enum SceneHistoryStorage {
+    Memory,
+    File {
+        path: PathBuf,
+        error_logger: Option<SceneHistoryErrorLogger>,
+    },
+}
+
+impl fmt::Debug for SceneHistoryStorage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory => formatter.write_str("Memory"),
+            Self::File { path, .. } => formatter
+                .debug_struct("File")
+                .field("path", path)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSceneHistory {
+    schema_version: u32,
+    #[serde(default)]
+    executed_scenes: Vec<StoredSceneExecution>,
+    #[serde(default)]
+    last_scenes: Vec<StoredLastScene>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSceneExecution {
+    event_name: String,
+    scene_name: String,
+    last_executed_at: DateTime<FixedOffset>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredLastScene {
+    event_name: String,
+    scene_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -465,7 +714,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         let mut state = self.state.lock().await;
         state.scripts = scripts;
         state.variables = variables;
-        state.history = InMemorySceneHistory::new();
+        state.history.reload();
         Ok(())
     }
 
@@ -1400,6 +1649,35 @@ mod tests {
         }
     }
 
+    fn world_with_script(source: &str) -> WorldPack {
+        let mut world = pack();
+        world.signals.allow = vec!["presence.talk_impulse".to_string()];
+        world.daihon = DaihonConfig {
+            scripts: vec!["scripts/random.daihon".to_string()],
+            loaded_scripts: vec![DaihonScriptSource {
+                path: "scripts/random.daihon".to_string(),
+                source: source.to_string(),
+            }],
+        };
+        world
+    }
+
+    fn talk_impulse_event(id: &str) -> RuntimeEvent {
+        let mut event = RuntimeEvent::new("presence.talk_impulse", "device", "resident-default");
+        event.id = id.to_string();
+        event
+    }
+
+    async fn dispatch_with_history(
+        world: &WorldPack,
+        history_path: &Path,
+        event_id: &str,
+    ) -> Result<DaihonDispatchResult> {
+        let adapter = YuukeiDaihonAdapter::with_persistent_scene_history(history_path);
+        adapter.load_world(world).await?;
+        adapter.dispatch(&talk_impulse_event(event_id), world).await
+    }
+
     #[test]
     fn validates_default_actor_reference() {
         assert!(pack().validate().is_ok());
@@ -1983,6 +2261,130 @@ mod tests {
         let event = RuntimeEvent::new("os.file_browser.focused", "device", "resident-default");
         let result = adapter.dispatch(&event, &world).await?;
         assert!(result.commands.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_scene_history_keeps_once_frequency_after_reopen() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 初回だけ
+合図: ＠presence.talk_impulse
+頻度: 一度きり
+話者: yuukei
+「初回だけです。」
+"#,
+        );
+
+        let first = dispatch_with_history(&world, &history_path, "evt_once_1").await?;
+        assert_eq!(first.executed_scenes[0].scene_name, "初回だけ");
+        assert!(history_path.exists());
+
+        let second = dispatch_with_history(&world, &history_path, "evt_once_2").await?;
+        assert!(second.commands.is_empty());
+        assert!(second.executed_scenes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_scene_history_keeps_duration_frequency_after_reopen() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 日に一度
+合図: ＠presence.talk_impulse
+頻度: 1日に1回
+話者: yuukei
+「今日はもう話しました。」
+"#,
+        );
+
+        let first = dispatch_with_history(&world, &history_path, "evt_duration_1").await?;
+        assert_eq!(first.executed_scenes[0].scene_name, "日に一度");
+
+        let second = dispatch_with_history(&world, &history_path, "evt_duration_2").await?;
+        assert!(second.commands.is_empty());
+        assert!(second.executed_scenes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_scene_history_keeps_last_scene_after_reopen() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### A
+合図: ＠presence.talk_impulse
+話者: yuukei
+「Aです。」
+
+### B
+合図: ＠presence.talk_impulse
+話者: yuukei
+「Bです。」
+"#,
+        );
+
+        let first = dispatch_with_history(&world, &history_path, "evt_last_1").await?;
+        let first_scene = first.executed_scenes[0].scene_name.clone();
+
+        let second = dispatch_with_history(&world, &history_path, "evt_last_2").await?;
+        assert_eq!(second.executed_scenes.len(), 1);
+        assert_ne!(second.executed_scenes[0].scene_name, first_scene);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_scene_history_is_separated_by_history_file() -> Result<()> {
+        let dir = tempdir()?;
+        let pack_a_history = dir.path().join("pack-a").join("scene-history.json");
+        let pack_b_history = dir.path().join("pack-b").join("scene-history.json");
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 初回だけ
+合図: ＠presence.talk_impulse
+頻度: 一度きり
+話者: yuukei
+「別のPackなら話せます。」
+"#,
+        );
+
+        let first_a = dispatch_with_history(&world, &pack_a_history, "evt_pack_a_1").await?;
+        assert_eq!(first_a.executed_scenes[0].scene_name, "初回だけ");
+        let second_a = dispatch_with_history(&world, &pack_a_history, "evt_pack_a_2").await?;
+        assert!(second_a.executed_scenes.is_empty());
+
+        let first_b = dispatch_with_history(&world, &pack_b_history, "evt_pack_b_1").await?;
+        assert_eq!(first_b.executed_scenes[0].scene_name, "初回だけ");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_scene_history_ignores_corrupt_json() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        fs::write(&history_path, "{broken json")?;
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 初回だけ
+合図: ＠presence.talk_impulse
+頻度: 一度きり
+話者: yuukei
+「壊れていても始めます。」
+"#,
+        );
+
+        let result = dispatch_with_history(&world, &history_path, "evt_corrupt_1").await?;
+        assert_eq!(result.executed_scenes[0].scene_name, "初回だけ");
         Ok(())
     }
 

@@ -104,6 +104,8 @@ Daihonに向いているもの:
 
 Daihonは長期記憶エンジンではない。DaihonはResident Homeから渡される変数、event payload、context、runtime query、capability resultを使ってsceneを選び、RuntimeCommandやVariablePatchを返す。
 
+Daihonのscene選択履歴は、World Pack installごとのアプリデータとして保存する。`頻度: 一度きり` や `頻度: 1日に1回`、直近の繰り返し回避に使う履歴は再起動後も引き継がれるが、別のWorld Packへ切り替えた場合は混ざらない。
+
 ## AI Responsibilities
 
 AIはExtensionが提供するcapabilityとして扱う。
