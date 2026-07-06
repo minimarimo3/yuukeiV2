@@ -228,7 +228,7 @@ impl DaihonParser {
             };
             if !matches!(
                 key.as_str(),
-                "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "話者"
+                "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "頻度" | "話者"
             ) {
                 if suggest_metadata_key(&key).is_some() {
                     let line = self.next_line().unwrap();
@@ -276,23 +276,19 @@ impl DaihonParser {
                 "優先度" => {
                     metadata.raw.priority_text =
                         Some(Spanned::new(value.trim().to_owned(), value_span));
-                    if let Ok(value) = normalize_syntax(value.trim()).parse::<i32>() {
-                        metadata.priority = value;
-                    }
                 }
                 "重み" => {
                     metadata.raw.weight_text =
                         Some(Spanned::new(value.trim().to_owned(), value_span));
-                    if let Ok(value) = normalize_syntax(value.trim()).parse::<u32>() {
-                        metadata.weight = value;
-                    } else {
-                        metadata.weight = 0;
-                    }
                 }
                 "クールダウン" => {
                     metadata.raw.cooldown_text =
                         Some(Spanned::new(value.trim().to_owned(), value_span));
-                    metadata.cooldown = parse_duration(value.trim());
+                }
+                "頻度" => {
+                    metadata.raw.frequency_text =
+                        Some(Spanned::new(value.trim().to_owned(), value_span));
+                    metadata.frequency = parse_frequency(value.trim());
                 }
                 "話者" => {
                     metadata.speaker = Some(Spanned::new(value.trim().to_owned(), value_span));
@@ -1804,6 +1800,15 @@ fn parse_duration(text: &str) -> Option<Duration> {
     }
 }
 
+fn parse_frequency(text: &str) -> Option<SceneFrequency> {
+    let normalized = normalize_syntax(text.trim());
+    if normalized == "一度きり" {
+        return Some(SceneFrequency::Once);
+    }
+    let duration_text = normalized.strip_suffix("に1回")?;
+    parse_duration(duration_text).map(SceneFrequency::PerDuration)
+}
+
 fn find_assignment_index(text: &str) -> Option<usize> {
     let mut byte = 0usize;
     let mut paren = 0i32;
@@ -1849,12 +1854,31 @@ fn split_metadata_line(normalized_line: &str) -> Option<(String, &str)> {
 fn is_known_metadata_key(key: &str) -> bool {
     matches!(
         key,
-        "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "話者" | "前提条件" | "初期値"
+        "合図"
+            | "条件"
+            | "優先度"
+            | "重み"
+            | "クールダウン"
+            | "頻度"
+            | "話者"
+            | "前提条件"
+            | "初期値"
     )
 }
 
 fn suggest_metadata_key(key: &str) -> Option<String> {
-    const KEYS: &[&str] = &["合図", "条件", "優先度", "重み", "クールダウン", "話者"];
+    if matches!(key, "クールタイム" | "クールタイム期間") {
+        return Some("頻度".to_owned());
+    }
+    const KEYS: &[&str] = &[
+        "合図",
+        "条件",
+        "頻度",
+        "優先度",
+        "重み",
+        "クールダウン",
+        "話者",
+    ];
     KEYS.iter()
         .find(|candidate| metadata_key_maybe_typo(key, candidate))
         .map(|candidate| (*candidate).to_owned())
@@ -1905,7 +1929,15 @@ fn split_speaker_prefix(text: &str) -> Option<(&str, &str)> {
     if key.is_empty()
         || matches!(
             key,
-            "合図" | "条件" | "優先度" | "重み" | "クールダウン" | "話者" | "前提条件" | "初期値"
+            "合図"
+                | "条件"
+                | "優先度"
+                | "重み"
+                | "クールダウン"
+                | "頻度"
+                | "話者"
+                | "前提条件"
+                | "初期値"
         )
     {
         return None;

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -23,9 +22,7 @@ pub struct DaihonSceneInfo {
     pub name: String,
     pub signals: Vec<SystemEvent>,
     pub has_condition: bool,
-    pub priority: i32,
-    pub weight: u32,
-    pub cooldown: Option<Duration>,
+    pub frequency: Option<SceneFrequency>,
     pub speaker: Option<String>,
 }
 
@@ -47,9 +44,7 @@ pub fn inspect_ast(script: &Script) -> DaihonScriptInfo {
                 name: scene.name.value.clone(),
                 signals: scene.metadata.signals.clone(),
                 has_condition: scene.metadata.condition.is_some(),
-                priority: scene.metadata.priority,
-                weight: scene.metadata.weight,
-                cooldown: scene.metadata.cooldown,
+                frequency: scene.metadata.frequency,
                 speaker: scene
                     .metadata
                     .speaker

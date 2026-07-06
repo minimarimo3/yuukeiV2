@@ -248,6 +248,7 @@ fn parser_reads_metadata_speaker_scoped_display_and_bareword() {
 優先度: 20
 重み: 3
 クールダウン: 30分
+頻度: 2時間に1回
 話者: ミカ
 ミカ: 「こんにちは」＜表情 笑顔＞
 "#,
@@ -256,9 +257,15 @@ fn parser_reads_metadata_speaker_scoped_display_and_bareword() {
 
     let scene = &script.event.scenes[0];
     assert_eq!(scene.metadata.signals.len(), 2);
-    assert_eq!(scene.metadata.priority, 20);
-    assert_eq!(scene.metadata.weight, 3);
-    assert_eq!(scene.metadata.cooldown.unwrap().as_secs(), 1800);
+    assert!(scene.metadata.raw.priority_text.is_some());
+    assert!(scene.metadata.raw.weight_text.is_some());
+    assert!(scene.metadata.raw.cooldown_text.is_some());
+    assert_eq!(
+        scene.metadata.frequency,
+        Some(SceneFrequency::PerDuration(std::time::Duration::from_secs(
+            7200
+        )))
+    );
     assert_eq!(scene.metadata.speaker.as_ref().unwrap().value, "ミカ");
     match &scene.statements[0] {
         Stmt::SpeakerDisplay { speaker, display } => {
@@ -363,7 +370,7 @@ fn parser_accepts_fullwidth_arithmetic_operators_in_assignments_and_conditions()
 }
 
 #[test]
-fn parser_reads_postfix_not_string_match_and_day_cooldown() {
+fn parser_reads_postfix_not_string_match_and_day_frequency() {
     let script = parse_script(
         r#"
 ## 条件
@@ -371,7 +378,7 @@ fn parser_reads_postfix_not_string_match_and_day_cooldown() {
 好感度=5
 ### 否定
 条件:（好感度 10以上 でない）
-クールダウン: 1日
+頻度: 1日に1回
 「not」
 ### 含む
 条件:（入力#ファイル名 「レポート」を含む）
@@ -399,8 +406,10 @@ fn parser_reads_postfix_not_string_match_and_day_cooldown() {
         other => panic!("expected not expression, got {other:?}"),
     }
     assert_eq!(
-        script.event.scenes[0].metadata.cooldown.unwrap().as_secs(),
-        86_400
+        script.event.scenes[0].metadata.frequency,
+        Some(SceneFrequency::PerDuration(std::time::Duration::from_secs(
+            86_400
+        )))
     );
 
     let expected = [
@@ -532,7 +541,34 @@ fn validator_warns_for_metadata_key_typos() {
         .find(|diagnostic| diagnostic.code == "W-DHN-SEM-051")
         .unwrap();
 
-    assert!(diagnostic.message.contains("もしかして: クールダウン"));
+    assert!(diagnostic.message.contains("もしかして: 頻度"));
+}
+
+#[test]
+fn validator_warns_and_ignores_deprecated_selection_metadata() {
+    let script = parse_script(
+        r#"
+## 検証
+### A
+優先度: 強い
+重み: 0
+クールダウン: 永遠
+「x」
+"#,
+    )
+    .unwrap();
+    let diagnostics = validate_script(&script, Some(&registry()));
+    let codes = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(codes.contains("W-DHN-SEM-061"));
+    assert!(codes.contains("W-DHN-SEM-062"));
+    assert!(codes.contains("W-DHN-SEM-063"));
+    assert!(!codes.contains("E-DHN-SEM-012"));
+    assert!(!codes.contains("E-DHN-SEM-013"));
+    assert!(!codes.contains("E-DHN-SEM-014"));
 }
 
 #[test]
@@ -567,7 +603,7 @@ fn validator_rejects_completed_spec_errors() {
         r#"
 ## 検証
 ### A
-重み: 0
+頻度: たくさん
 入力#ユーザー発言=「x」
 世界#天気=「晴れ」
 ※（好感度 + 10 50以上）「好き」
@@ -583,7 +619,7 @@ fn validator_rejects_completed_spec_errors() {
         .map(|diagnostic| diagnostic.code.as_str())
         .collect::<BTreeSet<_>>();
     assert!(codes.contains("E-DHN-SEM-005"));
-    assert!(codes.contains("E-DHN-SEM-013"));
+    assert!(codes.contains("E-DHN-SEM-015"));
     assert!(codes.contains("E-DHN-SEM-020"));
     assert!(codes.contains("E-DHN-SEM-021"));
     assert!(codes.contains("E-DHN-SEM-030"));
@@ -702,13 +738,14 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
     let script = parse_script(
         r#"
 ## 反応
+初期値:
+好感度=10
 ### 低優先
 合図: ＠クリック
-優先度: 1
 「低」
 ### 高優先
 合図: ＠クリック
-優先度: 10
+条件:（好感度 10以上）
 話者: ミカ
 ＜表情 笑顔＞
 「呼んだ？」
@@ -1220,7 +1257,6 @@ async fn runtime_evaluates_postfix_not_condition() {
 好感度=5
 ### 低い
 条件:（好感度 10以上 でない）
-優先度: 10
 「低い」
 ### 高い
 「高い」
@@ -1260,7 +1296,6 @@ a=はい
 b=いいえ
 ### 条件
 条件:（{condition}）
-優先度: 10
 「true」
 ### 既定
 「false」
@@ -1305,7 +1340,6 @@ async fn runtime_evaluates_string_match_conditions() {
 ## 文字列
 ### 一致
 条件:（入力#ファイル名 {condition}）
-優先度: 10
 「matched」
 ### 既定
 「fallback」
@@ -1343,7 +1377,6 @@ async fn runtime_warns_when_comparing_different_types() {
 好感度=10
 ### 不一致
 条件:（好感度 = 「高い」）
-優先度: 10
 「bad」
 ### 既定
 「ok」
@@ -1383,7 +1416,6 @@ async fn runtime_warns_and_treats_non_boolean_conditions_as_false() {
 好感度=10
 ### 非bool
 条件:（好感度）
-優先度: 10
 「bad」
 ### 既定
 「ok」
@@ -1458,7 +1490,7 @@ async fn runtime_reports_number_overflow_without_panicking() {
 }
 
 #[tokio::test]
-async fn runtime_falls_back_to_default_and_respects_cooldown() {
+async fn runtime_falls_back_to_default_and_respects_frequency() {
     let script = parse_script(
         r#"
 ## 既定
@@ -1466,7 +1498,7 @@ async fn runtime_falls_back_to_default_and_respects_cooldown() {
 合図: ＠クリック
 「クリック」
 ### 既定A
-クールダウン: 10分
+頻度: 10分に1回
 「A」
 ### 既定B
 「B」
@@ -1499,13 +1531,168 @@ async fn runtime_falls_back_to_default_and_respects_cooldown() {
 }
 
 #[tokio::test]
+async fn runtime_respects_once_frequency() {
+    let script = parse_script(
+        r#"
+## 記念
+### 初回
+頻度: 一度きり
+「初回」
+### 通常
+「通常」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    history.record_executed("記念", "初回", fixed_now("2026-06-27T10:00:00+09:00"));
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions {
+            now: Some(fixed_now("2026-06-27T10:05:00+09:00")),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "通常");
+}
+
+#[tokio::test]
+async fn runtime_prefers_more_specific_conjunction() {
+    let script = parse_script(
+        r#"
+## 朝
+初期値:
+誕生日=はい
+### 朝だけ
+条件:（時 6~11）
+「朝」
+### 誕生日の朝
+条件:（時 6~11 かつ 誕生日）
+「誕生日」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions {
+            now: Some(fixed_now("2026-06-27T08:00:00+09:00")),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "誕生日の朝");
+}
+
+#[tokio::test]
+async fn runtime_avoids_last_scene_for_same_event_when_possible() {
+    let script = parse_script(
+        r#"
+## 雑談
+### A
+「A」
+### B
+「B」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    history.record_executed("雑談", "A", fixed_now("2026-06-27T10:00:00+09:00"));
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions {
+            random_seed: Some(0),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "B");
+}
+
+#[tokio::test]
+async fn runtime_uniform_pick_is_seeded_and_ignores_deprecated_weight() {
+    let script = parse_script(
+        r#"
+## 抽選
+### A
+重み: 1000
+「A」
+### B
+重み: 1
+「B」
+### C
+重み: 1
+「C」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &FunctionRegistry::permissive(),
+        options: RunOptions {
+            random_seed: Some(2),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "C");
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-SEM-062"));
+}
+
+#[tokio::test]
 async fn runtime_supports_overnight_time_range() {
     let script = parse_script(
         r#"
 ## 深夜
 ### 夜
 条件:（22:00~02:00）
-優先度: 10
 「夜」
 ### 昼
 「昼」

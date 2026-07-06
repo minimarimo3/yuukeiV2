@@ -43,29 +43,19 @@ pub struct Scene {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SceneMetadata {
     pub signals: Vec<SystemEvent>,
     pub condition: Option<Expr>,
-    pub priority: i32,
-    pub weight: u32,
-    pub cooldown: Option<Duration>,
+    pub frequency: Option<SceneFrequency>,
     pub speaker: Option<Spanned<String>>,
     pub raw: SceneMetadataRaw,
 }
 
-impl Default for SceneMetadata {
-    fn default() -> Self {
-        Self {
-            signals: Vec::new(),
-            condition: None,
-            priority: 0,
-            weight: 1,
-            cooldown: None,
-            speaker: None,
-            raw: SceneMetadataRaw::default(),
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneFrequency {
+    Once,
+    PerDuration(Duration),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +68,7 @@ pub struct SceneMetadataRaw {
     pub priority_text: Option<Spanned<String>>,
     pub weight_text: Option<Spanned<String>>,
     pub cooldown_text: Option<Spanned<String>>,
+    pub frequency_text: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

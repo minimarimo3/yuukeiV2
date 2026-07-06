@@ -87,7 +87,7 @@ Surface ClientはPack rootを探索しない。Device Hostが検証済みasset c
 
 ## Daihon Responsibilities
 
-Daihonは、条件、優先度、重み、クールダウン、変数更新、発話、動作、UI演出を扱う。
+Daihonは、条件、頻度、具体性にもとづくscene選択、繰り返し回避、変数更新、発話、動作、UI演出を扱う。
 
 Daihonに向いているもの:
 
@@ -128,7 +128,7 @@ flowchart TB
   Home --> Log["canonical event log"]
   Home --> Context["context lookup\nvariables / device / recent events"]
   Context --> Daihon["Daihon Host"]
-  Daihon --> Candidate["scene selection\ncondition / priority / weight / cooldown"]
+  Daihon --> Candidate["scene selection\ncondition specificity / frequency / non-repetition"]
   Candidate --> Command["RuntimeCommand\nspeech / motion / UI / placement"]
   Candidate --> Patch["VariablePatch"]
   Candidate --> Cap["CapabilityInvocation\noptional AI / memory / TTS"]
@@ -146,7 +146,7 @@ flowchart TB
 3. HomeがWorld Packのsignal allowlistと権限を確認する。
 4. HomeがDaihonへ必要なcontextを渡す。
 5. Daihonが条件を満たすsceneを候補化する。
-6. 優先度、重み、クールダウンでsceneを選ぶ。
+6. 頻度制限中のsceneを除き、条件が一番具体的なsceneを残し、直前の繰り返しを避けて一様抽選する。
 7. sceneがRuntimeCommand、VariablePatch、CapabilityInvocationを生む。
 8. Capability resultが必要なら発話やUI演出に変換される。
 9. `beforeCommandEmit` hookがあれば、Resident HomeがRuntimeCommandを公開protocol上で変換させる。

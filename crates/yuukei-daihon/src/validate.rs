@@ -114,32 +114,40 @@ impl<'a> Validator<'a> {
             );
         }
         if let Some(raw) = &scene.metadata.raw.priority_text {
-            if raw.value.parse::<i32>().is_err() {
-                self.diagnostics.push(DaihonDiagnostic::error(
-                    "E-DHN-SEM-012",
-                    "優先度には数値を指定してください。",
+            self.diagnostics.push(
+                DaihonDiagnostic::warning(
+                    "W-DHN-SEM-061",
+                    "優先度は廃止されました。この指定は無視されます。",
                     raw.span,
-                ));
-            }
+                )
+                .with_help("条件が具体的なシーンほど優先されます。"),
+            );
         }
         if let Some(raw) = &scene.metadata.raw.weight_text {
-            if raw.value.parse::<i32>().map(|v| v <= 0).unwrap_or(true) {
-                self.diagnostics.push(DaihonDiagnostic::error(
-                    "E-DHN-SEM-013",
-                    "重みには1以上の数値を指定してください。",
+            self.diagnostics.push(
+                DaihonDiagnostic::warning(
+                    "W-DHN-SEM-062",
+                    "重みは廃止されました。この指定は無視されます。",
                     raw.span,
-                ));
-            }
+                )
+                .with_help("出やすくしたい場合は、同じ状況のシーンを書き足してください。"),
+            );
         }
         if let Some(raw) = &scene.metadata.raw.cooldown_text {
-            if scene.metadata.cooldown.is_none() {
+            self.diagnostics.push(
+                DaihonDiagnostic::warning(
+                    "W-DHN-SEM-063",
+                    "クールダウンは頻度に置き換えられました。この指定は無視されます。",
+                    raw.span,
+                )
+                .with_help("頻度: 2時間に1回 のように書いてください。"),
+            );
+        }
+        if let Some(raw) = &scene.metadata.raw.frequency_text {
+            if scene.metadata.frequency.is_none() {
                 self.diagnostics.push(
-                    DaihonDiagnostic::error(
-                        "E-DHN-SEM-014",
-                        "クールダウンの単位が不正です。",
-                        raw.span,
-                    )
-                    .with_help("秒、分、時間、日、s、m、h、d のいずれかを使ってください。"),
+                    DaihonDiagnostic::error("E-DHN-SEM-015", "頻度の指定が不正です。", raw.span)
+                        .with_help("頻度: 一度きり または 頻度: 1日に1回 のように書いてください。"),
                 );
             }
         }
@@ -423,9 +431,13 @@ fn is_builtin_time_name(name: &str) -> bool {
 }
 
 fn suggest_metadata_key(value: &str) -> Option<&'static str> {
+    if matches!(value, "クールタイム" | "クールタイム期間") {
+        return Some("頻度");
+    }
     const KEYS: &[&str] = &[
         "合図",
         "条件",
+        "頻度",
         "優先度",
         "重み",
         "クールダウン",

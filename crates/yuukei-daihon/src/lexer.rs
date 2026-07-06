@@ -425,7 +425,7 @@ impl<'a> Lexer<'a> {
             "おわり" | "シーンおわり" | "未満" | "以下" | "以上" | "超える" | "かつ" | "または"
             | "でない" | "を含む" | "で始まる" | "で終わる" | "前提条件" | "初期値" | "合図"
             | "条件" | "なら" | "あるいは" | "それ以外" | "優先度" | "重み" | "クールダウン"
-            | "話者" => TokenKind::Keyword,
+            | "頻度" | "話者" => TokenKind::Keyword,
             _ => TokenKind::Identifier,
         };
         self.emit(kind, text, Some(normalized), span);

@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Local, Timelike};
-use rand::distributions::{Distribution, WeightedIndex};
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
@@ -99,12 +98,15 @@ pub trait SceneHistoryStore {
     fn last_executed_at(&self, event_name: &str, scene_name: &str)
         -> Option<DateTime<FixedOffset>>;
 
+    fn last_scene_for_event(&self, event_name: &str) -> Option<String>;
+
     fn record_executed(&mut self, event_name: &str, scene_name: &str, at: DateTime<FixedOffset>);
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct InMemorySceneHistory {
     entries: BTreeMap<(String, String), DateTime<FixedOffset>>,
+    last_by_event: BTreeMap<String, String>,
 }
 
 impl InMemorySceneHistory {
@@ -124,9 +126,15 @@ impl SceneHistoryStore for InMemorySceneHistory {
             .copied()
     }
 
+    fn last_scene_for_event(&self, event_name: &str) -> Option<String> {
+        self.last_by_event.get(event_name).cloned()
+    }
+
     fn record_executed(&mut self, event_name: &str, scene_name: &str, at: DateTime<FixedOffset>) {
         self.entries
             .insert((event_name.to_owned(), scene_name.to_owned()), at);
+        self.last_by_event
+            .insert(event_name.to_owned(), scene_name.to_owned());
     }
 }
 
@@ -169,8 +177,6 @@ pub struct DaihonRunResult {
 pub struct DaihonExecutedScene {
     pub name: String,
     pub trigger: Option<SystemEvent>,
-    pub priority: i32,
-    pub weight: u32,
     pub started_at: DateTime<FixedOffset>,
     pub ended_at: Option<DateTime<FixedOffset>>,
 }
@@ -220,6 +226,7 @@ where
                 diagnostics,
             });
         }
+        self.diagnostics.extend(diagnostics);
 
         let now = self.now();
         for assignment in &script.event.defaults {
@@ -258,8 +265,6 @@ where
         let mut executed = DaihonExecutedScene {
             name: scene.name.value.clone(),
             trigger: self.options.trigger.clone(),
-            priority: scene.metadata.priority,
-            weight: scene.metadata.weight,
             started_at: now,
             ended_at: None,
         };
@@ -352,32 +357,48 @@ where
         }
 
         let now = self.now();
-        candidates.retain(|scene| {
-            let Some(cooldown) = scene.metadata.cooldown else {
-                return true;
-            };
-            let Some(last) = self
+        candidates.retain(|scene| match scene.metadata.frequency {
+            Some(SceneFrequency::Once) => self
                 .scene_history
                 .last_executed_at(&script.event.name.value, &scene.name.value)
-            else {
-                return true;
-            };
-            match now.signed_duration_since(last).to_std() {
-                Ok(elapsed) => elapsed >= cooldown,
-                Err(_) => false,
+                .is_none(),
+            Some(SceneFrequency::PerDuration(duration)) => {
+                let Some(last) = self
+                    .scene_history
+                    .last_executed_at(&script.event.name.value, &scene.name.value)
+                else {
+                    return true;
+                };
+                match now.signed_duration_since(last).to_std() {
+                    Ok(elapsed) => elapsed >= duration,
+                    Err(_) => false,
+                }
             }
+            None => true,
         });
 
         if candidates.is_empty() {
             return Ok(None);
         }
-        let max_priority = candidates
+        let max_specificity = candidates
             .iter()
-            .map(|scene| scene.metadata.priority)
+            .map(|scene| condition_specificity(scene.metadata.condition.as_ref()))
             .max()
             .unwrap_or(0);
-        candidates.retain(|scene| scene.metadata.priority == max_priority);
-        Ok(weighted_pick(&candidates, self.options.random_seed))
+        candidates.retain(|scene| {
+            condition_specificity(scene.metadata.condition.as_ref()) == max_specificity
+        });
+
+        if candidates.len() > 1 {
+            if let Some(last_scene) = self
+                .scene_history
+                .last_scene_for_event(&script.event.name.value)
+            {
+                candidates.retain(|scene| scene.name.value != last_scene);
+            }
+        }
+
+        Ok(uniform_pick(&candidates, self.options.random_seed))
     }
 
     async fn execute_scene(
@@ -965,23 +986,37 @@ fn compare_values(left: &DaihonValue, op: ComparisonOp, right: &DaihonValue) -> 
     })
 }
 
-fn weighted_pick<'a>(scenes: &[&'a Scene], seed: Option<u64>) -> Option<&'a Scene> {
+fn condition_specificity(condition: Option<&Expr>) -> usize {
+    fn count(expr: &Expr) -> usize {
+        match expr {
+            Expr::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+                ..
+            } => count(left) + count(right),
+            _ => 1,
+        }
+    }
+
+    condition.map(count).unwrap_or(0)
+}
+
+fn uniform_pick<'a>(scenes: &[&'a Scene], seed: Option<u64>) -> Option<&'a Scene> {
     if scenes.is_empty() {
         return None;
     }
-    let weights = scenes
-        .iter()
-        .map(|scene| scene.metadata.weight.max(1))
-        .collect::<Vec<_>>();
-    let distribution = WeightedIndex::new(&weights).ok()?;
+    if scenes.len() == 1 {
+        return scenes.first().copied();
+    }
     let index = match seed {
         Some(seed) => {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            distribution.sample(&mut rng)
+            rng.gen_range(0..scenes.len())
         }
         None => {
             let mut rng = rand::thread_rng();
-            distribution.sample(&mut rng)
+            rng.gen_range(0..scenes.len())
         }
     };
     scenes.get(index).copied()
