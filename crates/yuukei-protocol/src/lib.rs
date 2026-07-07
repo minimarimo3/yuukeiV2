@@ -76,6 +76,31 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         daihon_alias: "住人_なでる",
         display_label: "住人なで",
     },
+    StandardSignalDefinition {
+        canonical_id: "desktop.window.appeared",
+        daihon_alias: "窓_出現",
+        display_label: "窓出現",
+    },
+    StandardSignalDefinition {
+        canonical_id: "desktop.window.closed",
+        daihon_alias: "窓_消滅",
+        display_label: "窓消滅",
+    },
+    StandardSignalDefinition {
+        canonical_id: "desktop.window.focused",
+        daihon_alias: "窓_注目",
+        display_label: "窓注目",
+    },
+    StandardSignalDefinition {
+        canonical_id: "desktop.folder.opened",
+        daihon_alias: "フォルダ_開いた",
+        display_label: "フォルダ表示",
+    },
+    StandardSignalDefinition {
+        canonical_id: "desktop.download.completed",
+        daihon_alias: "ダウンロード_完了",
+        display_label: "ダウンロード完了",
+    },
 ];
 
 pub fn standard_signal_definitions() -> &'static [StandardSignalDefinition] {
@@ -1150,6 +1175,17 @@ mod tests {
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
         assert_eq!(canonical_signal_id("住人_つつく"), "avatar.gesture.poke");
         assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");
+        assert_eq!(canonical_signal_id("窓_出現"), "desktop.window.appeared");
+        assert_eq!(canonical_signal_id("窓_消滅"), "desktop.window.closed");
+        assert_eq!(canonical_signal_id("窓_注目"), "desktop.window.focused");
+        assert_eq!(
+            canonical_signal_id("フォルダ_開いた"),
+            "desktop.folder.opened"
+        );
+        assert_eq!(
+            canonical_signal_id("ダウンロード_完了"),
+            "desktop.download.completed"
+        );
         assert_eq!(canonical_signal_id(" device.wake "), "device.wake");
         assert_eq!(canonical_signal_id("pack.custom"), "pack.custom");
     }

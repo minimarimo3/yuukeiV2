@@ -913,6 +913,7 @@ impl ResidentHome {
         } else {
             event
         };
+        let event = self.enrich_event_for_daihon_dispatch(event)?;
         let aliases = self.extension_signal_alias_table()?;
         if !self
             .world_pack
@@ -980,6 +981,58 @@ impl ResidentHome {
             commands: emitted_commands,
             events: internal_events,
         })
+    }
+
+    fn enrich_event_for_daihon_dispatch(&self, mut event: RuntimeEvent) -> Result<RuntimeEvent> {
+        if event.kind == "desktop.folder.opened" {
+            let (file_name, file_category) = self.recent_download_for_folder_event(&event)?;
+            event.payload.insert(
+                "recentDownloadFileName".to_string(),
+                Value::String(file_name),
+            );
+            event.payload.insert(
+                "recentDownloadCategory".to_string(),
+                Value::String(file_category),
+            );
+        }
+        Ok(event)
+    }
+
+    fn recent_download_for_folder_event(&self, event: &RuntimeEvent) -> Result<(String, String)> {
+        let dispatch_at = event_timestamp_or_now(event);
+        let cutoff = dispatch_at - chrono::Duration::days(7);
+        let records = self
+            .event_log
+            .read(EventLogQuery {
+                resident_id: Some(event.resident_id.clone()),
+                kind: Some("desktop.download.completed".to_string()),
+                after_sequence: None,
+                limit: None,
+                extension_readable_only: false,
+            })?
+            .records;
+        for record in records.into_iter().rev() {
+            let Some(timestamp) = event_record_timestamp(&record.timestamp) else {
+                continue;
+            };
+            if timestamp < cutoff || timestamp > dispatch_at {
+                continue;
+            }
+            let file_name = record
+                .payload
+                .get("fileName")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let file_category = record
+                .payload
+                .get("fileCategory")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return Ok((file_name, file_category));
+        }
+        Ok((String::new(), String::new()))
     }
 
     async fn maybe_evaluate_mood(
@@ -3461,6 +3514,27 @@ mod tests {
         world
     }
 
+    fn folder_download_world() -> WorldPack {
+        let mut world = world_pack();
+        world.signals.allow = vec!["desktop.folder.opened".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop folders
+### recent download
+合図: ＠フォルダ_開いた
+条件:（入力#最近のダウンロード = 「photo.png」）
+話者: yuukei
+「さっきのphoto.pngだね。」
+
+### no recent download
+合図: ＠フォルダ_開いた
+条件:（入力#最近のダウンロード = 「」）
+話者: yuukei
+「最近のダウンロードはありません。」
+"#
+        .to_string();
+        world
+    }
+
     fn yuukei_intelligence_events_extension() -> EventEmitterExtension {
         EventEmitterExtension::new("yuukei-intelligence")
             .emits([MOOD_CHANGED_EVENT])
@@ -4535,6 +4609,81 @@ mod tests {
         assert_eq!(
             dispatch.payload["commands"][0]["payload"]["text"],
             "ふつうに話します。"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_folder_opened_enriches_recent_download_inputs_and_ignores_old() -> Result<()> {
+        let now = Utc::now();
+        let home = ResidentHome::new(
+            "resident-default",
+            folder_download_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut download =
+            RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+        download.id = "evt_download_recent".to_string();
+        download.timestamp = (now - Duration::days(2)).to_rfc3339();
+        download
+            .payload
+            .insert("fileName".to_string(), json!("photo.png"));
+        download
+            .payload
+            .insert("fileCategory".to_string(), json!("image"));
+        home.event_log().append(NewEventLogRecord::from(download))?;
+
+        let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        folder.id = "evt_folder_recent".to_string();
+        folder.timestamp = now.to_rfc3339();
+        folder
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        folder.payload.insert("app".to_string(), json!("finder"));
+        let commands = home.ingest_event(folder).await?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "さっきのphoto.pngだね。");
+        let records = home.event_log().read(EventLogQuery {
+            kind: Some("desktop.folder.opened".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        let folder_record = records.records.first().expect("folder record");
+        assert!(!folder_record.payload.contains_key("recentDownloadFileName"));
+        assert!(!folder_record.payload.contains_key("recentDownloadCategory"));
+
+        let old_home = ResidentHome::new(
+            "resident-default",
+            folder_download_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut old_download =
+            RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+        old_download.id = "evt_download_old".to_string();
+        old_download.timestamp = (now - Duration::days(8)).to_rfc3339();
+        old_download
+            .payload
+            .insert("fileName".to_string(), json!("photo.png"));
+        old_download
+            .payload
+            .insert("fileCategory".to_string(), json!("image"));
+        old_home
+            .event_log()
+            .append(NewEventLogRecord::from(old_download))?;
+
+        let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        folder.id = "evt_folder_old".to_string();
+        folder.timestamp = now.to_rfc3339();
+        folder
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        folder.payload.insert("app".to_string(), json!("finder"));
+        let commands = old_home.ingest_event(folder).await?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].payload["text"],
+            "最近のダウンロードはありません。"
         );
         Ok(())
     }

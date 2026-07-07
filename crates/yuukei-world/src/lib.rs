@@ -1302,12 +1302,12 @@ impl ActionHandler for YuukeiActionHandler {
         positional: Vec<DaihonValue>,
         named: BTreeMap<String, DaihonValue>,
     ) -> std::result::Result<DaihonValue, DaihonRuntimeError> {
-        let Some(value) = function_value(&positional, &named) else {
-            return Ok(DaihonValue::None);
-        };
         let actor_id = speaker_id.unwrap_or(&self.default_actor_id).to_string();
         match name {
             "表情" | "expression" => {
+                let Some(value) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
                 let mut command = self.command("avatar.expression", speaker_id);
                 command.payload = JsonMap::from([
                     ("expression".to_string(), Value::String(value)),
@@ -1320,9 +1320,38 @@ impl ActionHandler for YuukeiActionHandler {
                 self.commands.lock().await.push(command);
             }
             "動作" | "モーション" | "motion" => {
+                let Some(value) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
                 let mut command = self.command("avatar.motion", speaker_id);
                 command.payload = JsonMap::from([
                     ("motion".to_string(), Value::String(value)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "枠に座る" => {
+                let Some(window_key) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
+                let mut command = self.command("stage.perch", speaker_id);
+                command.payload = JsonMap::from([
+                    ("windowKey".to_string(), Value::String(window_key)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "枠から降りる" => {
+                let mut command = self.command("stage.perch.release", speaker_id);
+                command.payload = JsonMap::from([
                     ("speakerId".to_string(), Value::String(actor_id)),
                     (
                         "sourceFunction".to_string(),
@@ -1513,6 +1542,23 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
             DaihonValue::Number(DaihonNumber::Integer(idle_minutes)),
         ));
     }
+    for (payload_key, input_name) in [
+        ("app", "アプリ"),
+        ("windowKey", "窓ID"),
+        ("category", "フォルダ"),
+        ("fileName", "ファイル名"),
+        ("fileCategory", "ファイル種類"),
+        ("recentDownloadFileName", "最近のダウンロード"),
+        ("recentDownloadCategory", "最近のダウンロード種類"),
+    ] {
+        if let Some(value) = event
+            .payload
+            .get(payload_key)
+            .and_then(json_to_daihon_value)
+        {
+            inputs.push((input_name.to_string(), value));
+        }
+    }
     inputs
 }
 
@@ -1593,6 +1639,22 @@ fn yuukei_function_registry() -> FunctionRegistry {
             return_type: None,
         });
     }
+    registry.register(FunctionSpec {
+        name: "枠に座る".to_string(),
+        positional: vec![ParamSpec {
+            name: Some("窓ID".to_string()),
+            ty: ParamType::Any,
+            required: true,
+        }],
+        named: BTreeMap::new(),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "枠から降りる".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::new(),
+        return_type: None,
+    });
     registry.register(FunctionSpec {
         name: INTERPRET_FUNCTION_NAME.to_string(),
         positional: vec![
@@ -2495,6 +2557,98 @@ mod tests {
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].payload["text"], "おかえり");
         assert_eq!(result.executed_scenes[0].scene_name, "welcome back");
+        Ok(())
+    }
+
+    #[test]
+    fn event_inputs_include_desktop_terrain_friendly_names() {
+        let mut event = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        event.payload.insert("app".to_string(), json!("finder"));
+        event
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        event
+            .payload
+            .insert("fileName".to_string(), json!("report.pdf"));
+        event
+            .payload
+            .insert("fileCategory".to_string(), json!("document"));
+        event
+            .payload
+            .insert("windowKey".to_string(), json!("window-1"));
+        event
+            .payload
+            .insert("recentDownloadFileName".to_string(), json!("photo.png"));
+        event
+            .payload
+            .insert("recentDownloadCategory".to_string(), json!("image"));
+
+        let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(inputs["アプリ"], DaihonValue::String("finder".to_string()));
+        assert_eq!(
+            inputs["フォルダ"],
+            DaihonValue::String("downloads".to_string())
+        );
+        assert_eq!(
+            inputs["ファイル名"],
+            DaihonValue::String("report.pdf".to_string())
+        );
+        assert_eq!(
+            inputs["ファイル種類"],
+            DaihonValue::String("document".to_string())
+        );
+        assert_eq!(inputs["窓ID"], DaihonValue::String("window-1".to_string()));
+        assert_eq!(
+            inputs["最近のダウンロード"],
+            DaihonValue::String("photo.png".to_string())
+        );
+        assert_eq!(
+            inputs["最近のダウンロード種類"],
+            DaihonValue::String("image".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_stage_perch_functions() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["desktop.window.focused".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### perch on focused window
+合図: ＠窓_注目
+話者: yuukei
+＜枠に座る (入力#窓ID)＞
+＜枠から降りる＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("desktop.window.focused", "device", "resident-default");
+        event.id = "evt_window_focus".to_string();
+        event.device_id = Some("device-local".to_string());
+        event
+            .payload
+            .insert("windowKey".to_string(), json!("win-42"));
+        event.payload.insert("app".to_string(), json!("Finder"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].kind, "stage.perch");
+        assert_eq!(result.commands[0].payload["windowKey"], "win-42");
+        assert_eq!(result.commands[0].payload["speakerId"], "yuukei");
+        assert_eq!(result.commands[0].payload["sourceFunction"], "枠に座る");
+        assert_eq!(
+            result.commands[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("yuukei")
+        );
+        assert_eq!(result.commands[1].kind, "stage.perch.release");
+        assert_eq!(result.commands[1].payload["speakerId"], "yuukei");
+        assert_eq!(result.commands[1].payload["sourceFunction"], "枠から降りる");
         Ok(())
     }
 

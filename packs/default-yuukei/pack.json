@@ -88,7 +88,12 @@
       "avatar.gesture.poke",
       "avatar.gesture.pat",
       "presence.idle.start",
-      "presence.idle.end"
+      "presence.idle.end",
+      "desktop.window.appeared",
+      "desktop.window.closed",
+      "desktop.window.focused",
+      "desktop.folder.opened",
+      "desktop.download.completed"
     ]
   },
   "capabilities": {
