@@ -311,6 +311,7 @@ type CapabilityInvocation = {
 代表capability:
 
 - `dialogue.generate`: 台本の余白を埋める発話生成。
+- `dialogue.interpret`: 台本の `解釈` 式が渡す入力文を、選択肢のどれか(または `不明`)へ分類する。文章は生成しない。
 - `speech.synthesis`: 表示テキストから音声、viseme、timingを生成。
 - `speech.recognition`: 音声入力をテキストへ変換。
 - `memory.index`: canonical event logからExtension固有の記憶索引を作る。
@@ -359,6 +360,12 @@ Device Hostはmanifest load時に、keyの文字種と重複、`select.default` 
 非secret値は `YUUKEI_DATA_DIR/settings/extensions.json` の `extensionValues` に保存する。secret値は別ファイル `YUUKEI_DATA_DIR/settings/extension-secrets.json` に保存し、Unixでは0600で書く。API応答や設定画面stateにはsecret本文を含めず、設定済みkeyの一覧だけを返す。
 
 process Extension起動時、Device Hostは有効値を `YUUKEI_EXTENSION_SETTINGS_JSON` にflat JSON objectとして渡す。有効値は保存済み非secret値と保存済みsecret値だけで構成する。schemaのdefaultはGUI表示用であり、ここへは焼き込まない。Extension自身のデフォルトや環境変数フォールバックは、ユーザーが明示的に保存していないkeyに対してのみ効く。schemaを持たないExtensionにはこの環境変数を渡さない。
+
+### Capability Usage Metadata
+
+LLMなど外部資源を使うcapabilityの応答には、任意で `usage` メタデータ(モデル名、入力/出力トークン数など)を載せられる。Resident Homeはこれをcapability実行結果の一部としてcanonical event logへ記録する。
+
+使用量の集計は専用DBを持たず、Device Hostがevent logからstatelessに集計して設定画面へ読み取り専用で表示する。Extensionは自分の使用量を自己申告する立場であり、課金や制限の権威にはならない。
 
 ## Capability Composition
 
