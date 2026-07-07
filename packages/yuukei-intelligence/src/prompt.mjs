@@ -91,6 +91,34 @@ export function buildInterpretSystemPrompt() {
   ].join(" ");
 }
 
+export function buildExtractPrompt(input) {
+  const instruction = typeof input?.instruction === "string" ? input.instruction : "";
+  const text = typeof input?.input?.text === "string" ? input.input.text : "";
+
+  return [
+    "You are extracting one free-form string value for a Yuukei Daihon scene.",
+    "Extract only the requested value from the user's text.",
+    "If the value is absent, ambiguous, empty, or longer than 100 characters, return found:false and value:\"不明\".",
+    "Do not infer unsupported facts. Do not write dialogue. Return JSON only.",
+    "Output shape: {\"found\":boolean,\"value\":\"...\"}.",
+    "",
+    "Extraction instruction:",
+    instruction,
+    "",
+    "Text to extract from:",
+    text
+  ].join("\n");
+}
+
+export function buildExtractSystemPrompt() {
+  return [
+    "You are a dialogue.extract provider for Yuukei.",
+    "Return only valid JSON.",
+    "The value must be a single string of at most 100 characters, or 不明 when not found.",
+    "Never explain the JSON. Never include Markdown."
+  ].join(" ");
+}
+
 export function buildMemoryIndexPrompt(input) {
   const date = typeof input?.date === "string" ? input.date : "";
   const events = Array.isArray(input?.events) ? input.events : [];

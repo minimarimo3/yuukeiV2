@@ -1,5 +1,6 @@
 import {
   buildDialoguePrompt,
+  buildExtractPrompt,
   buildInterpretPrompt,
   buildMemoryIndexPrompt,
   buildMoodEvaluatePrompt
@@ -8,12 +9,14 @@ import {
   moodEvaluateFailureOutput,
   memoryIndexFailureOutput,
   normalizeOutput,
+  parseJsonExtractOutput,
   parseJsonInterpretOutput,
   parseJsonMemoryIndexOutput,
   parseJsonMoodEvaluateOutput,
   parseJsonOutput,
   silentOutput,
-  unknownChoiceOutput
+  unknownChoiceOutput,
+  unknownExtractOutput
 } from "../output.mjs";
 
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
@@ -114,6 +117,56 @@ export async function interpretWithGemini(input, config) {
   } catch (error) {
     console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
     return { output: unknownChoiceOutput(), metadata: { provider: "gemini", model } };
+  }
+}
+
+export async function extractWithGemini(input, config) {
+  const providerConfig = config.gemini ?? {};
+  const apiKey = providerConfig.apiKey;
+  const model = providerConfig.model ?? "gemini-2.5-flash";
+  if (!apiKey) {
+    console.error("yuukei-intelligence: GEMINI_API_KEY is not configured");
+    return { output: unknownExtractOutput(), metadata: { provider: "gemini", model } };
+  }
+
+  const url = `${GEMINI_ENDPOINT}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: buildExtractPrompt(input) }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json",
+      responseSchema: dialogueExtractSchema()
+    }
+  };
+
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      config.timeoutMs
+    );
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: gemini API error ${response.status}`);
+      return { output: unknownExtractOutput(), metadata: { provider: "gemini", model } };
+    }
+    const json = await response.json();
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return {
+      output: parseJsonExtractOutput(text),
+      metadata: geminiMetadata(json, model)
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: gemini request failed: ${error.message}`);
+    return { output: unknownExtractOutput(), metadata: { provider: "gemini", model } };
   }
 }
 
@@ -238,6 +291,17 @@ function dialogueInterpretSchema() {
       confidence: { type: "NUMBER" }
     },
     required: ["choice"]
+  };
+}
+
+function dialogueExtractSchema() {
+  return {
+    type: "OBJECT",
+    properties: {
+      found: { type: "BOOLEAN" },
+      value: { type: "STRING" }
+    },
+    required: ["found", "value"]
   };
 }
 

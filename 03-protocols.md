@@ -312,6 +312,7 @@ type CapabilityInvocation = {
 
 - `dialogue.generate`: 台本の余白を埋める発話生成。
 - `dialogue.interpret`: 台本の `解釈` 式が渡す入力文を、選択肢のどれか(または `不明`)へ分類する。文章は生成しない。
+- `dialogue.extract`: 台本の `抽出` 式が渡す入力文から、指示された値を短い文字列(または `不明`)として取り出す。文章は生成しない。
 - `speech.synthesis`: 表示テキストから音声、viseme、timingを生成。
 - `speech.recognition`: 音声入力をテキストへ変換。
 - `memory.index`: canonical event logからExtension固有の記憶索引を作る。

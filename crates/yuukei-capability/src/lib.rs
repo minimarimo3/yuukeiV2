@@ -14,6 +14,7 @@ use yuukei_protocol::{
 pub const SPEECH_SYNTHESIS_CAPABILITY: &str = "speech.synthesis";
 pub const DIALOGUE_GENERATE_CAPABILITY: &str = "dialogue.generate";
 pub const DIALOGUE_INTERPRET_CAPABILITY: &str = "dialogue.interpret";
+pub const DIALOGUE_EXTRACT_CAPABILITY: &str = "dialogue.extract";
 pub const MEMORY_INDEX_CAPABILITY: &str = "memory.index";
 pub const MEMORY_RETRIEVE_CAPABILITY: &str = "memory.retrieve";
 pub const MOOD_EVALUATE_CAPABILITY: &str = "mood.evaluate";

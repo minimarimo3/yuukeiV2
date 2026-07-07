@@ -1,5 +1,7 @@
 import {
   buildDialoguePrompt,
+  buildExtractPrompt,
+  buildExtractSystemPrompt,
   buildInterpretPrompt,
   buildInterpretSystemPrompt,
   buildMemoryIndexPrompt,
@@ -10,13 +12,15 @@ import {
 } from "../prompt.mjs";
 import {
   parseJsonInterpretOutput,
+  parseJsonExtractOutput,
   parseJsonMemoryIndexOutput,
   parseJsonMoodEvaluateOutput,
   parseJsonOutput,
   moodEvaluateFailureOutput,
   memoryIndexFailureOutput,
   silentOutput,
-  unknownChoiceOutput
+  unknownChoiceOutput,
+  unknownExtractOutput
 } from "../output.mjs";
 
 export async function generateWithOpenAiCompatible(input, config) {
@@ -120,6 +124,58 @@ export async function interpretWithOpenAiCompatible(input, config) {
   } catch (error) {
     console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
     return { output: unknownChoiceOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+}
+
+export async function extractWithOpenAiCompatible(input, config) {
+  const providerConfig = config.openaiCompatible ?? {};
+  const baseUrl = trimTrailingSlash(providerConfig.baseUrl ?? "http://127.0.0.1:1234/v1");
+  const model = providerConfig.model ?? "local-model";
+  if (!baseUrl || !model) {
+    console.error("yuukei-intelligence: openai-compatible baseUrl or model is not configured");
+    return { output: unknownExtractOutput(), metadata: { provider: "openai-compatible", model } };
+  }
+
+  const headers = { "content-type": "application/json" };
+  if (providerConfig.apiKey) {
+    headers.authorization = `Bearer ${providerConfig.apiKey}`;
+  }
+  const body = {
+    model,
+    messages: [
+      { role: "system", content: buildExtractSystemPrompt() },
+      { role: "user", content: buildExtractPrompt(input) }
+    ],
+    temperature: 0.1
+  };
+  if (providerConfig.responseFormat === "json_schema") {
+    body.response_format = dialogueExtractResponseFormat();
+  }
+
+  try {
+    const url = `${baseUrl}/chat/completions`;
+    let response = await postChatCompletion(url, headers, body, config.timeoutMs);
+    if (!response.ok && body.response_format) {
+      console.error(
+        `yuukei-intelligence: openai-compatible API error ${response.status}; retrying without response_format`
+      );
+      const fallbackBody = { ...body };
+      delete fallbackBody.response_format;
+      response = await postChatCompletion(url, headers, fallbackBody, config.timeoutMs);
+    }
+    if (!response.ok) {
+      console.error(`yuukei-intelligence: openai-compatible API error ${response.status}`);
+      return { output: unknownExtractOutput(), metadata: { provider: "openai-compatible", model } };
+    }
+    const json = await response.json();
+    const text = json?.choices?.[0]?.message?.content;
+    return {
+      output: parseJsonExtractOutput(text),
+      metadata: openAiCompatibleMetadata(json, model)
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: openai-compatible request failed: ${error.message}`);
+    return { output: unknownExtractOutput(), metadata: { provider: "openai-compatible", model } };
   }
 }
 
@@ -249,6 +305,25 @@ function dialogueInterpretResponseFormat() {
           confidence: { type: "number" }
         },
         required: ["choice"]
+      }
+    }
+  };
+}
+
+function dialogueExtractResponseFormat() {
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: "dialogue_extract_output",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          found: { type: "boolean" },
+          value: { type: "string" }
+        },
+        required: ["found", "value"]
       }
     }
   };

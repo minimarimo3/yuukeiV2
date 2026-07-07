@@ -12,8 +12,8 @@ use tokio::{sync::broadcast, time::timeout};
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
-    DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY, MEMORY_INDEX_CAPABILITY,
-    MEMORY_RETRIEVE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
+    DIALOGUE_EXTRACT_CAPABILITY, DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
+    MEMORY_INDEX_CAPABILITY, MEMORY_RETRIEVE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -21,19 +21,20 @@ use yuukei_extension::{
     ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, YuukeiExtension,
 };
 use yuukei_protocol::{
-    new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget,
-    DialogueGenerateConstraints, DialogueGenerateEvent, DialogueGenerateInput,
-    DialogueGenerateOutput, DialogueGeneratePersona, DialogueGenerateRecentContext,
-    DialogueInterpretInput, DialogueInterpretOutput, DialogueInterpretTextInput, EventLogRecord,
-    ExtensionHookPoint, JsonMap, MemoryIndexEvent, MemoryIndexInput, MemoryIndexOutput,
-    MemoryRetrieveInput, MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery,
-    MoodEvaluateInput, MoodEvaluateOutput, NewEventLogRecord, ResidentSnapshot, RuntimeCommand,
-    RuntimeEvent, SignalAliasTable, SurfaceSession,
+    new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget, DialogueExtractInput,
+    DialogueExtractOutput, DialogueGenerateConstraints, DialogueGenerateEvent,
+    DialogueGenerateInput, DialogueGenerateOutput, DialogueGeneratePersona,
+    DialogueGenerateRecentContext, DialogueInterpretInput, DialogueInterpretOutput,
+    DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryIndexEvent,
+    MemoryIndexInput, MemoryIndexOutput, MemoryRetrieveInput, MemoryRetrieveLimits,
+    MemoryRetrieveOutput, MemoryRetrieveQuery, MoodEvaluateInput, MoodEvaluateOutput,
+    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
+    SurfaceSession,
 };
 use yuukei_world::{
-    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonGenerateRequest,
-    DaihonGenerateResponse, DaihonInterpretHandler, DaihonInterpretRequest, WorldError, WorldPack,
-    YuukeiDaihonAdapter,
+    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonExtractRequest,
+    DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler, DaihonInterpretRequest,
+    WorldError, WorldPack, YuukeiDaihonAdapter,
 };
 
 #[derive(Debug, Error)]
@@ -1976,6 +1977,78 @@ impl ResidentHome {
         }
     }
 
+    async fn extract_dialogue(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonExtractRequest,
+    ) -> Result<String> {
+        self.set_interpretation_in_flight(true)?;
+        let result = self
+            .invoke_dialogue_extract(source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string());
+        self.set_interpretation_in_flight(false)?;
+        Ok(result)
+    }
+
+    async fn invoke_dialogue_extract(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonExtractRequest,
+    ) -> Result<String> {
+        let input = DialogueExtractInput {
+            instruction: request.instruction,
+            input: DialogueInterpretTextInput {
+                text: request.input_text,
+            },
+        };
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: DIALOGUE_EXTRACT_CAPABILITY.to_string(),
+            method: "extract".to_string(),
+            resident_id: source_event.resident_id.clone(),
+            actor_id: None,
+            input: json_map_from_value(serde_json::to_value(input)?),
+            context: None,
+        };
+        self.record_capability_request(&invocation, source_event, None)?;
+
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let result = timeout(
+            DIALOGUE_INTERPRET_TIMEOUT,
+            router.invoke(invocation.clone()),
+        )
+        .await;
+        let Ok(Ok(result)) = result else {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        };
+
+        self.record_capability_result(
+            result.invocation_id,
+            result.extension_id,
+            result.capability,
+            result.output.clone(),
+            result.metadata,
+            source_event,
+            None,
+            None,
+        )?;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<DialogueExtractOutput>(output_value) else {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        };
+        let value = output.value.trim();
+        if output.found && !value.is_empty() && value.chars().count() <= 100 {
+            Ok(value.to_string())
+        } else {
+            Ok(UNKNOWN_INTERPRETATION.to_string())
+        }
+    }
+
     fn set_interpretation_in_flight(&self, in_flight: bool) -> Result<()> {
         let mut state = self
             .state
@@ -2164,6 +2237,13 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
             .generate_dialogue_for_daihon(&self.source_event, request)
             .await
             .unwrap_or(None)
+    }
+
+    async fn extract(&mut self, request: DaihonExtractRequest) -> String {
+        self.home
+            .extract_dialogue(&self.source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
 }
 

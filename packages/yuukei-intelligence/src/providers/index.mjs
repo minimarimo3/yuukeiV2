@@ -1,11 +1,13 @@
 import {
   generateWithGemini,
+  extractWithGemini,
   interpretWithGemini,
   evaluateMoodWithGemini,
   summarizeMemoryIndexWithGemini
 } from "./gemini.mjs";
 import {
   evaluateMoodWithOpenAiCompatible,
+  extractWithOpenAiCompatible,
   generateWithOpenAiCompatible,
   interpretWithOpenAiCompatible,
   summarizeMemoryIndexWithOpenAiCompatible
@@ -14,12 +16,14 @@ import {
 export const providers = {
   gemini: {
     generate: generateWithGemini,
+    extract: extractWithGemini,
     interpret: interpretWithGemini,
     evaluateMood: evaluateMoodWithGemini,
     summarizeMemoryIndex: summarizeMemoryIndexWithGemini
   },
   "openai-compatible": {
     generate: generateWithOpenAiCompatible,
+    extract: extractWithOpenAiCompatible,
     interpret: interpretWithOpenAiCompatible,
     evaluateMood: evaluateMoodWithOpenAiCompatible,
     summarizeMemoryIndex: summarizeMemoryIndexWithOpenAiCompatible
@@ -51,6 +55,15 @@ export async function interpretWithProvider(input, config) {
     return { output: { choice: "不明" }, metadata: { provider: config.provider } };
   }
   return provider.interpret(input, config);
+}
+
+export async function extractWithProvider(input, config) {
+  const provider = providers[config.provider];
+  if (!provider?.extract) {
+    console.error(`yuukei-intelligence: unknown provider: ${config.provider}`);
+    return { output: { found: false, value: "不明" }, metadata: { provider: config.provider } };
+  }
+  return provider.extract(input, config);
 }
 
 export async function summarizeMemoryIndexWithProvider(input, config) {

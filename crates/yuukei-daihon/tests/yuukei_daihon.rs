@@ -24,6 +24,8 @@ struct MockInterpretHandler {
     generate_responses:
         VecDeque<std::result::Result<Option<GeneratedDialogue>, DaihonRuntimeError>>,
     generate_requests: Vec<GenerateRequest>,
+    extract_responses: VecDeque<std::result::Result<String, DaihonRuntimeError>>,
+    extract_requests: Vec<ExtractRequest>,
 }
 
 impl MockInterpretHandler {
@@ -33,6 +35,8 @@ impl MockInterpretHandler {
             requests: Vec::new(),
             generate_responses: VecDeque::new(),
             generate_requests: Vec::new(),
+            extract_responses: VecDeque::new(),
+            extract_requests: Vec::new(),
         }
     }
 
@@ -46,6 +50,34 @@ impl MockInterpretHandler {
             requests: Vec::new(),
             generate_responses: responses.into_iter().collect(),
             generate_requests: Vec::new(),
+            extract_responses: VecDeque::new(),
+            extract_requests: Vec::new(),
+        }
+    }
+
+    fn with_extract_responses(responses: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            responses: VecDeque::new(),
+            requests: Vec::new(),
+            generate_responses: VecDeque::new(),
+            generate_requests: Vec::new(),
+            extract_responses: responses.into_iter().map(Ok).collect(),
+            extract_requests: Vec::new(),
+        }
+    }
+
+    fn with_extract_error() -> Self {
+        Self {
+            responses: VecDeque::new(),
+            requests: Vec::new(),
+            generate_responses: VecDeque::new(),
+            generate_requests: Vec::new(),
+            extract_responses: VecDeque::from([Err(DaihonRuntimeError::new(
+                "E-TEST-EXTRACT",
+                "extract failed",
+                Span::empty(),
+            ))]),
+            extract_requests: Vec::new(),
         }
     }
 
@@ -59,6 +91,8 @@ impl MockInterpretHandler {
             requests: Vec::new(),
             generate_responses: VecDeque::new(),
             generate_requests: Vec::new(),
+            extract_responses: VecDeque::new(),
+            extract_requests: Vec::new(),
         }
     }
 }
@@ -78,6 +112,13 @@ impl InterpretHandler for MockInterpretHandler {
     ) -> Result<Option<GeneratedDialogue>, DaihonRuntimeError> {
         self.generate_requests.push(request);
         self.generate_responses.pop_front().unwrap_or(Ok(None))
+    }
+
+    async fn extract(&mut self, request: ExtractRequest) -> Result<String, DaihonRuntimeError> {
+        self.extract_requests.push(request);
+        self.extract_responses
+            .pop_front()
+            .unwrap_or_else(|| Ok(UNKNOWN_INTERPRETATION.to_string()))
     }
 }
 
@@ -174,6 +215,23 @@ fn registry() -> FunctionRegistry {
             },
             ParamSpec {
                 name: Some("選択肢".to_owned()),
+                ty: ParamType::String,
+                required: true,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: Some(ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: EXTRACT_FUNCTION_NAME.to_owned(),
+        positional: vec![
+            ParamSpec {
+                name: Some("入力".to_owned()),
+                ty: ParamType::Any,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("指示".to_owned()),
                 ty: ParamType::String,
                 required: true,
             },
@@ -913,6 +971,154 @@ async fn runtime_interpret_limit_returns_unknown_and_warns() {
         .any(|diagnostic| diagnostic.code == "W-DHN-RUN-050"));
     assert_eq!(action.dialogues[0].1, "一回目既知");
     assert_eq!(action.dialogues[1].1, "二回目不明");
+}
+
+#[tokio::test]
+async fn runtime_extract_success_assigns_value_and_error_becomes_unknown() {
+    let script = parse_script(
+        r#"
+## 抽出
+### 通常
+全体#呼び名=＜抽出 (入力#ユーザー発言) 「ユーザーの呼び名」＞
+「＜全体#呼び名＞」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_extract_responses(["ミナ".to_string()]);
+    let mut variables = InMemoryVariableStore::new().with_input(
+        "ユーザー発言",
+        DaihonValue::String("ミナって呼んで".to_string()),
+    );
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(
+        interpret.extract_requests[0].instruction,
+        "ユーザーの呼び名"
+    );
+    assert_eq!(
+        variables.values().get("全体#呼び名"),
+        Some(&DaihonValue::String("ミナ".to_string()))
+    );
+    assert_eq!(action.dialogues[0].1, "ミナ");
+
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_extract_error();
+    let mut variables = InMemoryVariableStore::new().with_input(
+        "ユーザー発言",
+        DaihonValue::String("ミナって呼んで".to_string()),
+    );
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(
+        variables.values().get("全体#呼び名"),
+        Some(&DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
+    );
+}
+
+#[tokio::test]
+async fn runtime_interpret_and_extract_share_dispatch_limit() {
+    let script = parse_script(
+        r#"
+## 抽出上限
+### 通常
+一=＜解釈 (入力#ユーザー発言) 「一？」 「はい/いいえ」＞
+※（一 = 「不明」）なら:
+「一不明」
+※それ以外:
+「一既知」
+おわり
+二=＜解釈 (入力#ユーザー発言) 「二？」 「はい/いいえ」＞
+※（二 = 「不明」）なら:
+「二不明」
+※それ以外:
+「二既知」
+おわり
+三=＜解釈 (入力#ユーザー発言) 「三？」 「はい/いいえ」＞
+※（三 = 「不明」）なら:
+「三不明」
+※それ以外:
+「三既知」
+おわり
+四=＜解釈 (入力#ユーザー発言) 「四？」 「はい/いいえ」＞
+※（四 = 「不明」）なら:
+「四不明」
+※それ以外:
+「四既知」
+おわり
+全体#呼び名=＜抽出 (入力#ユーザー発言) 「ユーザーの呼び名」＞
+「＜全体#呼び名＞」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler {
+        responses: VecDeque::from([
+            Ok("はい".to_string()),
+            Ok("はい".to_string()),
+            Ok("はい".to_string()),
+            Ok("はい".to_string()),
+        ]),
+        requests: Vec::new(),
+        generate_responses: VecDeque::new(),
+        generate_requests: Vec::new(),
+        extract_responses: VecDeque::from([Ok("ミナ".to_string())]),
+        extract_requests: Vec::new(),
+    };
+    let mut variables = InMemoryVariableStore::new().with_input(
+        "ユーザー発言",
+        DaihonValue::String("ミナって呼んで".to_string()),
+    );
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(interpret.requests.len(), 4);
+    assert!(interpret.extract_requests.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "W-DHN-RUN-053"
+            && diagnostic.message == "`抽出` の呼び出し回数が上限を超えました。"
+    }));
+    assert_eq!(
+        variables.values().get("全体#呼び名"),
+        Some(&DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
+    );
 }
 
 #[tokio::test]

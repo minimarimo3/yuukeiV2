@@ -18,6 +18,7 @@ use crate::value::{DaihonNumber, DaihonValue};
 use crate::variable::{builtin_time_value, VariableRef, VariableStore};
 
 pub const INTERPRET_FUNCTION_NAME: &str = "解釈";
+pub const EXTRACT_FUNCTION_NAME: &str = "抽出";
 pub const GENERATE_FUNCTION_NAME: &str = "生成";
 pub const UNKNOWN_INTERPRETATION: &str = "不明";
 pub const DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH: usize = 4;
@@ -64,6 +65,12 @@ pub struct InterpretRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractRequest {
+    pub input_text: String,
+    pub instruction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateRequest {
     pub instruction: String,
     pub speaker_id: Option<String>,
@@ -72,6 +79,10 @@ pub struct GenerateRequest {
 #[async_trait]
 pub trait InterpretHandler {
     async fn interpret(&mut self, request: InterpretRequest) -> Result<String, DaihonRuntimeError>;
+
+    async fn extract(&mut self, _request: ExtractRequest) -> Result<String, DaihonRuntimeError> {
+        Ok(UNKNOWN_INTERPRETATION.to_string())
+    }
 
     async fn generate(
         &mut self,
@@ -831,6 +842,9 @@ where
         if function.name.value == INTERPRET_FUNCTION_NAME {
             return self.call_interpret(function, positional, named).await;
         }
+        if function.name.value == EXTRACT_FUNCTION_NAME {
+            return self.call_extract(function, positional, named).await;
+        }
         if function.name.value == GENERATE_FUNCTION_NAME {
             return self
                 .call_generate(function, speaker, positional, named)
@@ -883,6 +897,36 @@ where
         } else {
             Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
         }
+    }
+
+    async fn call_extract(
+        &mut self,
+        function: &FunctionCall,
+        positional: Vec<DaihonValue>,
+        named: BTreeMap<String, DaihonValue>,
+    ) -> Result<DaihonValue, DaihonRuntimeError> {
+        if !named.is_empty() || positional.len() < 2 {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        if self.interpretation_count >= self.options.max_interpretations_per_dispatch {
+            self.diagnostics.push(DaihonDiagnostic::warning(
+                "W-DHN-RUN-053",
+                "`抽出` の呼び出し回数が上限を超えました。",
+                function.span,
+            ));
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        self.interpretation_count += 1;
+
+        let request = ExtractRequest {
+            input_text: positional[0].to_display_string(),
+            instruction: positional[1].to_display_string(),
+        };
+        let Ok(value) = self.interpret_handler.extract(request).await else {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        };
+        let value = normalize_extract_value(&value);
+        Ok(DaihonValue::String(value.to_string()))
     }
 
     async fn call_generate(
@@ -968,6 +1012,15 @@ pub fn parse_interpret_choices(text: &str) -> Vec<String> {
         .filter(|choice| !choice.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+pub fn normalize_extract_value(text: &str) -> &str {
+    let value = text.trim();
+    if value.is_empty() || value.chars().count() > 100 {
+        UNKNOWN_INTERPRETATION
+    } else {
+        value
+    }
 }
 
 fn number_overflow_error(span: Span) -> DaihonRuntimeError {

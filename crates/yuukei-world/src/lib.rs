@@ -13,10 +13,11 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use yuukei_daihon::{
     has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
-    DaihonRuntimeError, DaihonValue, FunctionRegistry, FunctionSpec, GenerateRequest,
-    GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest, Interpreter,
-    ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script, Severity as DaihonSeverity, Span,
-    Spanned, Stmt, SystemEvent, ValidationMode, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
+    DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
+    GenerateRequest, GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest,
+    Interpreter, ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script,
+    Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
+    EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -327,6 +328,12 @@ pub struct DaihonInterpretRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonExtractRequest {
+    pub input_text: String,
+    pub instruction: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaihonGenerateRequest {
     pub instruction: String,
     pub speaker_id: Option<String>,
@@ -342,6 +349,10 @@ pub struct DaihonGenerateResponse {
 #[async_trait]
 pub trait DaihonInterpretHandler: Send {
     async fn interpret(&mut self, request: DaihonInterpretRequest) -> String;
+
+    async fn extract(&mut self, _request: DaihonExtractRequest) -> String {
+        yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+    }
 
     async fn generate(
         &mut self,
@@ -399,6 +410,7 @@ pub struct YuukeiDaihonAdapter {
 struct YuukeiDaihonState {
     scripts: Vec<LoadedDaihonScript>,
     variables: BTreeMap<String, DaihonValue>,
+    variables_storage: YuukeiVariableStorage,
     history: YuukeiSceneHistory,
 }
 
@@ -409,6 +421,14 @@ pub struct SceneHistoryPersistenceError {
 }
 
 pub type SceneHistoryErrorLogger = Arc<dyn Fn(SceneHistoryPersistenceError) + Send + Sync>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VariablePersistenceError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+pub type VariableErrorLogger = Arc<dyn Fn(VariablePersistenceError) + Send + Sync>;
 
 impl YuukeiDaihonAdapter {
     pub fn with_persistent_scene_history(path: impl Into<PathBuf>) -> Self {
@@ -427,6 +447,40 @@ impl YuukeiDaihonAdapter {
         Self {
             state: Mutex::new(YuukeiDaihonState {
                 history: YuukeiSceneHistory::persistent(path.into(), Some(error_logger)),
+                ..YuukeiDaihonState::default()
+            }),
+        }
+    }
+
+    pub fn with_persistent_state(
+        scene_history_path: impl Into<PathBuf>,
+        variables_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(YuukeiDaihonState {
+                history: YuukeiSceneHistory::persistent(scene_history_path.into(), None),
+                variables_storage: YuukeiVariableStorage::persistent(variables_path.into(), None),
+                ..YuukeiDaihonState::default()
+            }),
+        }
+    }
+
+    pub fn with_persistent_state_loggers(
+        scene_history_path: impl Into<PathBuf>,
+        scene_history_error_logger: SceneHistoryErrorLogger,
+        variables_path: impl Into<PathBuf>,
+        variable_error_logger: VariableErrorLogger,
+    ) -> Self {
+        Self {
+            state: Mutex::new(YuukeiDaihonState {
+                history: YuukeiSceneHistory::persistent(
+                    scene_history_path.into(),
+                    Some(scene_history_error_logger),
+                ),
+                variables_storage: YuukeiVariableStorage::persistent(
+                    variables_path.into(),
+                    Some(variable_error_logger),
+                ),
                 ..YuukeiDaihonState::default()
             }),
         }
@@ -651,6 +705,198 @@ struct StoredLastScene {
 }
 
 #[derive(Clone, Debug)]
+struct YuukeiVariableStorage {
+    values: BTreeMap<String, DaihonValue>,
+    storage: VariableStorage,
+}
+
+impl Default for YuukeiVariableStorage {
+    fn default() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            storage: VariableStorage::Memory,
+        }
+    }
+}
+
+impl YuukeiVariableStorage {
+    fn persistent(path: PathBuf, error_logger: Option<VariableErrorLogger>) -> Self {
+        let storage = VariableStorage::File { path, error_logger };
+        let mut variables = Self {
+            storage,
+            ..Self::default()
+        };
+        variables.load_from_storage();
+        variables
+    }
+
+    fn reload(&mut self) {
+        if matches!(self.storage, VariableStorage::File { .. }) {
+            self.values.clear();
+            self.load_from_storage();
+        }
+    }
+
+    fn load_from_storage(&mut self) {
+        let VariableStorage::File { path, .. } = &self.storage else {
+            return;
+        };
+        match fs::read_to_string(path) {
+            Ok(raw) => match serde_json::from_str::<StoredVariables>(&raw) {
+                Ok(stored) if stored.version == 1 => {
+                    self.values = stored.variables;
+                }
+                Ok(stored) => {
+                    self.report_storage_error(format!(
+                        "unsupported variables schema version: {}",
+                        stored.version
+                    ));
+                }
+                Err(error) => {
+                    self.report_storage_error(format!("invalid variables JSON: {error}"));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.report_storage_error(format!("failed to read variables: {error}"));
+            }
+        }
+    }
+
+    fn set_values(&mut self, values: BTreeMap<String, DaihonValue>) {
+        self.values = persistent_variables(values);
+    }
+
+    fn save_if_changed(&mut self, values: &BTreeMap<String, DaihonValue>) {
+        let persistent = persistent_variables(values.clone());
+        if persistent == self.values {
+            return;
+        }
+        self.values = persistent;
+        self.save_to_storage();
+    }
+
+    fn save_to_storage(&self) {
+        let VariableStorage::File { path, .. } = &self.storage else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                self.report_storage_error(format!("failed to create variables directory: {error}"));
+                return;
+            }
+        }
+        let stored = StoredVariables {
+            version: 1,
+            variables: self.values.clone(),
+        };
+        let bytes = match serde_json::to_vec_pretty(&stored) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.report_storage_error(format!("failed to encode variables: {error}"));
+                return;
+            }
+        };
+        let temporary_path = path.with_extension("json.tmp");
+        if let Err(error) = fs::write(&temporary_path, bytes) {
+            self.report_storage_error(format!("failed to write temporary variables: {error}"));
+            return;
+        }
+        if let Err(error) = fs::rename(&temporary_path, path) {
+            self.report_storage_error(format!("failed to replace variables: {error}"));
+        }
+    }
+
+    fn report_storage_error(&self, message: String) {
+        if let VariableStorage::File { path, error_logger } = &self.storage {
+            let error = VariablePersistenceError {
+                path: path.clone(),
+                message,
+            };
+            if let Some(error_logger) = error_logger {
+                error_logger(error);
+            } else {
+                eprintln!(
+                    "variables persistence error at {}: {}",
+                    error.path.display(),
+                    error.message
+                );
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum VariableStorage {
+    Memory,
+    File {
+        path: PathBuf,
+        error_logger: Option<VariableErrorLogger>,
+    },
+}
+
+impl fmt::Debug for VariableStorage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory => formatter.write_str("Memory"),
+            Self::File { path, .. } => formatter
+                .debug_struct("File")
+                .field("path", path)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct StoredVariables {
+    version: u32,
+    #[serde(default)]
+    variables: BTreeMap<String, DaihonValue>,
+}
+
+fn persistent_variables(values: BTreeMap<String, DaihonValue>) -> BTreeMap<String, DaihonValue> {
+    values
+        .into_iter()
+        .filter(|(key, _)| is_persistent_variable_key(key))
+        .collect()
+}
+
+fn is_persistent_variable_key(key: &str) -> bool {
+    let parts = key.split('#').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["全体", name] => !name.is_empty(),
+        ["住人", actor, name] => !actor.is_empty() && !name.is_empty(),
+        ["関係", subject, object, name] => {
+            !subject.is_empty() && !object.is_empty() && !name.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn merge_initial_and_persistent_variables(
+    initial: BTreeMap<String, DaihonValue>,
+    persistent: &BTreeMap<String, DaihonValue>,
+    storage: &YuukeiVariableStorage,
+) -> BTreeMap<String, DaihonValue> {
+    let mut variables = initial.clone();
+    for (key, value) in persistent {
+        match initial.get(key) {
+            Some(initial_value) if initial_value.value_type() != value.value_type() => {
+                storage.report_storage_error(format!(
+                    "persistent variable {key} has type {:?}, initial value has type {:?}; using initial value",
+                    value.value_type(),
+                    initial_value.value_type()
+                ));
+            }
+            _ => {
+                variables.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    variables
+}
+
+#[derive(Clone, Debug)]
 struct LoadedDaihonScript {
     path: String,
     script: Script,
@@ -704,7 +950,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             });
         }
 
-        let variables = world
+        let initial_variables = world
             .initial_variables
             .iter()
             .filter_map(|(key, value)| {
@@ -712,8 +958,18 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             })
             .collect();
         let mut state = self.state.lock().await;
+        state.variables_storage.reload();
+        let variables = merge_initial_and_persistent_variables(
+            initial_variables,
+            &state.variables_storage.values,
+            &state.variables_storage,
+        );
         state.scripts = scripts;
         state.variables = variables;
+        let variables_snapshot = state.variables.clone();
+        state
+            .variables_storage
+            .set_values(persistent_variables(variables_snapshot));
         state.history.reload();
         Ok(())
     }
@@ -794,6 +1050,10 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         let next_variables = variables.into_values();
         let variable_patches = diff_variable_patches(&previous_variables, &next_variables);
         state.variables = next_variables;
+        if !variable_patches.is_empty() {
+            let variables_snapshot = state.variables.clone();
+            state.variables_storage.save_if_changed(&variables_snapshot);
+        }
 
         Ok(DaihonDispatchResult {
             commands,
@@ -845,6 +1105,19 @@ impl InterpretHandler for YuukeiInterpretBridge<'_> {
                 expression: response.expression,
                 motion: response.motion,
             }))
+    }
+
+    async fn extract(
+        &mut self,
+        request: ExtractRequest,
+    ) -> std::result::Result<String, DaihonRuntimeError> {
+        Ok(self
+            .interpret_handler
+            .extract(DaihonExtractRequest {
+                input_text: request.input_text,
+                instruction: request.instruction,
+            })
+            .await)
     }
 }
 
@@ -1283,6 +1556,23 @@ fn yuukei_function_registry() -> FunctionRegistry {
         return_type: Some(yuukei_daihon::ValueType::String),
     });
     registry.register(FunctionSpec {
+        name: EXTRACT_FUNCTION_NAME.to_string(),
+        positional: vec![
+            ParamSpec {
+                name: Some("入力".to_string()),
+                ty: ParamType::Any,
+                required: true,
+            },
+            ParamSpec {
+                name: Some("指示".to_string()),
+                ty: ParamType::String,
+                required: true,
+            },
+        ],
+        named: BTreeMap::new(),
+        return_type: Some(yuukei_daihon::ValueType::String),
+    });
+    registry.register(FunctionSpec {
         name: GENERATE_FUNCTION_NAME.to_string(),
         positional: vec![
             ParamSpec {
@@ -1676,6 +1966,17 @@ mod tests {
         let adapter = YuukeiDaihonAdapter::with_persistent_scene_history(history_path);
         adapter.load_world(world).await?;
         adapter.dispatch(&talk_impulse_event(event_id), world).await
+    }
+
+    async fn dispatch_with_state(
+        world: &WorldPack,
+        history_path: &Path,
+        variables_path: &Path,
+        event: RuntimeEvent,
+    ) -> Result<DaihonDispatchResult> {
+        let adapter = YuukeiDaihonAdapter::with_persistent_state(history_path, variables_path);
+        adapter.load_world(world).await?;
+        adapter.dispatch(&event, world).await
     }
 
     #[test]
@@ -2385,6 +2686,160 @@ mod tests {
 
         let result = dispatch_with_history(&world, &history_path, "evt_corrupt_1").await?;
         assert_eq!(result.executed_scenes[0].scene_name, "初回だけ");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_variables_round_trip_after_reopen() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let variables_path = dir.path().join("variables.json");
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 保存
+合図: ＠presence.talk_impulse
+全体#呼び名=入力#ユーザー発言
+「保存しました。」
+"#,
+        );
+        let mut event = talk_impulse_event("evt_variables_save");
+        event.payload.insert("text".to_string(), json!("ミナ"));
+
+        let first = dispatch_with_state(&world, &history_path, &variables_path, event).await?;
+        assert_eq!(first.variable_patches.len(), 1);
+        assert!(variables_path.exists());
+
+        let read_world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 読む
+合図: ＠presence.talk_impulse
+「呼び名は＜全体#呼び名＞です。」
+"#,
+        );
+        let second = dispatch_with_state(
+            &read_world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_variables_read"),
+        )
+        .await?;
+        assert_eq!(second.commands[0].payload["text"], "呼び名はミナです。");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_variables_ignore_corrupt_json() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let variables_path = dir.path().join("variables.json");
+        fs::write(&variables_path, "{broken json")?;
+        let world = world_with_script(
+            r#"
+## presence.talk_impulse
+初期値:
+全体#呼び名=「初期」
+### 初期
+合図: ＠presence.talk_impulse
+「呼び名は＜全体#呼び名＞です。」
+"#,
+        );
+
+        let result = dispatch_with_state(
+            &world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_corrupt_variables"),
+        )
+        .await?;
+        assert_eq!(result.commands[0].payload["text"], "呼び名は初期です。");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_variables_win_over_same_type_initial_values() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let variables_path = dir.path().join("variables.json");
+        let save_world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 保存
+合図: ＠presence.talk_impulse
+全体#呼び名=「ミナ」
+「保存しました。」
+"#,
+        );
+        dispatch_with_state(
+            &save_world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_initial_save"),
+        )
+        .await?;
+
+        let read_world = world_with_script(
+            r#"
+## presence.talk_impulse
+初期値:
+全体#呼び名=「初期」
+### 読む
+合図: ＠presence.talk_impulse
+「呼び名は＜全体#呼び名＞です。」
+"#,
+        );
+        let result = dispatch_with_state(
+            &read_world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_initial_read"),
+        )
+        .await?;
+        assert_eq!(result.commands[0].payload["text"], "呼び名はミナです。");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn initial_value_wins_when_persistent_variable_type_differs() -> Result<()> {
+        let dir = tempdir()?;
+        let history_path = dir.path().join("scene-history.json");
+        let variables_path = dir.path().join("variables.json");
+        let save_world = world_with_script(
+            r#"
+## presence.talk_impulse
+### 保存
+合図: ＠presence.talk_impulse
+全体#呼び名=「ミナ」
+「保存しました。」
+"#,
+        );
+        dispatch_with_state(
+            &save_world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_type_save"),
+        )
+        .await?;
+
+        let read_world = world_with_script(
+            r#"
+## presence.talk_impulse
+初期値:
+全体#呼び名=1
+### 読む
+合図: ＠presence.talk_impulse
+「呼び名は＜全体#呼び名＞です。」
+"#,
+        );
+        let result = dispatch_with_state(
+            &read_world,
+            &history_path,
+            &variables_path,
+            talk_impulse_event("evt_type_read"),
+        )
+        .await?;
+        assert_eq!(result.commands[0].payload["text"], "呼び名は1です。");
         Ok(())
     }
 

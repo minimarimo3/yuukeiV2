@@ -19,7 +19,7 @@
   },
   "capabilities": {
     "required": [],
-    "optional": ["dialogue.interpret", "dialogue.generate"]
+    "optional": ["dialogue.interpret", "dialogue.extract", "dialogue.generate"]
   },
   "daihon": {
     "scripts": ["scripts/interpret_demo.daihon"]

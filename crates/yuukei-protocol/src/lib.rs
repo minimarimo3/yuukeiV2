@@ -779,6 +779,22 @@ pub struct DialogueInterpretOutput {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueExtractInput {
+    pub instruction: String,
+    pub input: DialogueInterpretTextInput,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct DialogueExtractOutput {
+    pub found: bool,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct MemoryIndexInput {
     pub resident_id: String,
     pub world_pack_id: String,

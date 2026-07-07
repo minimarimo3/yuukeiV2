@@ -6,6 +6,10 @@ export function unknownChoiceOutput() {
   return { choice: "不明" };
 }
 
+export function unknownExtractOutput() {
+  return { found: false, value: "不明" };
+}
+
 export function memoryIndexFailureOutput() {
   return { indexed: false };
 }
@@ -54,6 +58,17 @@ export function normalizeInterpretOutput(value, choices = []) {
   return output;
 }
 
+export function normalizeExtractOutput(value) {
+  if (!value || typeof value !== "object" || value.found !== true) {
+    return unknownExtractOutput();
+  }
+  const text = typeof value.value === "string" ? value.value.trim() : "";
+  if (!text || text.length > 100) {
+    return unknownExtractOutput();
+  }
+  return { found: true, value: text };
+}
+
 export function parseJsonOutput(text, maxLength) {
   if (typeof text !== "string" || !text.trim()) {
     return silentOutput();
@@ -92,6 +107,26 @@ export function parseJsonInterpretOutput(text, choices) {
     `yuukei-intelligence: failed to parse provider JSON: ${lastError?.message ?? "no JSON object found"}`
   );
   return unknownChoiceOutput();
+}
+
+export function parseJsonExtractOutput(text) {
+  if (typeof text !== "string" || !text.trim()) {
+    return unknownExtractOutput();
+  }
+  const candidates = [stripCodeFence(text), extractJsonObject(text)].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+  let lastError;
+  for (const candidate of uniqueCandidates) {
+    try {
+      return normalizeExtractOutput(JSON.parse(candidate));
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.error(
+    `yuukei-intelligence: failed to parse extract JSON: ${lastError?.message ?? "no JSON object found"}`
+  );
+  return unknownExtractOutput();
 }
 
 export function parseJsonMemoryIndexOutput(text) {
@@ -223,6 +258,8 @@ export function capabilityResult(invocation, output, metadata = {}) {
   let normalizedOutput;
   if (capability === "dialogue.interpret") {
     normalizedOutput = normalizeInterpretOutput(output, invocation?.input?.choices);
+  } else if (capability === "dialogue.extract") {
+    normalizedOutput = normalizeExtractOutput(output);
   } else if (capability === "memory.index") {
     normalizedOutput = normalizeMemoryIndexCapabilityOutput(output);
   } else if (capability === "memory.retrieve") {

@@ -20,6 +20,12 @@
       ]
     },
     {
+      "capability": "dialogue.extract",
+      "methods": [
+        "extract"
+      ]
+    },
+    {
       "capability": "memory.index",
       "methods": [
         "index"

@@ -242,7 +242,19 @@ impl VariableStore for InMemoryVariableStore {
             ));
         }
         let key = Self::key(reference);
-        self.values.entry(key).or_insert(value);
+        match self.values.get(&key) {
+            Some(existing)
+                if existing.value_type() != ValueType::None
+                    && value.value_type() != ValueType::None
+                    && existing.value_type() != value.value_type() =>
+            {
+                self.values.insert(key, value);
+            }
+            Some(_) => {}
+            None => {
+                self.values.insert(key, value);
+            }
+        }
         Ok(())
     }
 

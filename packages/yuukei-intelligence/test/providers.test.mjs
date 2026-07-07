@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
-import { evaluateMoodWithGemini, generateWithGemini, interpretWithGemini } from "../src/providers/gemini.mjs";
+import {
+  evaluateMoodWithGemini,
+  extractWithGemini,
+  generateWithGemini,
+  interpretWithGemini
+} from "../src/providers/gemini.mjs";
 import {
   evaluateMoodWithOpenAiCompatible,
+  extractWithOpenAiCompatible,
   generateWithOpenAiCompatible,
   interpretWithOpenAiCompatible
 } from "../src/providers/openai-compatible.mjs";
@@ -39,6 +45,11 @@ const sampleInterpretInput = {
   question: "返事は肯定ですか？",
   choices: ["はい", "いいえ"],
   input: { text: "あ〜うん。いやちょっと忙しくて..." }
+};
+
+const sampleExtractInput = {
+  instruction: "ユーザーの呼び名",
+  input: { text: "ミナって呼んで" }
 };
 
 const sampleMoodInput = {
@@ -612,6 +623,34 @@ test("gemini returns speak false for missing key, API errors, timeout, and inval
   });
 });
 
+test("openai-compatible extracts free-form value", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      choices: [{ message: { content: JSON.stringify({ found: true, value: "ミナ" }) } }]
+    });
+  };
+  try {
+    const result = await extractWithOpenAiCompatible(sampleExtractInput, {
+      timeoutMs: 1000,
+      openaiCompatible: {
+        baseUrl: "http://127.0.0.1:1234/v1",
+        model: "local-test"
+      }
+    });
+
+    assert.deepEqual(result.output, { found: true, value: "ミナ" });
+    assert.equal(calls[0].body.response_format, undefined);
+    assert.match(calls[0].body.messages[0].content, /dialogue\.extract/);
+    assert.match(calls[0].body.messages[1].content, /ユーザーの呼び名/);
+    assert.match(calls[0].body.messages[1].content, /ミナって呼んで/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("gemini interprets request and normalizes choices", async (t) => {
   await t.test("formats request and maps choice", async () => {
     const originalFetch = globalThis.fetch;
@@ -682,6 +721,29 @@ test("gemini interprets request and normalizes choices", async (t) => {
   });
 });
 
+test("gemini extracts free-form value", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init, body: JSON.parse(init.body) });
+    return response(200, {
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ found: true, value: "ミナ" }) }] } }]
+    });
+  };
+  try {
+    const result = await extractWithGemini(sampleExtractInput, {
+      timeoutMs: 1000,
+      gemini: { apiKey: "gem-key", model: "gemini-test" }
+    });
+
+    assert.deepEqual(result.output, { found: true, value: "ミナ" });
+    assert.equal(calls[0].body.generationConfig.responseSchema.properties.found.type, "BOOLEAN");
+    assert.match(calls[0].body.contents[0].parts[0].text, /ユーザーの呼び名/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("capability result preserves invocation envelope", () => {
   const result = capabilityResult(
     { id: "cap_1", capability: "dialogue.generate", input: sampleInput },
@@ -704,6 +766,28 @@ test("capability result normalizes dialogue.interpret output", () => {
   assert.equal(result.invocationId, "cap_2");
   assert.equal(result.capability, "dialogue.interpret");
   assert.deepEqual(result.output, { choice: "不明" });
+});
+
+test("capability result normalizes dialogue.extract output", () => {
+  const ok = capabilityResult(
+    { id: "cap_extract_1", capability: "dialogue.extract", input: sampleExtractInput },
+    { found: true, value: " ミナ " },
+    { provider: "test" }
+  );
+  assert.deepEqual(ok.output, { found: true, value: "ミナ" });
+
+  for (const output of [
+    { found: false, value: "ミナ" },
+    { found: true, value: "" },
+    { found: true, value: "x".repeat(101) }
+  ]) {
+    const result = capabilityResult(
+      { id: "cap_extract_2", capability: "dialogue.extract", input: sampleExtractInput },
+      output,
+      { provider: "test" }
+    );
+    assert.deepEqual(result.output, { found: false, value: "不明" });
+  }
 });
 
 test("capability result normalizes mood.evaluate output", () => {

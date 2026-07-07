@@ -98,6 +98,7 @@ pub struct RuntimePaths {
     pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
     pub scene_history_path: PathBuf,
+    pub variables_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -112,6 +113,7 @@ pub struct LocalRuntimeConfig {
     pub extension_root: PathBuf,
     pub event_log_path: PathBuf,
     pub scene_history_path: PathBuf,
+    pub variables_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -134,6 +136,10 @@ impl LocalRuntimeConfig {
                 .join("residents")
                 .join(DEFAULT_WORLD_PACK_INSTALL_ID)
                 .join("scene-history.json"),
+            variables_path: data_dir
+                .join("residents")
+                .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+                .join("variables.json"),
             app_log_path: data_dir.join("app-activity.jsonl"),
             workspace_root,
             data_dir,
@@ -150,6 +156,7 @@ impl LocalRuntimeConfig {
             extension_root: self.extension_root.clone(),
             event_log_path: self.event_log_path.clone(),
             scene_history_path: self.scene_history_path.clone(),
+            variables_path: self.variables_path.clone(),
             app_log_path: self.app_log_path.clone(),
         }
     }
@@ -949,13 +956,28 @@ impl LocalYuukeiRuntime {
                 );
             })
         };
+        let variable_logger = {
+            let logger = logger.clone();
+            Arc::new(move |error: yuukei_world::VariablePersistenceError| {
+                let _ = logger.record(
+                    "variables.persistence-error",
+                    "device-host",
+                    JsonMap::from([
+                        ("path".to_string(), json!(display_path(&error.path))),
+                        ("message".to_string(), json!(error.message)),
+                    ]),
+                );
+            })
+        };
         let home = match ResidentHome::with_parts(
             &config.resident_id,
             world,
             event_log,
-            Arc::new(YuukeiDaihonAdapter::with_persistent_scene_history_logger(
+            Arc::new(YuukeiDaihonAdapter::with_persistent_state_loggers(
                 config.scene_history_path.clone(),
                 scene_history_logger,
+                config.variables_path.clone(),
+                variable_logger,
             )),
             capabilities,
         )
@@ -1847,6 +1869,10 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         .join("residents")
         .join(DEFAULT_WORLD_PACK_INSTALL_ID)
         .join("scene-history.json");
+    let variables_path = data_dir
+        .join("residents")
+        .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+        .join("variables.json");
     let app_log_path = data_dir.join("app-activity.jsonl");
     LocalRuntimeConfig {
         install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
@@ -1857,6 +1883,7 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         extension_root,
         event_log_path,
         scene_history_path,
+        variables_path,
         app_log_path,
         data_dir,
     }
@@ -1936,6 +1963,10 @@ fn paths_payload(paths: &RuntimePaths) -> JsonMap {
         (
             "sceneHistoryPath".to_string(),
             json!(display_path(&paths.scene_history_path)),
+        ),
+        (
+            "variablesPath".to_string(),
+            json!(display_path(&paths.variables_path)),
         ),
         (
             "appLogPath".to_string(),
@@ -2555,6 +2586,10 @@ mod tests {
             .paths()
             .scene_history_path
             .ends_with("residents/default-yuukei/scene-history.json"));
+        assert!(runtime
+            .paths()
+            .variables_path
+            .ends_with("residents/default-yuukei/variables.json"));
         assert!(runtime.paths().event_log_path.exists());
         assert!(runtime
             .world_pack_status()
