@@ -10,17 +10,17 @@
 
 伺か系デスクトップ生活者として、v1の対話体験に必要な最後の機能。詳細は本書の「近距離」を参照。
 
-- [ ] 選択肢バルーン【設計必要・大物】— 住人の問いかけにクリックで答える。`解釈` のawait機構を流用
-- [ ] hitSurface(肌/服/髪)をDaihonへ接続【小物】
-- [ ] ユーザー不在/復帰の検出(`presence.idle.*`)【小物】— 「おかえりなさい」が記憶と接続できる
-- [ ] VOICEVOX読み上げ【中物】— v1に含める。provider不在・失敗時は無音でテキスト継続
+- [x] 選択肢バルーン【設計必要・大物】— 住人の問いかけにクリックで答える。`解釈` のawait機構を流用(ac1b880)
+- [x] hitSurface(肌/服/髪)をDaihonへ接続【小物】(45e5ab3)
+- [x] ユーザー不在/復帰の検出(`presence.idle.*`)【小物】— 「おかえりなさい」が記憶と接続できる(45e5ab3)
+- [x] VOICEVOX読み上げ【中物】— v1に含める。provider不在・失敗時は無音でテキスト継続(3cd6a40)
 
 ### M2: デスクトップ地形と遭遇(ウィンドウに座る・フォルダで出くわす)【設計必要・大物】
 
 「OSのUIはキャラクターにとっての地形」(01)をv1で最初に体現する層。完成条件は、default packで「Finder/ExplorerでDownloadsを開いたら、この前ダウンロードしたあんぱん画像を住人が食べていた」というsceneが書けること。4つの積み木に分解して設計する。
 
-- [ ] ウィンドウ地形の観測 — Device HostがOSのウィンドウ一覧(位置・サイズ・所有アプリ・前面変化・移動/リサイズ/消滅)を観測し、canonical signal(`desktop.window.*`)とSurface向け地形スナップショットにする。macOS: Accessibility API(要権限)+ CGWindowList、Windows: Win32 EnumWindows + WinEvents
-- [ ] 地形への配置 — actorウィンドウが対象ウィンドウの枠(上辺など)に追従して座るRuntimeCommand(`stage.perch` 系)。対象の移動・リサイズへの追従と、消滅時のフォールバック(デスクトップへ降りる)。配置はウィンドウ単位まで。フォルダ内アイコン単位の座標特定はv1では扱わない
+- [x] ウィンドウ地形の観測 — Device HostがOSのウィンドウ一覧を観測し、canonical signal(`desktop.window.*`)とSurface向け地形スナップショットにする。v1はポーリング実装(macOS: CGWindowList、Windows: EnumWindows。Windowsは実機未検証)(6adfb55)
+- [x] 地形への配置 — actorウィンドウが対象ウィンドウの枠(上辺)に追従して座るRuntimeCommand(`stage.perch` 系)。移動・リサイズ追従と消滅時のフォールバック実装済み(6adfb55)
 - [ ] フォルダ遭遇の観測 — Finder/Explorerが表示中のフォルダパスを観測(macOS: Accessibility/Scripting、Windows: IShellWindows)し、`desktop.folder.opened` を発行。パスは生のまま記録せず、Downloads/Desktop/ゴミ箱等の既知カテゴリへ正規化する
 - [ ] ダウンロード観測 — Downloadsへのファイル追加watcherから `desktop.download.completed`(ファイル名・種類カテゴリ)を発行。event logに残るため、後日のsceneが「この前ダウンロードしたもの」として参照できる(記憶と接続)
 - [ ] Daihon接続 — 別名(`フォルダ_開いた`、`ダウンロード_完了`、`窓_出現` 等)と `入力#` パラメータ、枠に座る/降りる台本構文を08へ追記
