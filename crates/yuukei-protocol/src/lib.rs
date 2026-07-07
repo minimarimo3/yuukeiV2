@@ -207,6 +207,8 @@ pub struct RuntimeEvent {
     pub surface_id: Option<String>,
     #[ts(optional)]
     pub actor_id: Option<String>,
+    #[ts(optional)]
+    pub privacy: Option<Privacy>,
 }
 
 impl RuntimeEvent {
@@ -226,6 +228,7 @@ impl RuntimeEvent {
             device_id: None,
             surface_id: None,
             actor_id: None,
+            privacy: None,
         }
     }
 }
@@ -1087,7 +1090,7 @@ impl From<RuntimeEvent> for NewEventLogRecord {
             actor_id: event.actor_id,
             payload: event.payload,
             causality: event.causality,
-            privacy: None,
+            privacy: event.privacy,
         }
     }
 }

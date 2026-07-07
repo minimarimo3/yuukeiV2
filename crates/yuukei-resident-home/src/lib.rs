@@ -208,7 +208,7 @@ impl ResidentHome {
         world_pack: WorldPack,
         event_log: EventLog,
         daihon: Arc<dyn DaihonAdapter>,
-        mut capabilities: CapabilityRouter,
+        capabilities: CapabilityRouter,
         extensions: ExtensionRegistry,
     ) -> Result<Self> {
         world_pack.validate()?;
@@ -324,6 +324,7 @@ impl ResidentHome {
             device_id: Some(session.device_id.clone()),
             surface_id: Some(session.surface_id.clone()),
             actor_id: None,
+            privacy: None,
         };
         let appended = self
             .event_log
@@ -3591,7 +3592,7 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].kind, "avatar.expression");
         assert_eq!(commands[1].kind, "dialogue.say");
-        assert!(commands[1].payload.get("speechRef").is_none());
+        assert!(!commands[1].payload.contains_key("speechRef"));
         let expression = receiver.recv().await.expect("expression broadcast");
         assert_eq!(expression.kind, "avatar.expression");
         let dialogue = receiver.recv().await.expect("dialogue broadcast");

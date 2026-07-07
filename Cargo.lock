@@ -5480,6 +5480,9 @@ name = "yuukei-desktop"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "chrono",
+ "core-foundation",
+ "core-graphics",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -5491,6 +5494,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "tokio",
+ "windows 0.61.3",
  "yuukei-device-host",
  "yuukei-protocol",
  "yuukei-resident-home",

@@ -3,8 +3,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{
@@ -16,9 +18,10 @@ use tauri::{
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, ExtensionSettingsChangeResult,
-    ExtensionSettingsState, LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState,
-    WorldPackSwitchResult, TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopWindowObservationState,
+    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
+    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate,
+    WorldPackSelectionState, WorldPackSwitchResult, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -30,6 +33,7 @@ mod audio_player;
 mod desktop_stage;
 mod idle_observer;
 mod power_observer;
+mod window_observer;
 use audio_player::AudioPlayer;
 use desktop_stage::{ActorStageAnchorReport, DesktopStageManager};
 use idle_observer::seconds_since_last_user_input;
@@ -45,6 +49,7 @@ pub struct AppState {
     surface_attached: Mutex<bool>,
     presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
     power_observer: Mutex<Option<PowerObserver>>,
+    window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,6 +162,26 @@ async fn get_extension_settings(
 async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsState, String> {
     let runtime = state.runtime.lock().await;
     runtime.app_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_observation_settings(
+    state: State<'_, AppState>,
+) -> Result<ObservationSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.observation_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn set_observation_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: ObservationSettingsUpdate,
+) -> Result<ObservationSettingsState, String> {
+    let next = LocalYuukeiRuntime::set_observation_settings_in(state.env.clone(), settings)
+        .map_err(to_message)?;
+    reconcile_window_observer(&app, &state).await?;
+    Ok(next)
 }
 
 #[tauri::command]
@@ -481,7 +506,13 @@ pub fn run() {
                 surface_attached: Mutex::new(false),
                 presence_loop: Mutex::new(None),
                 power_observer: Mutex::new(Some(power_observer)),
+                window_observer: Mutex::new(None),
             });
+            {
+                let state = app.handle().state::<AppState>();
+                tauri::async_runtime::block_on(reconcile_window_observer(app.handle(), &state))
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            }
             stage
                 .sync_surfaces(app.handle(), &asset_catalog)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
@@ -517,6 +548,8 @@ pub fn run() {
             get_world_pack_status,
             get_extension_settings,
             get_app_settings,
+            get_observation_settings,
+            set_observation_settings,
             get_capability_usage,
             list_resident_memories,
             update_resident_memory,
@@ -853,6 +886,7 @@ async fn replace_runtime(
         let mut power_observer = state.power_observer.lock().await;
         let _previous = power_observer.replace(next_power_observer);
     }
+    reconcile_window_observer(&app, &state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -929,6 +963,7 @@ async fn replace_runtime_snapshot(
         let mut power_observer = state.power_observer.lock().await;
         let _previous = power_observer.replace(next_power_observer);
     }
+    reconcile_window_observer(&app, &state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -954,6 +989,103 @@ async fn ensure_presence_loop(
 
 fn spawn_desktop_presence_loop(runtime: &LocalYuukeiRuntime) -> tokio::task::JoinHandle<()> {
     runtime.spawn_presence_loop_with_idle_sampler(seconds_since_last_user_input)
+}
+
+async fn reconcile_window_observer(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    let runtime = state.runtime.lock().await.clone();
+    let settings = runtime.observation_settings().map_err(to_message)?;
+    let enabled = window_observer::observation_loop_enabled(&settings);
+    state.stage.set_window_observation_enabled(enabled)?;
+    let mut current = state.window_observer.lock().await;
+    match (enabled, current.is_some()) {
+        (true, false) => {
+            *current = Some(spawn_window_observer(
+                app.clone(),
+                runtime,
+                state.stage.clone(),
+            ));
+        }
+        (false, true) => {
+            if let Some(previous) = current.take() {
+                previous.abort();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn spawn_window_observer(
+    app: AppHandle,
+    runtime: LocalYuukeiRuntime,
+    stage: Arc<DesktopStageManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut state = DesktopWindowObservationState::default();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let observations = window_observer::collect_desktop_windows();
+            match stage.apply_window_terrain(&app, &observations) {
+                Ok(ended) => {
+                    for event in ended {
+                        if let Err(error) = runtime
+                            .emit_stage_perch_ended(
+                                &event.actor_id,
+                                &event.window_key,
+                                event.reason,
+                            )
+                            .await
+                        {
+                            let _ = runtime.logger().record(
+                                "stage.perch.ended.error",
+                                "device-host",
+                                serde_json::json!({
+                                    "actorId": event.actor_id,
+                                    "windowKey": event.window_key,
+                                    "message": error.to_string()
+                                })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = runtime.logger().record(
+                        "desktop.window.terrain.error",
+                        "device-host",
+                        serde_json::json!({ "message": error })
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    );
+                }
+            }
+            for transition in state.update(Utc::now(), observations) {
+                if let Err(error) = runtime.emit_desktop_window_transition(transition).await {
+                    let _ = runtime.logger().record(
+                        "desktop.window.event.error",
+                        "device-host",
+                        serde_json::json!({ "message": error.to_string() })
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    );
+                }
+            }
+        }
+    })
 }
 
 async fn attach_tauri_surface_or_status(

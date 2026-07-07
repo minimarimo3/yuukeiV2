@@ -17,9 +17,9 @@ use yuukei_event_log::{EventLog, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
     new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
-    MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, ResidentSnapshot,
-    RuntimeCommand, RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer,
-    SurfaceSession,
+    MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, Privacy,
+    ResidentSnapshot, RetentionPolicy, RuntimeCommand, RuntimeEvent, SurfaceKind,
+    SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
 use yuukei_resident_home::{ResidentHome, ResidentHomeError};
 use yuukei_world::{
@@ -67,6 +67,8 @@ pub enum DeviceHostError {
     ExtensionSettings(String),
     #[error("app settings error: {0}")]
     AppSettings(String),
+    #[error("observation settings error: {0}")]
+    ObservationSettings(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
     #[error("Daihon diagnostic state lock is poisoned")]
@@ -86,6 +88,7 @@ impl DeviceHostError {
             | Self::AppLog(_)
             | Self::ExtensionSettings(_)
             | Self::AppSettings(_)
+            | Self::ObservationSettings(_)
             | Self::PresenceState
             | Self::DaihonDiagnosticState => None,
         }
@@ -247,6 +250,89 @@ impl AppSettingsRegistry {
         )?;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationSettingsState {
+    pub windows: bool,
+    pub folders: bool,
+    pub downloads: bool,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ObservationSettingsRegistry {
+    settings_path: PathBuf,
+    stored: StoredObservationSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredObservationSettings {
+    #[serde(default)]
+    windows: bool,
+    #[serde(default)]
+    folders: bool,
+    #[serde(default)]
+    downloads: bool,
+}
+
+impl ObservationSettingsRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("observations.json");
+        let exists = settings_path.exists();
+        let stored = if exists {
+            let raw = fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            StoredObservationSettings::default()
+        };
+        let registry = Self {
+            settings_path,
+            stored,
+        };
+        if !exists {
+            registry.save()?;
+        }
+        Ok(registry)
+    }
+
+    fn state(&self) -> ObservationSettingsState {
+        ObservationSettingsState {
+            windows: self.stored.windows,
+            folders: self.stored.folders,
+            downloads: self.stored.downloads,
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn set(&mut self, next: ObservationSettingsUpdate) -> Result<ObservationSettingsState> {
+        self.stored.windows = next.windows;
+        self.stored.folders = next.folders;
+        self.stored.downloads = next.downloads;
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationSettingsUpdate {
+    pub windows: bool,
+    pub folders: bool,
+    pub downloads: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -522,6 +608,192 @@ fn add_usage(totals: &mut TokenUsageTotals, input_tokens: u64, output_tokens: u6
     totals.output_tokens += output_tokens;
 }
 
+const DESKTOP_WINDOW_FOCUS_DEBOUNCE: Duration = Duration::from_secs(1);
+const DESKTOP_OBSERVATION_PRIVACY_CATEGORY: &str = "desktop-observation";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindowFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindowObservation {
+    pub window_key: String,
+    pub app: String,
+    pub frame: DesktopWindowFrame,
+    pub focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesktopWindowTransitionKind {
+    Appeared,
+    Closed,
+    Focused,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopWindowTransition {
+    pub kind: DesktopWindowTransitionKind,
+    pub window_key: String,
+    pub app: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DesktopWindowObservationState {
+    windows: BTreeMap<String, DesktopWindowObservation>,
+    focused_key: Option<String>,
+    pending_focus: Option<PendingDesktopWindowFocus>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDesktopWindowFocus {
+    window_key: String,
+    since: DateTime<Utc>,
+}
+
+impl DesktopWindowObservationState {
+    pub fn update(
+        &mut self,
+        now: DateTime<Utc>,
+        observations: Vec<DesktopWindowObservation>,
+    ) -> Vec<DesktopWindowTransition> {
+        let next = observations
+            .into_iter()
+            .map(|observation| (observation.window_key.clone(), observation))
+            .collect::<BTreeMap<_, _>>();
+        let mut transitions = Vec::new();
+
+        for (window_key, observation) in &next {
+            if !self.windows.contains_key(window_key) {
+                transitions.push(DesktopWindowTransition {
+                    kind: DesktopWindowTransitionKind::Appeared,
+                    window_key: window_key.clone(),
+                    app: observation.app.clone(),
+                });
+            }
+        }
+
+        for (window_key, previous) in &self.windows {
+            if !next.contains_key(window_key) {
+                transitions.push(DesktopWindowTransition {
+                    kind: DesktopWindowTransitionKind::Closed,
+                    window_key: window_key.clone(),
+                    app: previous.app.clone(),
+                });
+            }
+        }
+
+        let current_focus = next
+            .values()
+            .find(|observation| observation.focused)
+            .map(|observation| observation.window_key.clone());
+        self.windows = next;
+        self.retain_focus_after_closures();
+
+        if let Some(focused) = self.evaluate_focused_transition(now, current_focus) {
+            transitions.push(focused);
+        }
+
+        transitions
+    }
+
+    fn retain_focus_after_closures(&mut self) {
+        if self
+            .focused_key
+            .as_ref()
+            .is_some_and(|key| !self.windows.contains_key(key))
+        {
+            self.focused_key = None;
+        }
+        if self
+            .pending_focus
+            .as_ref()
+            .is_some_and(|pending| !self.windows.contains_key(&pending.window_key))
+        {
+            self.pending_focus = None;
+        }
+    }
+
+    fn evaluate_focused_transition(
+        &mut self,
+        now: DateTime<Utc>,
+        current_focus: Option<String>,
+    ) -> Option<DesktopWindowTransition> {
+        let Some(current_focus) = current_focus else {
+            self.pending_focus = None;
+            return None;
+        };
+        if self.focused_key.as_deref() == Some(current_focus.as_str()) {
+            self.pending_focus = None;
+            return None;
+        }
+        match &mut self.pending_focus {
+            Some(pending) if pending.window_key == current_focus => {
+                let elapsed = now
+                    .signed_duration_since(pending.since)
+                    .to_std()
+                    .unwrap_or_default();
+                if elapsed < DESKTOP_WINDOW_FOCUS_DEBOUNCE {
+                    return None;
+                }
+            }
+            _ => {
+                self.pending_focus = Some(PendingDesktopWindowFocus {
+                    window_key: current_focus,
+                    since: now,
+                });
+                return None;
+            }
+        }
+        let window_key = self
+            .pending_focus
+            .take()
+            .map(|pending| pending.window_key)
+            .unwrap_or_default();
+        let app = self
+            .windows
+            .get(&window_key)
+            .map(|window| window.app.clone())
+            .unwrap_or_default();
+        self.focused_key = Some(window_key.clone());
+        Some(DesktopWindowTransition {
+            kind: DesktopWindowTransitionKind::Focused,
+            window_key,
+            app,
+        })
+    }
+}
+
+impl DesktopWindowTransition {
+    pub fn signal(&self) -> &'static str {
+        match self.kind {
+            DesktopWindowTransitionKind::Appeared => "desktop.window.appeared",
+            DesktopWindowTransitionKind::Closed => "desktop.window.closed",
+            DesktopWindowTransitionKind::Focused => "desktop.window.focused",
+        }
+    }
+
+    fn payload(&self) -> JsonMap {
+        JsonMap::from([
+            ("windowKey".to_string(), json!(self.window_key)),
+            ("app".to_string(), json!(self.app)),
+        ])
+    }
+}
+
+fn desktop_observation_privacy() -> Privacy {
+    Privacy {
+        category: DESKTOP_OBSERVATION_PRIVACY_CATEGORY.to_string(),
+        retention: RetentionPolicy::Short,
+        extension_readable: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TalkImpulseDecision {
     Disabled,
@@ -757,6 +1029,31 @@ impl LocalYuukeiRuntime {
     pub fn app_settings_state_in(env: LocalRuntimeEnvironment) -> Result<AppSettingsState> {
         let registry = AppSettingsRegistry::open(&env.data_dir)?;
         Ok(registry.state())
+    }
+
+    pub fn observation_settings_state() -> Result<ObservationSettingsState> {
+        Self::observation_settings_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn observation_settings_state_in(
+        env: LocalRuntimeEnvironment,
+    ) -> Result<ObservationSettingsState> {
+        let registry = ObservationSettingsRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
+    pub fn set_observation_settings(
+        settings: ObservationSettingsUpdate,
+    ) -> Result<ObservationSettingsState> {
+        Self::set_observation_settings_in(LocalRuntimeEnvironment::default_local(), settings)
+    }
+
+    pub fn set_observation_settings_in(
+        env: LocalRuntimeEnvironment,
+        settings: ObservationSettingsUpdate,
+    ) -> Result<ObservationSettingsState> {
+        let mut registry = ObservationSettingsRegistry::open(&env.data_dir)?;
+        registry.set(settings)
     }
 
     pub fn set_app_talk_interval_minutes(minutes: u64) -> Result<AppSettingsState> {
@@ -1152,6 +1449,10 @@ impl LocalYuukeiRuntime {
         AppSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
     }
 
+    pub fn observation_settings(&self) -> Result<ObservationSettingsState> {
+        ObservationSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
+    }
+
     pub async fn list_resident_memories(
         &self,
         episode_limit: Option<usize>,
@@ -1520,6 +1821,37 @@ impl LocalYuukeiRuntime {
             .await
     }
 
+    pub async fn emit_desktop_window_transition(
+        &self,
+        transition: DesktopWindowTransition,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            transition.signal(),
+            transition.payload(),
+            Some(desktop_observation_privacy()),
+            None,
+        )
+        .await
+    }
+
+    pub async fn emit_stage_perch_ended(
+        &self,
+        actor_id: &str,
+        window_key: &str,
+        reason: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            "stage.perch.ended",
+            JsonMap::from([
+                ("windowKey".to_string(), json!(window_key)),
+                ("reason".to_string(), json!(reason)),
+            ]),
+            None,
+            Some(actor_id.to_string()),
+        )
+        .await
+    }
+
     pub fn spawn_presence_loop(&self) -> JoinHandle<()> {
         self.spawn_presence_loop_with_idle_sampler(|| None)
     }
@@ -1630,6 +1962,17 @@ impl LocalYuukeiRuntime {
         kind: &str,
         payload: JsonMap,
     ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(kind, payload, None, None)
+            .await
+    }
+
+    async fn emit_runtime_event_with_options(
+        &self,
+        kind: &str,
+        payload: JsonMap,
+        privacy: Option<Privacy>,
+        actor_id: Option<String>,
+    ) -> Result<Vec<RuntimeCommand>> {
         let active_surface_id = self.home.snapshot()?.active_surface_id;
         let event = RuntimeEvent {
             id: new_id("evt"),
@@ -1641,7 +1984,8 @@ impl LocalYuukeiRuntime {
             causality: None,
             device_id: Some(self.device_id.clone()),
             surface_id: active_surface_id,
-            actor_id: None,
+            actor_id,
+            privacy,
         };
         self.logger.record(
             "runtime.event.emit",
@@ -1781,6 +2125,7 @@ impl LocalYuukeiRuntime {
             device_id: Some(self.device_id.clone()),
             surface_id: None,
             actor_id: None,
+            privacy: None,
         };
         self.home.ingest_event(event).await?;
         self.logger.record(
@@ -1931,6 +2276,7 @@ pub fn build_conversation_text_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: None,
+        privacy: None,
     }
 }
 
@@ -1957,6 +2303,7 @@ pub fn build_conversation_choice_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: None,
+        privacy: None,
     }
 }
 
@@ -2014,6 +2361,7 @@ pub fn build_avatar_gesture_poke_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: Some(actor_id),
+        privacy: None,
     }
 }
 
@@ -2489,6 +2837,159 @@ mod tests {
     }
 
     #[test]
+    fn observation_settings_default_off_and_persist(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = ObservationSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state(),
+            ObservationSettingsState {
+                windows: false,
+                folders: false,
+                downloads: false,
+                settings_path: data.path().join("settings").join("observations.json"),
+            }
+        );
+        registry.set(ObservationSettingsUpdate {
+            windows: true,
+            folders: false,
+            downloads: true,
+        })?;
+
+        let reopened = ObservationSettingsRegistry::open(data.path())?;
+        assert!(reopened.state().windows);
+        assert!(!reopened.state().folders);
+        assert!(reopened.state().downloads);
+        let raw = fs::read_to_string(data.path().join("settings").join("observations.json"))?;
+        assert!(raw.contains("\"windows\": true"));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_window_observation_emits_appeared_closed_and_debounced_focus() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = DesktopWindowObservationState::default();
+
+        let first = state.update(now, vec![window_observation("a", "Finder", true)]);
+        assert_eq!(
+            first,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+
+        assert!(state
+            .update(
+                now + chrono::Duration::milliseconds(500),
+                vec![window_observation("a", "Finder", true)]
+            )
+            .is_empty());
+
+        let focused = state.update(
+            now + chrono::Duration::milliseconds(1000),
+            vec![window_observation("a", "Finder", true)],
+        );
+        assert_eq!(
+            focused,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Focused,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+
+        let second = state.update(
+            now + chrono::Duration::milliseconds(1500),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        assert_eq!(
+            second,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "b".to_string(),
+                app: "Safari".to_string(),
+            }]
+        );
+
+        let changed_focus = state.update(
+            now + chrono::Duration::milliseconds(2600),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        assert_eq!(
+            changed_focus,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Focused,
+                window_key: "b".to_string(),
+                app: "Safari".to_string(),
+            }]
+        );
+
+        let closed = state.update(
+            now + chrono::Duration::milliseconds(3000),
+            vec![window_observation("b", "Safari", true)],
+        );
+        assert_eq!(
+            closed,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Closed,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn desktop_window_focus_candidate_resets_before_debounce() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = DesktopWindowObservationState::default();
+
+        state.update(now, vec![window_observation("a", "Finder", true)]);
+        state.update(
+            now + chrono::Duration::milliseconds(500),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        let transitions = state.update(
+            now + chrono::Duration::milliseconds(900),
+            vec![
+                window_observation("a", "Finder", true),
+                window_observation("b", "Safari", false),
+            ],
+        );
+
+        assert!(transitions.is_empty());
+    }
+
+    fn window_observation(window_key: &str, app: &str, focused: bool) -> DesktopWindowObservation {
+        DesktopWindowObservation {
+            window_key: window_key.to_string(),
+            app: app.to_string(),
+            focused,
+            frame: DesktopWindowFrame {
+                x: 10.0,
+                y: 20.0,
+                width: 640.0,
+                height: 480.0,
+            },
+        }
+    }
+
+    #[test]
     fn talk_impulse_jitter_stays_within_twenty_percent() {
         assert_eq!(jittered_talk_interval(5, 0), Duration::from_secs(240));
         assert_eq!(jittered_talk_interval(5, 9_999), Duration::from_secs(360));
@@ -2782,6 +3283,36 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(records.iter().any(|kind| kind == "device.sleep.before"));
         assert!(records.iter().any(|kind| kind == "device.wake"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_window_events_are_logged_with_desktop_observation_privacy() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .emit_desktop_window_transition(DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "window-1".to_string(),
+                app: "Finder".to_string(),
+            })
+            .await?;
+
+        let records = runtime.home().event_log().read(EventLogQuery {
+            kind: Some("desktop.window.appeared".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        let record = records.records.first().expect("desktop window record");
+        assert_eq!(record.payload["windowKey"], json!("window-1"));
+        assert_eq!(record.payload["app"], json!("Finder"));
+        let privacy = record.privacy.as_ref().expect("desktop privacy");
+        assert_eq!(privacy.category, DESKTOP_OBSERVATION_PRIVACY_CATEGORY);
+        assert_eq!(privacy.retention, RetentionPolicy::Short);
+        assert!(privacy.extension_readable);
         Ok(())
     }
 

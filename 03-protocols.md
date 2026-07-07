@@ -43,8 +43,15 @@ type RuntimeEvent = YuukeiMessage & {
   deviceId?: string;
   surfaceId?: string;
   actorId?: string;
+  privacy?: {
+    category: string;
+    retention: "session" | "short" | "long" | "manual";
+    extensionReadable: boolean;
+  };
 };
 ```
+
+`privacy` は機微な観測に付ける任意フィールドで、event log record(04)の `privacy` へそのまま引き継がれる。デスクトップ観測は `category: "desktop-observation"`、retention `short` を使う。
 
 例:
 
