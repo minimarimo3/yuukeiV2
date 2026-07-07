@@ -21,10 +21,10 @@
 
 - [x] ウィンドウ地形の観測 — Device HostがOSのウィンドウ一覧を観測し、canonical signal(`desktop.window.*`)とSurface向け地形スナップショットにする。v1はポーリング実装(macOS: CGWindowList、Windows: EnumWindows。Windowsは実機未検証)(6adfb55)
 - [x] 地形への配置 — actorウィンドウが対象ウィンドウの枠(上辺)に追従して座るRuntimeCommand(`stage.perch` 系)。移動・リサイズ追従と消滅時のフォールバック実装済み(6adfb55)
-- [ ] フォルダ遭遇の観測 — Finder/Explorerが表示中のフォルダパスを観測(macOS: Accessibility/Scripting、Windows: IShellWindows)し、`desktop.folder.opened` を発行。パスは生のまま記録せず、Downloads/Desktop/ゴミ箱等の既知カテゴリへ正規化する
-- [ ] ダウンロード観測 — Downloadsへのファイル追加watcherから `desktop.download.completed`(ファイル名・種類カテゴリ)を発行。event logに残るため、後日のsceneが「この前ダウンロードしたもの」として参照できる(記憶と接続)
-- [ ] Daihon接続 — 別名(`フォルダ_開いた`、`ダウンロード_完了`、`窓_出現` 等)と `入力#` パラメータ、枠に座る/降りる台本構文を08へ追記
-- [ ] プライバシー設計を先行 — 機微な観測は明示権限(04)。観測種類ごとのON/OFF、記録粒度(カテゴリ+ファイル名のみ、フルパス不記録)をM4のUIと接続して先に決める
+- [x] フォルダ遭遇の観測 — `desktop.folder.opened`。Windows: IShellWindows(実機未検証)、macOS: Finder最前面時のosascript。パスは既知カテゴリへ正規化し生記録しない(1bdb575)
+- [x] ダウンロード観測 — notify watcherで `desktop.download.completed`(ファイル名・種類カテゴリ)。フォルダ遭遇dispatch時に直近7日の最新DLを 入力#最近のダウンロード としてenrich(1bdb575, 3e1c1cf)
+- [x] Daihon接続 — 別名5種+日本語入力名+`枠に座る`/`枠から降りる`。08の11章に記載(3e1c1cf)
+- [x] プライバシー設計を先行 — 観測3種は既定OFF、設定画面「観測とプライバシー」でON/OFF。タイトル・フルパス不記録、privacy.category=desktop-observation(6adfb55, 1bdb575)
 
 ### M3: 初回体験とコンテンツ
 
@@ -32,7 +32,7 @@
 
 - [ ] 初回起動オンボーディング — World Pack選択、LLMプロバイダ設定(既存の設定スキーマGUIを再利用)、LLMなしでも進める選択肢を明示
 - [ ] World Packのzipインポート — pack.json検証、素材ライセンス表示(本書「中距離」の前倒し。配布文化の入口なのでv1に含める)
-- [ ] default packの拡充 — M1・M2の新シグナル(hitSurface、不在/復帰、選択肢、フォルダ遭遇、ダウンロード)への反応台本、2住人の掛け合いを最低限。あんぱんシナリオをここで実装
+- [x] default packの拡充 — 新シグナル全種への反応台本と掛け合いを追加。あんぱんシナリオは統合テストで恒久保証(7c45624, 1f8d9a2)
 - [ ] LLM未設定状態での通し確認 — 台本だけで1日分の生活が成立するか
 
 ### M4: プライバシーと安定性
@@ -40,7 +40,7 @@
 ユーザーの操作を生活史として記録する設計上、公開前に必須の層(04の方針)。
 
 - [ ] イベントログの閲覧・削除UI(記憶の閲覧・編集・忘却UIは済み。event log側にも同等を)
-- [ ] 観測の種類ごとのON/OFF設定と、何を記録しているかの説明画面(M2のウィンドウ・フォルダ・ダウンロード観測を含む)
+- [x] 観測の種類ごとのON/OFF設定と、何を記録しているかの説明画面(M2のウィンドウ・フォルダ・ダウンロード観測を含む)(1bdb575)
 - [ ] events.sqlite3 / app-activity.jsonl のサイズ管理(ローテーションまたは上限)
 - [ ] Extensionプロセスの異常系 — クラッシュ・タイムアウト・不正JSONからの回復と、ユーザーへの通知
 - [ ] 長時間稼働テスト(数日つけっぱなしでのメモリ・CPU・ログ肥大)

@@ -40,6 +40,8 @@ World Packが持たないもの:
 5. 成功したPack installごとにresidentIdとevent logを分ける。
 6. Resident HomeをそのPack installで起動し、`world_pack.activated` を生活史へ記録する。
 
+zipで配布されたWorld Packは、設定画面からインポートできる。zipは検証(pack.jsonの存在と妥当性、パス逸脱の拒否、サイズ上限)を通ったものだけを `YUUKEI_DATA_DIR/packs-imported/<packId>/` へ展開し、以後は通常の外部ディレクトリ参照として扱う。インポート前に、zip内の `LICENSE` / `README.md` と pack.json の任意フィールド `license` から配布条件テキストを探して表示し、見つからない場合もその旨を明示する。
+
 保存済みPackが削除、移動、破損していた場合、Device HostはDefault World Packで起動して設定画面に失敗理由を表示する。保存済み選択は勝手に消さない。ユーザーが修復するか別Packを選べるようにする。
 
 Daihonのload、検証、起動中のdispatchで発生した診断は、現在のアプリセッション中だけWorld Pack設定画面から確認できるようにする。診断は時系列順に4件まで表示し、5件以上ある場合は折りたたみ表示にして、ユーザーが開いたときにloadと起動中に起きた診断をすべて見られるようにする。次回起動まで引き継ぐ必要はないが、Device Hostにアプリ動作ログがある場合は構造化payloadとして記録する。
