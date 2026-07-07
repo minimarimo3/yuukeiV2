@@ -51,16 +51,16 @@
 
 - [ ] アプリアイコン一式 — 現状 `tauri.conf.json` の `icon` が空配列。`tauri icon` で全サイズ生成
 - [ ] macOS実機確認 — 署名+notarization、Accessibility権限の取得導線(M2の観測に必須)、`macOSPrivateApi` の影響確認
-- [ ] Windows実機確認 — インストーラ、透過ウィンドウ動作、M2のウィンドウ観測。伺か文化圏はWindows比重が高いので優先度は高い
+- [ ] Windows実機確認 — 手順書整備済み(windows-verification.md)。実機はユーザー保有、確認待ち
 - [ ] ログイン時自動起動オプション(住人は常駐してこそ)
 - [ ] 更新手段 — tauri-plugin-updaterか、まずは手動更新告知か。v1は手動+更新通知で十分
-- [ ] バージョニング方針、CHANGELOG開始
+- [x] バージョニング方針、CHANGELOG開始 — CHANGELOG.md(SemVer、v1.0=DoD達成時)
 
 ### M6: ドキュメントと公開
 
 - [x] ユーザー向け導入ガイド — USERGUIDE.mdを追加(インストール〜World Pack導入〜LLM/VOICEVOX設定〜プライバシー)
 - [ ] World Pack作者向け公開ドキュメント(08がほぼそのまま使える。公開場所を決める)
-- [ ] ライセンス選定 — 依存ライブラリ・素材(VOICEVOX利用規約含む)を棚卸しした上で最後に決定
+- [ ] ライセンス選定 — 棚卸し完了(license-inventory.md: 依存は全て寛容、要人間確認はVRMモデルの出所と本体ライセンスの決定のみ)
 - [ ] β配布(GitHub Releases)→ フィードバック反映 → v1.0タグ
 
 ### v1に含めないもの
