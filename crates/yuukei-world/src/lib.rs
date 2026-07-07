@@ -2657,6 +2657,9 @@ mod tests {
         yuukei_pat
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        yuukei_pat
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&yuukei_pat, &world).await?;
         let dialogue = result
             .commands
@@ -2679,6 +2682,9 @@ mod tests {
         partner_pat
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        partner_pat
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&partner_pat, &world).await?;
         let dialogue = result
             .commands
@@ -2712,6 +2718,9 @@ mod tests {
         yuukei_poke
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        yuukei_poke
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&yuukei_poke, &world).await?;
         let dialogue = result
             .commands
@@ -2734,6 +2743,9 @@ mod tests {
         partner_poke
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        partner_poke
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&partner_poke, &world).await?;
         let dialogue = result
             .commands

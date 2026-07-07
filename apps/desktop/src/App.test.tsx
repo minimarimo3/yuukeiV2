@@ -8,6 +8,7 @@ import type {
   CapabilityUsageState,
   DaihonDiagnosticEntry,
   ExtensionSettingsState,
+  ObservationSettingsState,
   ResidentMemoryState,
   WorldPackSelectionState,
   YuukeiClient
@@ -122,6 +123,18 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   };
 }
 
+function observationSettings(
+  overrides: Partial<ObservationSettingsState> = {}
+): ObservationSettingsState {
+  return {
+    windows: false,
+    folders: false,
+    downloads: false,
+    settingsPath: "/tmp/yuukei-v2/settings/observations.json",
+    ...overrides
+  };
+}
+
 function capabilityUsage(
   extensions: CapabilityUsageState["extensions"] = []
 ): CapabilityUsageState {
@@ -185,6 +198,10 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getAppSettings: vi.fn(async () => appSettings()),
+    getObservationSettings: vi.fn(async () => observationSettings()),
+    setObservationSettings: vi.fn(async (settings) =>
+      observationSettings(settings)
+    ),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
     getCapabilityUsage: vi.fn(async () => capabilityUsage()),
     listResidentMemories: vi.fn(async () => residentMemories()),
@@ -349,6 +366,30 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(client.setAppTalkIntervalMinutes).toHaveBeenLastCalledWith(12);
+    });
+  });
+
+  it("toggles observation privacy settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "観測" }));
+    expect(await screen.findByText("観測とプライバシー")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "開いた場所の種類だけを記録します(パスは記録しません)"
+      )
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "フォルダ" }));
+
+    await waitFor(() => {
+      expect(client.setObservationSettings).toHaveBeenCalledWith({
+        windows: false,
+        folders: true,
+        downloads: false
+      });
     });
   });
 

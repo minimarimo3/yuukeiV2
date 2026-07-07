@@ -12,6 +12,8 @@ import {
   type InstalledExtension,
   type MemoryEntryKind,
   type MemoryForgetEntry,
+  type ObservationSettingsState,
+  type ObservationSettingsUpdate,
   type ResidentMemoryState,
   type WorldPackSelectionState,
   type YuukeiClient
@@ -21,7 +23,12 @@ type AppProps = {
   client?: YuukeiClient;
 };
 
-type SettingsCategoryId = "app" | "worldPack" | "memories" | "extensions";
+type SettingsCategoryId =
+  | "app"
+  | "worldPack"
+  | "observations"
+  | "memories"
+  | "extensions";
 const MEMORY_PAGE_SIZE = 50;
 
 type SettingsCategory = {
@@ -40,12 +47,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
+  const [observationSettings, setObservationSettings] =
+    useState<ObservationSettingsState | null>(null);
   const [extensionState, setExtensionState] =
     useState<ExtensionSettingsState | null>(null);
   const [capabilityUsage, setCapabilityUsage] =
     useState<CapabilityUsageState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
+  const [observationSettingsError, setObservationSettingsError] =
+    useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
   const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(null);
   const [memoryError, setMemoryError] = useState<string | null>(null);
@@ -53,6 +64,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [editingFactId, setEditingFactId] = useState<string | null>(null);
   const [editingFactText, setEditingFactText] = useState("");
   const [switchingPack, setSwitchingPack] = useState(false);
+  const [changingObservationSettings, setChangingObservationSettings] =
+    useState(false);
   const [changingExtensions, setChangingExtensions] = useState(false);
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
     useState(false);
@@ -91,18 +104,21 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const [
         nextWorldPackStatus,
         nextAppSettings,
+        nextObservationSettings,
         nextExtensionState,
         nextCapabilityUsage
       ] =
         await Promise.all([
           client.getWorldPackStatus(),
           client.getAppSettings(),
+          client.getObservationSettings(),
           client.getExtensionSettings(),
           client.getCapabilityUsage()
         ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
         setAppSettings(nextAppSettings);
+        setObservationSettings(nextObservationSettings);
         setExtensionState(nextExtensionState);
         setCapabilityUsage(nextCapabilityUsage);
       }
@@ -283,6 +299,36 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function toggleObservationSetting(
+    key: keyof ObservationSettingsUpdate,
+    enabled: boolean
+  ) {
+    const current =
+      observationSettings ??
+      ({
+        windows: false,
+        folders: false,
+        downloads: false
+      } satisfies ObservationSettingsUpdate);
+    const next: ObservationSettingsUpdate = {
+      windows: current.windows,
+      folders: current.folders,
+      downloads: current.downloads,
+      [key]: enabled
+    };
+    setObservationSettingsError(null);
+    setChangingObservationSettings(true);
+    try {
+      setObservationSettings(await client.setObservationSettings(next));
+    } catch (error) {
+      setObservationSettingsError(
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      setChangingObservationSettings(false);
+    }
+  }
+
   function beginFactEdit(id: string, text: string) {
     setEditingFactId(id);
     setEditingFactText(text);
@@ -436,6 +482,47 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
+      )
+    },
+    {
+      id: "observations",
+      label: "観測",
+      ariaLabel: "Observation and privacy settings",
+      panelId: "settings-observations-panel",
+      content: (
+        <div className="settings-copy observation-settings">
+          <h2>観測とプライバシー</h2>
+          <p className="settings-title">Desktop Terrain Observation</p>
+          <p className="settings-path">
+            {observationSettings?.settingsPath ?? ""}
+          </p>
+          {observationSettingsError ? (
+            <p className="settings-error">{observationSettingsError}</p>
+          ) : null}
+          <ObservationToggle
+            label="ウィンドウ"
+            description="アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+            checked={observationSettings?.windows ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) => toggleObservationSetting("windows", checked)}
+          />
+          <ObservationToggle
+            label="フォルダ"
+            description="開いた場所の種類だけを記録します(パスは記録しません)"
+            checked={observationSettings?.folders ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) => toggleObservationSetting("folders", checked)}
+          />
+          <ObservationToggle
+            label="ダウンロード"
+            description="ファイル名と種類を記録します(場所は記録しません)"
+            checked={observationSettings?.downloads ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) =>
+              toggleObservationSetting("downloads", checked)
+            }
+          />
+        </div>
       )
     },
     {
@@ -677,6 +764,38 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         </div>
       </section>
     </main>
+  );
+}
+
+type ObservationToggleProps = {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+};
+
+function ObservationToggle({
+  label,
+  description,
+  checked,
+  disabled,
+  onChange
+}: ObservationToggleProps) {
+  return (
+    <label className="extension-toggle observation-toggle">
+      <input
+        type="checkbox"
+        aria-label={label}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+    </label>
   );
 }
 

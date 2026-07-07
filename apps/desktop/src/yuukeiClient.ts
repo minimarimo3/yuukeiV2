@@ -108,6 +108,19 @@ export type AppSettingsState = {
   settingsPath: string;
 };
 
+export type ObservationSettingsState = {
+  windows: boolean;
+  folders: boolean;
+  downloads: boolean;
+  settingsPath: string;
+};
+
+export type ObservationSettingsUpdate = {
+  windows: boolean;
+  folders: boolean;
+  downloads: boolean;
+};
+
 export type TokenUsageTotals = {
   requests: number;
   inputTokens: number;
@@ -270,6 +283,10 @@ export type YuukeiClient = {
   getWorldPackStatus(): Promise<WorldPackSelectionState>;
   getExtensionSettings(): Promise<ExtensionSettingsState>;
   getAppSettings(): Promise<AppSettingsState>;
+  getObservationSettings(): Promise<ObservationSettingsState>;
+  setObservationSettings(
+    settings: ObservationSettingsUpdate
+  ): Promise<ObservationSettingsState>;
   getCapabilityUsage(): Promise<CapabilityUsageState>;
   listResidentMemories(
     episodeLimit?: number,
@@ -345,6 +362,10 @@ export const tauriYuukeiClient: YuukeiClient = {
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
   getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
+  getObservationSettings: () =>
+    invoke<ObservationSettingsState>("get_observation_settings"),
+  setObservationSettings: (settings: ObservationSettingsUpdate) =>
+    invoke<ObservationSettingsState>("set_observation_settings", { settings }),
   getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
   listResidentMemories: (episodeLimit?: number, episodeOffset?: number) =>
     invoke<ResidentMemoryState>("list_resident_memories", {

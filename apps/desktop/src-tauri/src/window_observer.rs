@@ -1,15 +1,66 @@
-use yuukei_device_host::{DesktopWindowObservation, ObservationSettingsState};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+
+use yuukei_device_host::{
+    DesktopFolderObservation, DesktopWindowObservation, KnownDesktopFolders,
+    ObservationSettingsState,
+};
 
 pub fn observation_loop_enabled(settings: &ObservationSettingsState) -> bool {
-    settings.windows
+    settings.windows || settings.folders
 }
 
 pub fn collect_desktop_windows() -> Vec<DesktopWindowObservation> {
     platform::collect_desktop_windows()
 }
 
+pub fn collect_desktop_folders() -> Vec<DesktopFolderObservation> {
+    platform::collect_desktop_folders()
+}
+
+pub fn downloads_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join("Downloads"))
+}
+
+fn known_desktop_folders() -> KnownDesktopFolders {
+    let Some(home) = home_dir() else {
+        return KnownDesktopFolders::default();
+    };
+    KnownDesktopFolders {
+        downloads: path_string(home.join("Downloads")),
+        desktop: path_string(home.join("Desktop")),
+        documents: path_string(home.join("Documents")),
+        pictures: path_string(home.join("Pictures")),
+        trash: macos_trash_path(&home),
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
+fn path_string(path: PathBuf) -> Option<String> {
+    Some(path.to_string_lossy().to_string()).filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_trash_path(home: &Path) -> Option<String> {
+    path_string(home.join(".Trash"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_trash_path(_home: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::process::Command;
+
     use core_foundation::{
         base::{CFType, TCFType},
         dictionary::{CFDictionary, CFDictionaryRef},
@@ -25,7 +76,10 @@ mod platform {
         },
     };
     use objc2_app_kit::NSWorkspace;
-    use yuukei_device_host::{DesktopWindowFrame, DesktopWindowObservation};
+    use yuukei_device_host::{
+        categorize_desktop_folder_path, DesktopFolderObservation, DesktopWindowFrame,
+        DesktopWindowObservation,
+    };
 
     pub fn collect_desktop_windows() -> Vec<DesktopWindowObservation> {
         let own_pid = std::process::id() as i64;
@@ -78,6 +132,39 @@ mod platform {
         observations
     }
 
+    pub fn collect_desktop_folders() -> Vec<DesktopFolderObservation> {
+        if frontmost_app_name()
+            .as_deref()
+            .map(|name| name.eq_ignore_ascii_case("Finder"))
+            != Some(true)
+        {
+            return Vec::new();
+        }
+        let Ok(output) = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"Finder\" to get POSIX path of (target of front window as alias)",
+            ])
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let path = String::from_utf8_lossy(&output.stdout);
+        let path = path.trim();
+        if path.is_empty() {
+            return Vec::new();
+        }
+        let category = categorize_desktop_folder_path(path, &super::known_desktop_folders());
+        vec![DesktopFolderObservation {
+            folder_key: "finder-front".to_string(),
+            category,
+            app: "finder".to_string(),
+        }]
+    }
+
     fn number_value(
         dictionary: &CFDictionary<CFString, CFType>,
         key: core_foundation::string::CFStringRef,
@@ -119,12 +206,19 @@ mod platform {
         let app = workspace.frontmostApplication()?;
         Some(app.processIdentifier() as i64)
     }
+
+    fn frontmost_app_name() -> Option<String> {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let app = workspace.frontmostApplication()?;
+        Some(app.localizedName()?.to_string())
+    }
 }
 
 #[cfg(windows)]
 mod platform {
     use std::{ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt};
 
+    use windows::core::Interface;
     use windows::Win32::{
         Foundation::{BOOL, HWND, LPARAM, RECT},
         Graphics::{
@@ -132,15 +226,26 @@ mod platform {
             Gdi::IsRectEmpty,
         },
         System::{
+            Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
+                COINIT_APARTMENTTHREADED,
+            },
             ProcessStatus::K32GetModuleBaseNameW,
             Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+            Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4},
         },
-        UI::WindowsAndMessaging::{
-            EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-            IsWindowVisible,
+        UI::{
+            Shell::{Folder2, IShellFolderViewDual, IShellWindows, IWebBrowserApp, ShellWindows},
+            WindowsAndMessaging::{
+                EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+                IsWindowVisible,
+            },
         },
     };
-    use yuukei_device_host::{DesktopWindowFrame, DesktopWindowObservation};
+    use yuukei_device_host::{
+        categorize_desktop_folder_path, DesktopFolderObservation, DesktopWindowFrame,
+        DesktopWindowObservation,
+    };
 
     pub fn collect_desktop_windows() -> Vec<DesktopWindowObservation> {
         let mut context = WindowsContext {
@@ -152,6 +257,80 @@ mod platform {
             let _ = EnumWindows(Some(enum_window), LPARAM(&mut context as *mut _ as isize));
         }
         context.observations
+    }
+
+    pub fn collect_desktop_folders() -> Vec<DesktopFolderObservation> {
+        unsafe { collect_desktop_folders_com().unwrap_or_default() }
+    }
+
+    unsafe fn collect_desktop_folders_com() -> windows::core::Result<Vec<DesktopFolderObservation>>
+    {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = collect_desktop_folders_after_com_init();
+        if initialized {
+            CoUninitialize();
+        }
+        result
+    }
+
+    unsafe fn collect_desktop_folders_after_com_init(
+    ) -> windows::core::Result<Vec<DesktopFolderObservation>> {
+        let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)?;
+        let count = windows.Count()?;
+        let known = super::known_desktop_folders();
+        let mut observations = Vec::new();
+        for index in 0..count {
+            let index = variant_i4(index);
+            let Ok(dispatch) = windows.Item(&index) else {
+                continue;
+            };
+            let Ok(browser) = dispatch.cast::<IWebBrowserApp>() else {
+                continue;
+            };
+            let Ok(document) = browser.Document() else {
+                continue;
+            };
+            let Ok(view) = document.cast::<IShellFolderViewDual>() else {
+                continue;
+            };
+            let Ok(folder) = view.Folder() else {
+                continue;
+            };
+            let Ok(folder2) = folder.cast::<Folder2>() else {
+                continue;
+            };
+            let Ok(item) = folder2.Self_() else {
+                continue;
+            };
+            let Ok(path) = item.Path() else {
+                continue;
+            };
+            let path = path.to_string();
+            if path.trim().is_empty() {
+                continue;
+            }
+            let hwnd = browser.HWND().map(|handle| handle.0).unwrap_or_default();
+            observations.push(DesktopFolderObservation {
+                folder_key: hwnd.to_string(),
+                category: categorize_desktop_folder_path(&path, &known),
+                app: "explorer".to_string(),
+            });
+        }
+        Ok(observations)
+    }
+
+    fn variant_i4(value: i32) -> VARIANT {
+        VARIANT {
+            Anonymous: VARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                    vt: VT_I4,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: VARIANT_0_0_0 { lVal: value },
+                }),
+            },
+        }
     }
 
     struct WindowsContext {
@@ -227,9 +406,13 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", windows)))]
 mod platform {
-    use yuukei_device_host::DesktopWindowObservation;
+    use yuukei_device_host::{DesktopFolderObservation, DesktopWindowObservation};
 
     pub fn collect_desktop_windows() -> Vec<DesktopWindowObservation> {
+        Vec::new()
+    }
+
+    pub fn collect_desktop_folders() -> Vec<DesktopFolderObservation> {
         Vec::new()
     }
 }
@@ -240,16 +423,20 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn observation_loop_is_enabled_only_for_windows_setting() {
+    fn observation_loop_is_enabled_for_windows_or_folders_setting() {
         let base = ObservationSettingsState {
             windows: false,
-            folders: true,
+            folders: false,
             downloads: true,
             settings_path: PathBuf::from("observations.json"),
         };
         assert!(!observation_loop_enabled(&base));
         assert!(observation_loop_enabled(&ObservationSettingsState {
             windows: true,
+            ..base.clone()
+        }));
+        assert!(observation_loop_enabled(&ObservationSettingsState {
+            folders: true,
             ..base
         }));
     }

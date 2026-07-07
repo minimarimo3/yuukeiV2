@@ -7,6 +7,7 @@ use std::{
 };
 
 use chrono::Utc;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{
@@ -18,10 +19,10 @@ use tauri::{
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopWindowObservationState,
-    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
-    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate,
-    WorldPackSelectionState, WorldPackSwitchResult, TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
+    DesktopWindowObservationState, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
+    ObservationSettingsUpdate, WorldPackSelectionState, WorldPackSwitchResult, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -50,6 +51,7 @@ pub struct AppState {
     presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
     power_observer: Mutex<Option<PowerObserver>>,
     window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    download_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -181,6 +183,7 @@ async fn set_observation_settings(
     let next = LocalYuukeiRuntime::set_observation_settings_in(state.env.clone(), settings)
         .map_err(to_message)?;
     reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
     Ok(next)
 }
 
@@ -507,10 +510,13 @@ pub fn run() {
                 presence_loop: Mutex::new(None),
                 power_observer: Mutex::new(Some(power_observer)),
                 window_observer: Mutex::new(None),
+                download_observer: Mutex::new(None),
             });
             {
                 let state = app.handle().state::<AppState>();
                 tauri::async_runtime::block_on(reconcile_window_observer(app.handle(), &state))
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+                tauri::async_runtime::block_on(reconcile_download_observer(&state))
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             }
             stage
@@ -887,6 +893,7 @@ async fn replace_runtime(
         let _previous = power_observer.replace(next_power_observer);
     }
     reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -964,6 +971,7 @@ async fn replace_runtime_snapshot(
         let _previous = power_observer.replace(next_power_observer);
     }
     reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -998,7 +1006,9 @@ async fn reconcile_window_observer(
     let runtime = state.runtime.lock().await.clone();
     let settings = runtime.observation_settings().map_err(to_message)?;
     let enabled = window_observer::observation_loop_enabled(&settings);
-    state.stage.set_window_observation_enabled(enabled)?;
+    state
+        .stage
+        .set_window_observation_enabled(settings.windows)?;
     let mut current = state.window_observer.lock().await;
     match (enabled, current.is_some()) {
         (true, false) => {
@@ -1018,6 +1028,24 @@ async fn reconcile_window_observer(
     Ok(())
 }
 
+async fn reconcile_download_observer(state: &State<'_, AppState>) -> Result<(), String> {
+    let runtime = state.runtime.lock().await.clone();
+    let settings = runtime.observation_settings().map_err(to_message)?;
+    let mut current = state.download_observer.lock().await;
+    match (settings.downloads, current.is_some()) {
+        (true, false) => {
+            *current = Some(spawn_download_observer(runtime));
+        }
+        (false, true) => {
+            if let Some(previous) = current.take() {
+                previous.abort();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn spawn_window_observer(
     app: AppHandle,
     runtime: LocalYuukeiRuntime,
@@ -1025,55 +1053,155 @@ fn spawn_window_observer(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut state = DesktopWindowObservationState::default();
+        let mut folder_state = DesktopFolderObservationState::default();
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let observations = window_observer::collect_desktop_windows();
-            match stage.apply_window_terrain(&app, &observations) {
-                Ok(ended) => {
-                    for event in ended {
-                        if let Err(error) = runtime
-                            .emit_stage_perch_ended(
-                                &event.actor_id,
-                                &event.window_key,
-                                event.reason,
-                            )
-                            .await
-                        {
-                            let _ = runtime.logger().record(
-                                "stage.perch.ended.error",
-                                "device-host",
-                                serde_json::json!({
-                                    "actorId": event.actor_id,
-                                    "windowKey": event.window_key,
-                                    "message": error.to_string()
-                                })
+            let settings = match runtime.observation_settings() {
+                Ok(settings) => settings,
+                Err(_) => continue,
+            };
+            if settings.windows {
+                let observations = window_observer::collect_desktop_windows();
+                match stage.apply_window_terrain(&app, &observations) {
+                    Ok(ended) => {
+                        for event in ended {
+                            if let Err(error) = runtime
+                                .emit_stage_perch_ended(
+                                    &event.actor_id,
+                                    &event.window_key,
+                                    event.reason,
+                                )
+                                .await
+                            {
+                                let _ = runtime.logger().record(
+                                    "stage.perch.ended.error",
+                                    "device-host",
+                                    serde_json::json!({
+                                        "actorId": event.actor_id,
+                                        "windowKey": event.window_key,
+                                        "message": error.to_string()
+                                    })
+                                    .as_object()
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect(),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = runtime.logger().record(
+                            "desktop.window.terrain.error",
+                            "device-host",
+                            serde_json::json!({ "message": error })
                                 .as_object()
                                 .cloned()
                                 .unwrap_or_default()
                                 .into_iter()
                                 .collect(),
-                            );
-                        }
+                        );
                     }
                 }
+                for transition in state.update(Utc::now(), observations) {
+                    if let Err(error) = runtime.emit_desktop_window_transition(transition).await {
+                        let _ = runtime.logger().record(
+                            "desktop.window.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+            } else {
+                state = DesktopWindowObservationState::default();
+            }
+            if settings.folders {
+                let observations = window_observer::collect_desktop_folders();
+                for transition in folder_state.update(Utc::now(), observations) {
+                    if let Err(error) = runtime.emit_desktop_folder_transition(transition).await {
+                        let _ = runtime.logger().record(
+                            "desktop.folder.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+            } else {
+                folder_state = DesktopFolderObservationState::default();
+            }
+        }
+    })
+}
+
+fn spawn_download_observer(runtime: LocalYuukeiRuntime) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(downloads_dir) = window_observer::downloads_dir() else {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.unavailable",
+                "device-host",
+                std::collections::BTreeMap::new(),
+            );
+            return;
+        };
+        if !downloads_dir.is_dir() {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.unavailable",
+                "device-host",
+                std::collections::BTreeMap::new(),
+            );
+            return;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher_result: notify::Result<RecommendedWatcher> =
+            notify::recommended_watcher(move |result| {
+                let _ = tx.send(result);
+            });
+        let mut watcher = match watcher_result {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                let _ = runtime.logger().record(
+                    "desktop.download.observer.error",
+                    "device-host",
+                    serde_json::json!({ "message": error.to_string() })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                );
+                return;
+            }
+        };
+        if let Err(error) = watcher.watch(&downloads_dir, RecursiveMode::NonRecursive) {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.error",
+                "device-host",
+                serde_json::json!({ "message": error.to_string() })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+            return;
+        }
+        while let Some(result) = rx.recv().await {
+            let event = match result {
+                Ok(event) => event,
                 Err(error) => {
                     let _ = runtime.logger().record(
-                        "desktop.window.terrain.error",
-                        "device-host",
-                        serde_json::json!({ "message": error })
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .collect(),
-                    );
-                }
-            }
-            for transition in state.update(Utc::now(), observations) {
-                if let Err(error) = runtime.emit_desktop_window_transition(transition).await {
-                    let _ = runtime.logger().record(
-                        "desktop.window.event.error",
+                        "desktop.download.observer.error",
                         "device-host",
                         serde_json::json!({ "message": error.to_string() })
                             .as_object()
@@ -1082,10 +1210,59 @@ fn spawn_window_observer(
                             .into_iter()
                             .collect(),
                     );
+                    continue;
                 }
+            };
+            if !is_download_completion_event(&event.kind) {
+                continue;
+            }
+            for path in event.paths {
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if !path.is_file() {
+                        return;
+                    }
+                    let Some(file_name) = path
+                        .file_name()
+                        .and_then(|file_name| file_name.to_str())
+                        .map(str::to_string)
+                    else {
+                        return;
+                    };
+                    let Some(observation) =
+                        yuukei_device_host::download_file_observation_from_name(&file_name)
+                    else {
+                        return;
+                    };
+                    if let Err(error) = runtime.emit_desktop_download_completed(observation).await {
+                        let _ = runtime.logger().record(
+                            "desktop.download.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                });
             }
         }
     })
+}
+
+fn is_download_completion_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To
+                    | notify::event::RenameMode::Both
+                    | notify::event::RenameMode::Any
+            ))
+    )
 }
 
 async fn attach_tauri_surface_or_status(
