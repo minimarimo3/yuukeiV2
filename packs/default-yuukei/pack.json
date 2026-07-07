@@ -117,7 +117,10 @@
       "scripts/desktop_reactions.daihon",
       "scripts/random_talk.daihon",
       "scripts/presence_away.daihon",
-      "scripts/presence_return.daihon"
+      "scripts/presence_return.daihon",
+      "scripts/folder_encounters.daihon",
+      "scripts/downloads.daihon",
+      "scripts/window_perch.daihon"
     ]
   },
   "initialVariables": {},

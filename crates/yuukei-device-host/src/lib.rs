@@ -5780,4 +5780,58 @@ globalThis.fetch = async (url, init) => {
         }
         Ok(())
     }
+
+    // リリース判定基準(ROADMAP)の「あんぱんシナリオがdefault packで動く」を、
+    // 同梱の実packで恒久的に保証する。
+    #[tokio::test]
+    async fn bundled_default_pack_runs_anpan_scenario() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("packs")
+            .join("default-yuukei");
+        copy_dir_for_test(
+            &bundled,
+            &workspace.path().join("packs").join("default-yuukei"),
+        )?;
+        let env = test_env(workspace.path(), data.path());
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+
+        let download_commands = runtime
+            .emit_desktop_download_completed(DesktopDownloadObservation {
+                file_name: "あんぱん.png".to_string(),
+                file_category: DownloadFileCategory::Image,
+            })
+            .await?;
+        assert!(
+            download_commands
+                .iter()
+                .filter_map(|command| command.payload.get("text").and_then(Value::as_str))
+                .any(|text| text.contains("あんぱん.png")),
+            "download scene should mention the file"
+        );
+
+        let commands = runtime
+            .emit_desktop_folder_transition(DesktopFolderTransition {
+                category: DesktopFolderCategory::Downloads,
+                app: "finder".to_string(),
+            })
+            .await?;
+
+        let texts = commands
+            .iter()
+            .filter(|command| command.kind == "dialogue.say")
+            .filter_map(|command| command.payload.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(
+            texts.iter().any(|text| text.contains("あんぱん.png")),
+            "expected the anpan scene to reference the downloaded file, got: {texts:?}"
+        );
+        Ok(())
+    }
 }
