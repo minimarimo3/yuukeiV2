@@ -22,7 +22,8 @@ use yuukei_device_host::{
     AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
     DesktopWindowObservationState, ExtensionSettingsChangeResult, ExtensionSettingsState,
     LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
-    ObservationSettingsUpdate, WorldPackSelectionState, WorldPackSwitchResult, TAURI_SURFACE_ID,
+    ObservationSettingsUpdate, OnboardingState, WorldPackSelectionState, WorldPackSwitchResult,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -172,6 +173,16 @@ async fn get_observation_settings(
 ) -> Result<ObservationSettingsState, String> {
     let runtime = state.runtime.lock().await;
     runtime.observation_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_onboarding_state(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    LocalYuukeiRuntime::onboarding_state_in(state.env.clone()).map_err(to_message)
+}
+
+#[tauri::command]
+async fn complete_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    LocalYuukeiRuntime::complete_onboarding_in(state.env.clone()).map_err(to_message)
 }
 
 #[tauri::command]
@@ -499,6 +510,9 @@ pub fn run() {
                 audio_player.clone(),
             );
             let power_observer = PowerObserver::new(runtime.clone());
+            let should_show_onboarding = LocalYuukeiRuntime::onboarding_state_in(env.clone())
+                .map(|state| !state.completed)
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(AppState {
                 env,
                 runtime: Mutex::new(runtime),
@@ -522,6 +536,10 @@ pub fn run() {
             stage
                 .sync_surfaces(app.handle(), &asset_catalog)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            if should_show_onboarding {
+                show_settings_window(app.handle())
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            }
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -544,6 +562,7 @@ pub fn run() {
             if window.label() == "settings" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
+                    let _ = window.emit("yuukei-onboarding-dismissed", ());
                     let _ = window.hide();
                 }
             }
@@ -555,6 +574,8 @@ pub fn run() {
             get_extension_settings,
             get_app_settings,
             get_observation_settings,
+            get_onboarding_state,
+            complete_onboarding,
             set_observation_settings,
             get_capability_usage,
             list_resident_memories,

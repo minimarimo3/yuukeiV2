@@ -121,6 +121,12 @@ export type ObservationSettingsUpdate = {
   downloads: boolean;
 };
 
+export type OnboardingState = {
+  completed: boolean;
+  completedAt?: string | null;
+  settingsPath: string;
+};
+
 export type TokenUsageTotals = {
   requests: number;
   inputTokens: number;
@@ -284,6 +290,8 @@ export type YuukeiClient = {
   getExtensionSettings(): Promise<ExtensionSettingsState>;
   getAppSettings(): Promise<AppSettingsState>;
   getObservationSettings(): Promise<ObservationSettingsState>;
+  getOnboardingState(): Promise<OnboardingState>;
+  completeOnboarding(): Promise<OnboardingState>;
   setObservationSettings(
     settings: ObservationSettingsUpdate
   ): Promise<ObservationSettingsState>;
@@ -348,6 +356,7 @@ export type YuukeiClient = {
   onWorldPackStatus(
     callback: (status: WorldPackSelectionState) => void
   ): Promise<() => void>;
+  onOnboardingDismissed(callback: () => void): Promise<() => void>;
   onAssetsChanged(
     callback: (catalog: ActorSurfaceAssetCatalog) => void
   ): Promise<() => void>;
@@ -364,6 +373,8 @@ export const tauriYuukeiClient: YuukeiClient = {
   getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
   getObservationSettings: () =>
     invoke<ObservationSettingsState>("get_observation_settings"),
+  getOnboardingState: () => invoke<OnboardingState>("get_onboarding_state"),
+  completeOnboarding: () => invoke<OnboardingState>("complete_onboarding"),
   setObservationSettings: (settings: ObservationSettingsUpdate) =>
     invoke<ObservationSettingsState>("set_observation_settings", { settings }),
   getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
@@ -474,6 +485,12 @@ export const tauriYuukeiClient: YuukeiClient = {
         callback(event.payload);
       }
     );
+    return unlisten;
+  },
+  onOnboardingDismissed: async (callback) => {
+    const unlisten = await listen("yuukei-onboarding-dismissed", () => {
+      callback();
+    });
     return unlisten;
   },
   onAssetsChanged: async (callback) => {

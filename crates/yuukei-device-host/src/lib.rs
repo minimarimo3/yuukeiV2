@@ -69,6 +69,8 @@ pub enum DeviceHostError {
     AppSettings(String),
     #[error("observation settings error: {0}")]
     ObservationSettings(String),
+    #[error("onboarding settings error: {0}")]
+    OnboardingSettings(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
     #[error("Daihon diagnostic state lock is poisoned")]
@@ -89,6 +91,7 @@ impl DeviceHostError {
             | Self::ExtensionSettings(_)
             | Self::AppSettings(_)
             | Self::ObservationSettings(_)
+            | Self::OnboardingSettings(_)
             | Self::PresenceState
             | Self::DaihonDiagnosticState => None,
         }
@@ -333,6 +336,72 @@ pub struct ObservationSettingsUpdate {
     pub windows: bool,
     pub folders: bool,
     pub downloads: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingState {
+    pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct OnboardingRegistry {
+    settings_path: PathBuf,
+    stored: StoredOnboardingState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredOnboardingState {
+    #[serde(default)]
+    completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+}
+
+impl OnboardingRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("onboarding.json");
+        let stored = if settings_path.exists() {
+            let raw = fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            StoredOnboardingState::default()
+        };
+        Ok(Self {
+            settings_path,
+            stored,
+        })
+    }
+
+    fn state(&self) -> OnboardingState {
+        OnboardingState {
+            completed: self.stored.completed,
+            completed_at: self.stored.completed_at.clone(),
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn complete(&mut self) -> Result<OnboardingState> {
+        self.stored.completed = true;
+        self.stored.completed_at = Some(now_timestamp());
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1288,6 +1357,24 @@ impl LocalYuukeiRuntime {
     ) -> Result<ObservationSettingsState> {
         let mut registry = ObservationSettingsRegistry::open(&env.data_dir)?;
         registry.set(settings)
+    }
+
+    pub fn onboarding_state() -> Result<OnboardingState> {
+        Self::onboarding_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn onboarding_state_in(env: LocalRuntimeEnvironment) -> Result<OnboardingState> {
+        let registry = OnboardingRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
+    pub fn complete_onboarding() -> Result<OnboardingState> {
+        Self::complete_onboarding_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn complete_onboarding_in(env: LocalRuntimeEnvironment) -> Result<OnboardingState> {
+        let mut registry = OnboardingRegistry::open(&env.data_dir)?;
+        registry.complete()
     }
 
     pub fn set_app_talk_interval_minutes(minutes: u64) -> Result<AppSettingsState> {
@@ -3123,6 +3210,38 @@ mod tests {
         assert!(reopened.state().downloads);
         let raw = fs::read_to_string(data.path().join("settings").join("observations.json"))?;
         assert!(raw.contains("\"windows\": true"));
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_state_missing_file_is_initial_and_completion_persists(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let settings_path = data.path().join("settings").join("onboarding.json");
+        let mut registry = OnboardingRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state(),
+            OnboardingState {
+                completed: false,
+                completed_at: None,
+                settings_path: settings_path.clone(),
+            }
+        );
+        assert!(!settings_path.exists());
+
+        let completed = registry.complete()?;
+        assert!(completed.completed);
+        assert!(completed.completed_at.is_some());
+        assert!(settings_path.exists());
+
+        let raw = fs::read_to_string(&settings_path)?;
+        assert!(raw.contains("\"completed\": true"));
+        assert!(raw.contains("\"completedAt\""));
+
+        let reopened = OnboardingRegistry::open(data.path())?;
+        assert!(reopened.state().completed);
+        assert_eq!(reopened.state().settings_path, settings_path);
         Ok(())
     }
 

@@ -9,6 +9,7 @@ import type {
   DaihonDiagnosticEntry,
   ExtensionSettingsState,
   ObservationSettingsState,
+  OnboardingState,
   ResidentMemoryState,
   WorldPackSelectionState,
   YuukeiClient
@@ -135,6 +136,17 @@ function observationSettings(
   };
 }
 
+function onboardingState(
+  overrides: Partial<OnboardingState> = {}
+): OnboardingState {
+  return {
+    completed: true,
+    completedAt: "2026-07-07T00:00:00.000Z",
+    settingsPath: "/tmp/yuukei-v2/settings/onboarding.json",
+    ...overrides
+  };
+}
+
 function capabilityUsage(
   extensions: CapabilityUsageState["extensions"] = []
 ): CapabilityUsageState {
@@ -199,6 +211,8 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getAppSettings: vi.fn(async () => appSettings()),
     getObservationSettings: vi.fn(async () => observationSettings()),
+    getOnboardingState: vi.fn(async () => onboardingState()),
+    completeOnboarding: vi.fn(async () => onboardingState()),
     setObservationSettings: vi.fn(async (settings) =>
       observationSettings(settings)
     ),
@@ -246,6 +260,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
+    onOnboardingDismissed: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined),
     ...overrides
@@ -269,6 +284,71 @@ describe("App", () => {
     );
     expect(client.attachSurface).not.toHaveBeenCalled();
     expect(client.sendConversationText).not.toHaveBeenCalled();
+  });
+
+  it("shows onboarding for an initial launch", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      )
+    });
+
+    render(<App client={client} />);
+
+    expect(await screen.findByRole("heading", { name: "ようこそ" })).toBeInTheDocument();
+    expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
+    expect(
+      screen.getByText("この子はあなたのデバイスに住みます。")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "World Pack" })).not.toBeInTheDocument();
+  });
+
+  it("skips the AI step when starting without AI", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      )
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    expect(
+      await screen.findByRole("heading", { name: "AI(ことば)の設定" })
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "観測とプライバシー" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("completes onboarding and returns to the normal settings screen", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      ),
+      completeOnboarding: vi.fn(async () => onboardingState())
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+    await userEvent.click(screen.getByRole("button", { name: "次へ" }));
+    await userEvent.click(screen.getByRole("button", { name: "完了して始める" }));
+
+    await waitFor(() => expect(client.completeOnboarding).toHaveBeenCalled());
+    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(screen.queryByRole("heading", { name: "完了" })).not.toBeInTheDocument();
   });
 
   it("switches settings categories without leaving the app surface", async () => {
