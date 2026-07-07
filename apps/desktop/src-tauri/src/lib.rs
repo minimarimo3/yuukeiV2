@@ -76,6 +76,10 @@ struct DesktopAvatarGesturePoke {
     hit_zone_id: String,
     #[serde(default)]
     hit_zone_label: Option<String>,
+    #[serde(default)]
+    hit_surface: Option<String>,
+    #[serde(default)]
+    hit_bone: Option<String>,
     input: yuukei_device_host::AvatarGestureInput,
     screen: yuukei_device_host::AvatarGestureScreen,
 }
@@ -86,6 +90,8 @@ impl From<DesktopAvatarGesturePoke> for AvatarGesturePoke {
             actor_id: value.actor_id,
             hit_zone_id: value.hit_zone_id,
             hit_zone_label: value.hit_zone_label,
+            hit_surface: value.hit_surface,
+            hit_bone: value.hit_bone,
             input: value.input,
             screen: value.screen,
         }
@@ -971,6 +977,8 @@ mod tests {
                 actor_id: "yuukei".to_string(),
                 hit_zone_id: "head".to_string(),
                 hit_zone_label: Some("頭".to_string()),
+                hit_surface: Some("face".to_string()),
+                hit_bone: Some("head".to_string()),
                 input: AvatarGestureInput {
                     kind: "pointer".to_string(),
                     button: "primary".to_string(),
@@ -986,5 +994,7 @@ mod tests {
         assert_eq!(event.actor_id.as_deref(), Some("yuukei"));
         assert_eq!(event.payload["hitZoneId"], json!("head"));
         assert_eq!(event.payload["hitZoneLabel"], json!("頭"));
+        assert_eq!(event.payload["hitSurface"], json!("face"));
+        assert_eq!(event.payload["hitBone"], json!("head"));
     }
 }

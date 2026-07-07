@@ -25,9 +25,12 @@ import {
 import {
   autoHitZoneDefinitions,
   buildAvatarGesturePokePayload,
-  chooseHitZoneCandidate,
+  dominantSkinBoneForIntersection,
+  hitSurfaceForIntersection,
+  hitZoneForLineageOrHumanoidBone,
+  humanoidBoneNameForObject,
   mergeHitZoneDefinitions,
-  type HitZoneCandidate,
+  type HitSurface,
   type ResolvedActorHitZone
 } from "./actorHitZones";
 
@@ -44,7 +47,7 @@ type LoadedActor = {
   currentMotionId: string | null;
   hitZones: ResolvedActorHitZone[];
   boneNodes: Map<string, THREE.Object3D>;
-  hitTestRadius: number;
+  humanoidBoneByObject: Map<THREE.Object3D, string>;
   mouthOffsetY: number;
 };
 
@@ -241,6 +244,7 @@ function VrmStage({
         vrm.scene.position.set(0, 0, 0);
         actorRoot.add(vrm.scene);
         const boneNodes = humanoidBoneNodes(vrm);
+        const humanoidBoneByObject = reverseHumanoidBoneNodes(boneNodes);
         const hitZones = mergeHitZoneDefinitions(
           autoHitZoneDefinitions(new Set(boneNodes.keys())),
           asset.renderer.hitZones ?? []
@@ -254,7 +258,7 @@ function VrmStage({
           currentMotionId: null,
           hitZones,
           boneNodes,
-          hitTestRadius: semanticHitTestRadius(vrm.scene),
+          humanoidBoneByObject,
           mouthOffsetY: estimateMouthOffsetY(vrm.scene)
         };
         loadedActors.set(asset.actorId, loaded);
@@ -317,7 +321,10 @@ function VrmStage({
       if (!hit) return;
       event.preventDefault();
       void onAvatarGesturePoke(
-        buildAvatarGesturePokePayload(hit.actorId, hit.zone, event)
+        buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
+          hitBone: hit.hitBone,
+          hitSurface: hit.hitSurface
+        })
       ).catch((error) => {
         console.warn("Failed to send avatar gesture", error);
       });
@@ -501,6 +508,8 @@ async function pointerHitsVisibleSurface(
 type SemanticHitZoneResult = {
   actorId: string;
   zone: ResolvedActorHitZone;
+  hitBone?: string;
+  hitSurface: HitSurface;
 };
 
 const HUMANOID_BONE_NAMES = Object.values(VRMHumanBoneName);
@@ -514,6 +523,16 @@ function humanoidBoneNodes(vrm: VRM): Map<string, THREE.Object3D> {
     }
   }
   return nodes;
+}
+
+function reverseHumanoidBoneNodes(
+  boneNodes: ReadonlyMap<string, THREE.Object3D>
+): Map<THREE.Object3D, string> {
+  const byObject = new Map<THREE.Object3D, string>();
+  for (const [boneName, node] of boneNodes) {
+    byObject.set(node, boneName);
+  }
+  return byObject;
 }
 
 function semanticHitZoneAtPointer(
@@ -540,21 +559,14 @@ function semanticHitZoneAtPointer(
   raycaster.setFromCamera(pointer, camera);
 
   const actorScenes = [...loadedActors.values()].map((loaded) => loaded.vrm.scene);
-  const candidates: Array<HitZoneCandidate & { actorId: string }> = [];
   for (const intersection of raycaster.intersectObjects(actorScenes, true)) {
     const loaded = loadedActorForObject(intersection.object, loadedActors);
     if (!loaded) continue;
-    for (const candidate of hitZoneCandidatesForIntersection(loaded, intersection)) {
-      candidates.push({ ...candidate, actorId: loaded.actorId });
-    }
+    const hit = semanticHitZoneForIntersection(loaded, intersection);
+    return hit ? { ...hit, actorId: loaded.actorId } : null;
   }
 
-  const selected = chooseHitZoneCandidate(candidates);
-  if (!selected) return null;
-  return {
-    actorId: selected.actorId,
-    zone: selected.zone
-  };
+  return null;
 }
 
 function loadedActorForObject(
@@ -569,35 +581,15 @@ function loadedActorForObject(
   return null;
 }
 
-function hitZoneCandidatesForIntersection(
+function semanticHitZoneForIntersection(
   loaded: LoadedActor,
   intersection: THREE.Intersection
-): HitZoneCandidate[] {
+): Omit<SemanticHitZoneResult, "actorId"> | null {
   const names = objectLineageNames(intersection.object, loaded.vrm.scene);
-  const candidates: HitZoneCandidate[] = [];
-
-  for (const zone of loaded.hitZones) {
-    if (
-      zone.source === "nodeName" &&
-      zone.nodes.some((nodeName) => names.includes(nodeName))
-    ) {
-      candidates.push({ zone, distance: intersection.distance });
-      continue;
-    }
-
-    if (zone.source !== "humanoidBone") continue;
-    const nearestBone = nearestBoneDistance(zone.bones, loaded.boneNodes, intersection.point);
-    if (nearestBone === null) continue;
-    const threshold = semanticBoneThreshold(zone, loaded.hitTestRadius);
-    if (nearestBone <= threshold) {
-      candidates.push({
-        zone,
-        distance: intersection.distance + nearestBone * 0.05
-      });
-    }
-  }
-
-  return candidates;
+  const hitSurface = hitSurfaceForIntersection(intersection);
+  const hitBone = humanoidBoneNameForIntersection(intersection, loaded);
+  const zone = hitZoneForLineageOrHumanoidBone(loaded.hitZones, names, hitBone);
+  return zone ? { zone, hitBone: hitBone ?? undefined, hitSurface } : null;
 }
 
 function objectLineageNames(object: THREE.Object3D, root: THREE.Object3D): string[] {
@@ -613,38 +605,23 @@ function objectLineageNames(object: THREE.Object3D, root: THREE.Object3D): strin
   return names;
 }
 
-function nearestBoneDistance(
-  bones: string[],
-  boneNodes: Map<string, THREE.Object3D>,
-  point: THREE.Vector3
-): number | null {
-  let nearest: number | null = null;
-  const bonePosition = new THREE.Vector3();
-  for (const bone of bones) {
-    const node = boneNodes.get(bone);
-    if (!node) continue;
-    node.getWorldPosition(bonePosition);
-    const distance = bonePosition.distanceTo(point);
-    nearest = nearest === null ? distance : Math.min(nearest, distance);
+function humanoidBoneNameForIntersection(
+  intersection: THREE.Intersection,
+  loaded: LoadedActor
+): string | null {
+  const dominantBone = dominantSkinBoneForIntersection(intersection);
+  if (dominantBone) {
+    const humanoidName = humanoidBoneNameForObject(
+      dominantBone,
+      loaded.humanoidBoneByObject
+    );
+    if (humanoidName) return humanoidName;
   }
-  return nearest;
-}
 
-function semanticBoneThreshold(
-  zone: ResolvedActorHitZone,
-  baseRadius: number
-): number {
-  if (zone.id === "body") return baseRadius * 1.8;
-  if (zone.id === "head") return baseRadius * 1.2;
-  if (zone.id === "leftHand" || zone.id === "rightHand") return baseRadius;
-  return baseRadius;
-}
-
-function semanticHitTestRadius(root: THREE.Object3D): number {
-  const box = new THREE.Box3().setFromObject(root);
-  if (box.isEmpty()) return 0.18;
-  const size = box.getSize(new THREE.Vector3());
-  return Math.max(size.y * 0.16, 0.12);
+  return humanoidBoneNameForObject(
+    intersection.object,
+    loaded.humanoidBoneByObject
+  );
 }
 
 function estimateMouthOffsetY(root: THREE.Object3D): number {

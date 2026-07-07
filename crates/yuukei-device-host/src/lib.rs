@@ -350,6 +350,10 @@ pub struct AvatarGesturePoke {
     pub hit_zone_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_zone_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_surface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_bone: Option<String>,
     pub input: AvatarGestureInput,
     pub screen: AvatarGestureScreen,
 }
@@ -1722,6 +1726,8 @@ pub fn build_avatar_gesture_poke_event(
         actor_id,
         hit_zone_id,
         hit_zone_label,
+        hit_surface,
+        hit_bone,
         input,
         screen,
     } = gesture;
@@ -1745,6 +1751,12 @@ pub fn build_avatar_gesture_poke_event(
     ]);
     if let Some(label) = hit_zone_label {
         payload.insert("hitZoneLabel".to_string(), Value::String(label));
+    }
+    if let Some(surface) = hit_surface {
+        payload.insert("hitSurface".to_string(), Value::String(surface));
+    }
+    if let Some(bone) = hit_bone {
+        payload.insert("hitBone".to_string(), Value::String(bone));
     }
 
     RuntimeEvent {
@@ -2312,6 +2324,8 @@ mod tests {
                 actor_id: "yuukei".to_string(),
                 hit_zone_id: "head".to_string(),
                 hit_zone_label: Some("頭".to_string()),
+                hit_surface: Some("face".to_string()),
+                hit_bone: Some("head".to_string()),
                 input: AvatarGestureInput {
                     kind: "pointer".to_string(),
                     button: "primary".to_string(),
@@ -2329,6 +2343,8 @@ mod tests {
         assert_eq!(event.payload["actorId"], json!("yuukei"));
         assert_eq!(event.payload["hitZoneId"], json!("head"));
         assert_eq!(event.payload["hitZoneLabel"], json!("頭"));
+        assert_eq!(event.payload["hitSurface"], json!("face"));
+        assert_eq!(event.payload["hitBone"], json!("head"));
         assert_eq!(event.payload["input"]["kind"], json!("pointer"));
         assert_eq!(event.payload["input"]["button"], json!("primary"));
         assert_eq!(event.payload["screen"]["x"], json!(123.0));
@@ -2605,6 +2621,8 @@ mod tests {
                     actor_id: "yuukei".to_string(),
                     hit_zone_id: "head".to_string(),
                     hit_zone_label: Some("頭".to_string()),
+                    hit_surface: None,
+                    hit_bone: None,
                     input: AvatarGestureInput {
                         kind: "pointer".to_string(),
                         button: "primary".to_string(),

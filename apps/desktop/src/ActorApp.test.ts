@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as THREE from "three";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import {
   actorIdFromLocation,
@@ -11,7 +12,13 @@ import {
 import {
   autoHitZoneDefinitions,
   buildAvatarGesturePokePayload,
-  chooseHitZoneCandidate,
+  dominantSkinBoneForIntersection,
+  dominantSkinBoneIndexForFace,
+  hitSurfaceForIntersection,
+  hitSurfaceFromNames,
+  hitZoneForHumanoidBone,
+  hitZoneForLineageOrHumanoidBone,
+  humanoidBoneNameForObject,
   mergeHitZoneDefinitions,
   type ResolvedActorHitZone
 } from "./actorHitZones";
@@ -100,14 +107,18 @@ describe("ActorApp renderer helpers", () => {
 
   it("builds baseline humanoid hit zones from available VRM bones", () => {
     const zones = autoHitZoneDefinitions(
-      new Set(["head", "rightHand", "hips", "spine"])
+      new Set(["head", "rightHand", "hips", "spine", "chest"])
     );
 
-    expect(zones.map((zone) => zone.id)).toEqual(["head", "rightHand", "body"]);
-    expect(zones.find((zone) => zone.id === "body")?.bones).toEqual([
-      "spine",
-      "hips"
+    expect(zones.map((zone) => zone.id)).toEqual([
+      "head",
+      "chest",
+      "belly",
+      "hips",
+      "rightHand"
     ]);
+    expect(zones.find((zone) => zone.id === "chest")?.label).toBe("胸");
+    expect(zones.find((zone) => zone.id === "belly")?.bones).toEqual(["spine"]);
   });
 
   it("merges pack hit zones over auto generated zones", () => {
@@ -118,8 +129,7 @@ describe("ActorApp renderer helpers", () => {
         label: "おでこ",
         source: "humanoidBone",
         bones: ["head"],
-        events: ["avatar.gesture.poke"],
-        priority: 60
+        events: ["avatar.gesture.poke"]
       },
       {
         id: "tail",
@@ -132,50 +142,125 @@ describe("ActorApp renderer helpers", () => {
 
     expect(zones.find((zone) => zone.id === "head")).toMatchObject({
       label: "おでこ",
-      events: ["avatar.gesture.poke"],
-      priority: 60
+      events: ["avatar.gesture.poke"]
     });
     expect(zones.find((zone) => zone.id === "tail")).toMatchObject({
       label: "しっぽ",
       source: "nodeName",
       nodes: ["Tail", "Tail_001"],
-      events: ["avatar.gesture.poke"],
-      priority: 100
+      events: ["avatar.gesture.poke"]
     });
   });
 
-  it("chooses pokeable hit zones by priority then distance", () => {
-    const lowPriority = hitZone("body", 5);
-    const highPriority = hitZone("head", 30);
-    const patOnly = hitZone("hat", 100, ["avatar.gesture.pat"]);
+  it("maps humanoid bones to fine grained zones without head priority bleed", () => {
+    const zones = mergeHitZoneDefinitions(
+      autoHitZoneDefinitions(new Set(["head", "chest", "spine", "leftUpperLeg"])),
+      []
+    );
+
+    expect(hitZoneForHumanoidBone(zones, "head")?.id).toBe("head");
+    expect(hitZoneForHumanoidBone(zones, "chest")?.id).toBe("chest");
+    expect(hitZoneForHumanoidBone(zones, "spine")?.id).toBe("belly");
+    expect(hitZoneForHumanoidBone(zones, "leftUpperLeg")?.id).toBe("leftThigh");
+  });
+
+  it("lets nodeName pack zones override skin weight classification", () => {
+    const zones = mergeHitZoneDefinitions(
+      autoHitZoneDefinitions(new Set(["head", "hips"])),
+      [
+        {
+          id: "ribbon",
+          label: "リボン",
+          source: "nodeName",
+          nodes: ["Ribbon"]
+        }
+      ]
+    );
 
     expect(
-      chooseHitZoneCandidate([
-        { zone: lowPriority, distance: 1 },
-        { zone: highPriority, distance: 3 },
-        { zone: patOnly, distance: 0.1 }
-      ])?.zone.id
-    ).toBe("head");
+      hitZoneForLineageOrHumanoidBone(zones, ["Ribbon", "HairMesh"], "head")?.id
+    ).toBe("ribbon");
+  });
 
-    expect(
-      chooseHitZoneCandidate([
-        { zone: hitZone("leftHand", 20), distance: 4 },
-        { zone: hitZone("rightHand", 20), distance: 2 }
-      ])?.zone.id
-    ).toBe("rightHand");
+  it("classifies VRoid material and mesh names as hit surfaces", () => {
+    expect(hitSurfaceFromNames(["N00_000_00_Body_00_SKIN"])).toBe("skin");
+    expect(hitSurfaceFromNames(["N00_000_00_Tops_01_CLOTH"])).toBe("cloth");
+    expect(hitSurfaceFromNames(["N00_000_Hair_00_HAIR"])).toBe("hair");
+    expect(hitSurfaceFromNames(["Face_EyeExtra"])).toBe("face");
+    expect(hitSurfaceFromNames(["Accessory"])).toBe("unknown");
+    expect(hitSurfaceFromNames(["HairBack"])).toBe("hair");
+  });
+
+  it("reads dominant skin weights from indexed and non-indexed faces", () => {
+    expect(dominantSkinBoneIndexForFace(indexedSkinGeometry(), 0)).toBe(1);
+    expect(dominantSkinBoneIndexForFace(nonIndexedSkinGeometry(), 0)).toBe(2);
+  });
+
+  it("resolves dominant skinned mesh bones to humanoid zones", () => {
+    const headBone = new THREE.Bone();
+    headBone.name = "Head";
+    const chestBone = new THREE.Bone();
+    chestBone.name = "Chest";
+    const mesh = new THREE.SkinnedMesh(
+      indexedSkinGeometry(),
+      new THREE.MeshBasicMaterial({ name: "N00_000_00_Body_00_SKIN" })
+    );
+    mesh.add(headBone);
+    mesh.add(chestBone);
+    mesh.bind(new THREE.Skeleton([headBone, chestBone]));
+    const intersection = {
+      object: mesh,
+      faceIndex: 0,
+      distance: 1,
+      point: new THREE.Vector3()
+    } as THREE.Intersection;
+    const zones = mergeHitZoneDefinitions(
+      autoHitZoneDefinitions(new Set(["head", "chest"])),
+      []
+    );
+    const dominantBone = dominantSkinBoneForIntersection(intersection);
+    const humanoidBone = dominantBone
+      ? humanoidBoneNameForObject(dominantBone, new Map([[chestBone, "chest"]]))
+      : null;
+
+    expect(dominantBone).toBe(chestBone);
+    expect(humanoidBone).toBe("chest");
+    expect(hitZoneForHumanoidBone(zones, humanoidBone ?? "")?.id).toBe("chest");
+    expect(hitSurfaceForIntersection(intersection)).toBe("skin");
+  });
+
+  it("walks from non-humanoid hair bones to the nearest humanoid parent", () => {
+    const head = new THREE.Bone();
+    const hair = new THREE.Bone();
+    head.add(hair);
+    const boneName = humanoidBoneNameForObject(hair, new Map([[head, "head"]]));
+    const zones = mergeHitZoneDefinitions(autoHitZoneDefinitions(new Set(["head"])), []);
+
+    expect(boneName).toBe("head");
+    expect(hitZoneForHumanoidBone(zones, boneName ?? "")?.id).toBe("head");
   });
 
   it("builds avatar gesture poke payloads from pointer input", () => {
-    const payload = buildAvatarGesturePokePayload("yuukei", hitZone("head", 30), {
-      button: 0,
-      screenX: 123,
-      screenY: 456
-    });
+    const payload = buildAvatarGesturePokePayload(
+      "yuukei",
+      hitZone("head"),
+      {
+        button: 0,
+        screenX: 123,
+        screenY: 456
+      },
+      {
+        hitBone: "head",
+        hitSurface: "face"
+      }
+    );
 
     expect(payload).toEqual({
       actorId: "yuukei",
       hitZoneId: "head",
       hitZoneLabel: "頭",
+      hitBone: "head",
+      hitSurface: "face",
       input: {
         kind: "pointer",
         button: "primary"
@@ -251,7 +336,6 @@ describe("ActorApp renderer helpers", () => {
 
 function hitZone(
   id: string,
-  priority: number,
   events = ["avatar.gesture.poke"]
 ): ResolvedActorHitZone {
   return {
@@ -261,9 +345,63 @@ function hitZone(
     bones: [id],
     nodes: [],
     shape: "auto",
-    events,
-    priority
+    events
   };
+}
+
+function indexedSkinGeometry(): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(
+      [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
+      3
+    )
+  );
+  geometry.setIndex([0, 1, 2]);
+  geometry.setAttribute(
+    "skinIndex",
+    new THREE.Uint16BufferAttribute(
+      [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+      4
+    )
+  );
+  geometry.setAttribute(
+    "skinWeight",
+    new THREE.Float32BufferAttribute(
+      [
+        0.1, 0.8, 0.1, 0,
+        0.2, 0.7, 0.1, 0,
+        0.1, 0.9, 0, 0,
+        0.5, 0.5, 0, 0
+      ],
+      4
+    )
+  );
+  return geometry;
+}
+
+function nonIndexedSkinGeometry(): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3)
+  );
+  geometry.setAttribute(
+    "skinIndex",
+    new THREE.Uint16BufferAttribute(
+      [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+      4
+    )
+  );
+  geometry.setAttribute(
+    "skinWeight",
+    new THREE.Float32BufferAttribute(
+      [0.1, 0.1, 0.8, 0, 0, 0.2, 0.8, 0, 0, 0.1, 0.9, 0],
+      4
+    )
+  );
+  return geometry;
 }
 
 function actorAsset(actorId: string, renderable: boolean): ActorSurfaceAsset {

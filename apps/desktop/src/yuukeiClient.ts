@@ -168,6 +168,8 @@ export type AvatarGesturePokeInput = {
   actorId: string;
   hitZoneId: string;
   hitZoneLabel?: string;
+  hitSurface?: string;
+  hitBone?: string;
   input: {
     kind: "pointer";
     button: string;
