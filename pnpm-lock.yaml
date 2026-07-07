@@ -84,6 +84,8 @@ importers:
 
   packages/yuukei-intelligence: {}
 
+  packages/yuukei-voicevox: {}
+
 packages:
 
   '@adobe/css-tools@4.5.0':

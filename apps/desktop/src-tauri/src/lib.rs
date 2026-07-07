@@ -26,9 +26,11 @@ use yuukei_protocol::{
 };
 use yuukei_world::resolve_pack_relative_path;
 
+mod audio_player;
 mod desktop_stage;
 mod idle_observer;
 mod power_observer;
+use audio_player::AudioPlayer;
 use desktop_stage::{ActorStageAnchorReport, DesktopStageManager};
 use idle_observer::seconds_since_last_user_input;
 use power_observer::PowerObserver;
@@ -38,6 +40,7 @@ pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
     asset_index: RwLock<PackAssetIndex>,
     stage: Arc<DesktopStageManager>,
+    audio_player: Option<Arc<AudioPlayer>>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     surface_attached: Mutex<bool>,
     presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -454,14 +457,26 @@ pub fn run() {
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let stage = Arc::new(DesktopStageManager::new());
-            let command_forwarder =
-                spawn_command_forwarder(runtime.home(), app.handle().clone(), stage.clone());
+            let audio_player = match AudioPlayer::new() {
+                Ok(player) => Some(Arc::new(player)),
+                Err(error) => {
+                    eprintln!("Yuukei audio output unavailable: {error}");
+                    None
+                }
+            };
+            let command_forwarder = spawn_command_forwarder(
+                runtime.home(),
+                app.handle().clone(),
+                stage.clone(),
+                audio_player.clone(),
+            );
             let power_observer = PowerObserver::new(runtime.clone());
             app.manage(AppState {
                 env,
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 stage: stage.clone(),
+                audio_player,
                 command_forwarder: Mutex::new(Some(command_forwarder)),
                 surface_attached: Mutex::new(false),
                 presence_loop: Mutex::new(None),
@@ -797,7 +812,12 @@ async fn replace_runtime(
     attach_tauri_surface_or_status(&app, &runtime).await?;
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
-    let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
+    let next_forwarder = spawn_command_forwarder(
+        runtime.home(),
+        app.clone(),
+        state.stage.clone(),
+        state.audio_player.clone(),
+    );
     let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
@@ -868,7 +888,12 @@ async fn replace_runtime_snapshot(
     attach_tauri_surface_or_status(&app, &runtime).await?;
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
-    let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
+    let next_forwarder = spawn_command_forwarder(
+        runtime.home(),
+        app.clone(),
+        state.stage.clone(),
+        state.audio_player.clone(),
+    );
     let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
@@ -971,10 +996,20 @@ fn spawn_command_forwarder(
     home: Arc<yuukei_resident_home::ResidentHome>,
     app: AppHandle,
     stage: Arc<DesktopStageManager>,
+    audio_player: Option<Arc<AudioPlayer>>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     let mut receiver = home.subscribe_commands();
     tauri::async_runtime::spawn(async move {
         while let Ok(command) = receiver.recv().await {
+            if command.kind == "audio.play" {
+                if let Some(player) = &audio_player {
+                    if let Err(error) = player.play_command(&command) {
+                        eprintln!("Yuukei audio.play ignored: {error}");
+                    }
+                } else {
+                    eprintln!("Yuukei audio.play ignored: audio output unavailable");
+                }
+            }
             let _ = stage.handle_runtime_command(&app, &command);
             let _ = app.emit("yuukei-command", &command);
         }

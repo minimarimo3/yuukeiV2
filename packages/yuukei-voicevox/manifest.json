@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "id": "yuukei-voicevox",
+  "displayName": "Yuukei VOICEVOX",
+  "runtime": "process",
+  "permissions": {
+    "broadEventSubscription": false
+  },
+  "capabilities": [
+    {
+      "capability": "speech.synthesis",
+      "methods": [
+        "synthesize"
+      ]
+    }
+  ],
+  "process": {
+    "command": "node",
+    "args": [
+      "src/main.mjs"
+    ],
+    "timeoutMs": 15000
+  },
+  "settings": {
+    "fields": [
+      {
+        "key": "baseUrl",
+        "type": "string",
+        "label": "VOICEVOX URL",
+        "default": "http://127.0.0.1:50021"
+      },
+      {
+        "key": "speaker",
+        "type": "number",
+        "label": "既定の話者(style id)",
+        "default": 2,
+        "min": 0
+      },
+      {
+        "key": "speedScale",
+        "type": "number",
+        "label": "話速",
+        "default": 1,
+        "min": 0.1,
+        "max": 3
+      },
+      {
+        "key": "speakerOverrides",
+        "type": "string",
+        "label": "住人別話者",
+        "default": "yuukei=2,partner=3"
+      }
+    ]
+  }
+}

@@ -3332,12 +3332,12 @@ mod tests {
 
         LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
         let runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
-        let commands = runtime
+        let mut receiver = runtime.home().subscribe_commands();
+        runtime
             .send_conversation_text(CLI_SURFACE_ID, "こんにちは")
             .await?;
-        assert!(commands
-            .iter()
-            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
         let records = runtime
             .home()
             .event_log()
@@ -3358,14 +3358,12 @@ mod tests {
             Some(&"yuukei.default-tts".to_string())
         );
         let reopened = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
-        let commands = reopened
+        let mut receiver = reopened.home().subscribe_commands();
+        reopened
             .send_conversation_text(CLI_SURFACE_ID, "もう一度")
             .await?;
-        assert!(commands.iter().any(|command| command
-            .payload
-            .get("speechRef")
-            .and_then(Value::as_str)
-            .is_some_and(|speech_ref| speech_ref.starts_with("yuukei-default-tts://"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
 
         let state = LocalYuukeiRuntime::set_capability_default_in(
             env.clone(),
@@ -3382,12 +3380,12 @@ mod tests {
         assert!(raw_settings.contains("\"user-tts\""));
 
         let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
-        let commands = reopened
+        let mut receiver = reopened.home().subscribe_commands();
+        reopened
             .send_conversation_text(CLI_SURFACE_ID, "さらに")
             .await?;
-        assert!(commands
-            .iter()
-            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
         Ok(())
     }
 
@@ -4465,6 +4463,21 @@ process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
         Ok(())
     }
 
+    async fn next_runtime_command_of_kind(
+        receiver: &mut tokio::sync::broadcast::Receiver<RuntimeCommand>,
+        kind: &str,
+    ) -> RuntimeCommand {
+        loop {
+            let command = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+                .await
+                .expect("runtime command timed out")
+                .expect("runtime command channel closed");
+            if command.kind == kind {
+                return command;
+            }
+        }
+    }
+
     fn write_capability_extension_source(
         root: &Path,
         id: &str,
@@ -4495,7 +4508,7 @@ process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
 const fs = require("node:fs");
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const output = input.capability === "speech.synthesis"
-  ? {{ speechRef: "user-tts://cmd_1" }}
+  ? {{ audioPath: "/tmp/user-tts/cmd_1.wav", durationMs: 1200, format: "wav" }}
   : {{}};
 process.stdout.write(JSON.stringify({{
   invocationId: input.id,

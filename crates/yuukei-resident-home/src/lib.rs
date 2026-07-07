@@ -15,10 +15,10 @@ use tokio::{
 };
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
-    StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
     DIALOGUE_EXTRACT_CAPABILITY, DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
     MEMORY_FORGET_CAPABILITY, MEMORY_INDEX_CAPABILITY, MEMORY_LIST_CAPABILITY,
     MEMORY_RETRIEVE_CAPABILITY, MEMORY_UPDATE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
+    SPEECH_SYNTHESIS_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -68,6 +68,7 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
 const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const SPEECH_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MOOD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_MEMORY_INDEX_DAYS_PER_TRIGGER: usize = 7;
 const MEMORY_RETRIEVE_FACT_LIMIT: usize = 10;
@@ -214,12 +215,6 @@ impl ResidentHome {
         daihon
             .load_world_with_signal_aliases(&world_pack, &SignalAliasTable::default())
             .await?;
-        if !capabilities
-            .summaries()
-            .contains_key(DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID)
-        {
-            capabilities.register(StubSpeechSynthesisProvider)?;
-        }
         let missing_capabilities = world_pack
             .capabilities
             .required
@@ -1292,16 +1287,16 @@ impl ResidentHome {
         command: RuntimeCommand,
         source_event: &RuntimeEvent,
     ) -> Result<RuntimeCommand> {
-        let mut command = self
+        let command = self
             .apply_extensions_before_command_emit(command, source_event)
             .await?;
-        self.maybe_enrich_speech(&mut command, source_event).await?;
         let appended_command = self
             .event_log
             .append(NewEventLogRecord::from(command.clone()))?;
         self.set_cursor(appended_command.sequence)?;
         self.apply_command_to_snapshot(&command)?;
         let _ = self.command_tx.send(command.clone());
+        self.spawn_speech_synthesis_if_needed(command.clone(), source_event.clone())?;
         Ok(command)
     }
 
@@ -2308,10 +2303,10 @@ impl ResidentHome {
         Ok(())
     }
 
-    async fn maybe_enrich_speech(
+    fn spawn_speech_synthesis_if_needed(
         &self,
-        command: &mut RuntimeCommand,
-        source_event: &RuntimeEvent,
+        command: RuntimeCommand,
+        source_event: RuntimeEvent,
     ) -> Result<()> {
         if command.kind != "dialogue.say" {
             return Ok(());
@@ -2319,10 +2314,42 @@ impl ResidentHome {
         let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
             return Ok(());
         };
+        if text.trim().is_empty() {
+            return Ok(());
+        }
 
+        let has_provider = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .has_healthy_provider(SPEECH_SYNTHESIS_CAPABILITY);
+        if !has_provider {
+            return Ok(());
+        }
+
+        let home = Arc::new(self.clone());
+        tokio::spawn(async move {
+            let _ = home
+                .synthesize_speech_for_dialogue(command, source_event)
+                .await;
+        });
+        Ok(())
+    }
+
+    async fn synthesize_speech_for_dialogue(
+        &self,
+        command: RuntimeCommand,
+        source_event: RuntimeEvent,
+    ) -> Result<()> {
+        let text = command
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
-            capability: "speech.synthesis".to_string(),
+            capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
             method: "synthesize".to_string(),
             resident_id: command.resident_id.clone(),
             actor_id: command
@@ -2330,7 +2357,7 @@ impl ResidentHome {
                 .as_ref()
                 .and_then(|target| target.actor_id.clone()),
             input: JsonMap::from([
-                ("text".to_string(), Value::String(text.to_string())),
+                ("text".to_string(), Value::String(text)),
                 (
                     "speakerId".to_string(),
                     command
@@ -2355,7 +2382,7 @@ impl ResidentHome {
             context: None,
         };
 
-        self.record_capability_request(&invocation, source_event, Some(&command.id))?;
+        self.record_capability_request(&invocation, &source_event, Some(&command.id))?;
 
         let result = {
             let router = self
@@ -2363,26 +2390,65 @@ impl ResidentHome {
                 .lock()
                 .map_err(|_| ResidentHomeError::PoisonedLock)?
                 .clone();
-            router.invoke(invocation).await?
+            timeout(SPEECH_SYNTHESIS_TIMEOUT, router.invoke(invocation)).await
         };
-
-        if let Some(speech_ref) = result.output.get("speechRef").cloned() {
-            command.payload.insert("speechRef".to_string(), speech_ref);
-        }
+        let Ok(result) = result else {
+            return Ok(());
+        };
+        let Ok(result) = result else {
+            return Ok(());
+        };
 
         self.record_capability_result(CapabilityResultRecord {
             invocation_id: result.invocation_id,
             extension_id: result.extension_id,
             capability: result.capability,
-            output: result.output,
+            output: result.output.clone(),
             metadata: result.metadata,
-            source_event,
+            source_event: &source_event,
             source_command_id: Some(&command.id),
             actor_id: command
                 .target
                 .as_ref()
                 .and_then(|target| target.actor_id.as_deref()),
         })?;
+        let Some(audio_path) = result.output.get("audioPath").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if audio_path.trim().is_empty() {
+            return Ok(());
+        }
+        let mut audio_command =
+            RuntimeCommand::new("audio.play", "capability", command.resident_id.clone());
+        audio_command.target = command.target.clone();
+        audio_command.causality = Some(Causality {
+            source_event_id: command
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_event_id.clone())
+                .or_else(|| Some(source_event.id.clone())),
+            source_command_id: Some(command.id.clone()),
+            trace_id: command
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        audio_command.payload = JsonMap::from([
+            (
+                "audioPath".to_string(),
+                Value::String(audio_path.to_string()),
+            ),
+            (
+                "durationMs".to_string(),
+                result
+                    .output
+                    .get("durationMs")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ),
+        ]);
+        self.emit_command_for_event(audio_command, &source_event)
+            .await?;
         Ok(())
     }
 
@@ -3068,6 +3134,69 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct SpeechSynthesisProvider {
+        output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        fail: bool,
+    }
+
+    impl SpeechSynthesisProvider {
+        fn new(output: JsonMap) -> Self {
+            Self {
+                output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail: false,
+            }
+        }
+
+        fn failing(mut self) -> Self {
+            self.fail = true;
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for SpeechSynthesisProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "fake-speech".to_string(),
+                capabilities: vec![SPEECH_SYNTHESIS_CAPABILITY.to_string()],
+                methods: vec!["synthesize".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("speech calls lock")
+                .push(invocation.clone());
+            if self.fail {
+                return Err(CapabilityError::Extension("speech failed".to_string()));
+            }
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "fake-speech".to_string(),
+                capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
+                output: self.output.clone(),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
     struct DialogueInterpretProvider {
         output: JsonMap,
         calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
@@ -3462,10 +3591,7 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].kind, "avatar.expression");
         assert_eq!(commands[1].kind, "dialogue.say");
-        assert_eq!(
-            commands[1].payload["speechRef"],
-            format!("yuukei-default-tts://{}", commands[1].id)
-        );
+        assert!(commands[1].payload.get("speechRef").is_none());
         let expression = receiver.recv().await.expect("expression broadcast");
         assert_eq!(expression.kind, "avatar.expression");
         let dialogue = receiver.recv().await.expect("dialogue broadcast");
@@ -3482,8 +3608,9 @@ mod tests {
         assert!(records.contains(&"daihon.dispatch.result".to_string()));
         assert!(records.contains(&"avatar.expression".to_string()));
         assert!(records.contains(&"dialogue.say".to_string()));
-        assert!(records.contains(&"capability.invocation.request".to_string()));
-        assert!(records.contains(&"capability.invocation.result".to_string()));
+        assert!(!records.contains(&"audio.play".to_string()));
+        assert!(!records.contains(&"capability.invocation.request".to_string()));
+        assert!(!records.contains(&"capability.invocation.result".to_string()));
 
         let snapshot = home.snapshot()?;
         assert_eq!(snapshot.active_surface_id.as_deref(), Some("surface-main"));
@@ -3492,6 +3619,153 @@ mod tests {
             snapshot.actors["yuukei"].bubble.as_deref(),
             Some("聞こえています。こんにちは")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_success_emits_audio_play_after_dialogue() -> Result<()> {
+        let provider = SpeechSynthesisProvider::new(JsonMap::from([
+            (
+                "audioPath".to_string(),
+                json!("/tmp/yuukei-voicevox/cmd_1.wav"),
+            ),
+            ("durationMs".to_string(), json!(1234)),
+            ("format".to_string(), json!("wav")),
+        ]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_speech".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+        let broadcast_dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(broadcast_dialogue.id, dialogue.id);
+        let audio = next_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.source, "capability");
+        assert_eq!(audio.payload["audioPath"], "/tmp/yuukei-voicevox/cmd_1.wav");
+        assert_eq!(audio.payload["durationMs"], 1234);
+        assert_eq!(
+            audio
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_command_id.as_deref()),
+            Some(dialogue.id.as_str())
+        );
+
+        let calls = calls.lock().expect("speech calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].capability, SPEECH_SYNTHESIS_CAPABILITY);
+        assert_eq!(calls[0].method, "synthesize");
+        assert_eq!(calls[0].input["text"], "聞こえています。こんにちは");
+        assert_eq!(calls[0].input["speakerId"], "yuukei");
+        assert_eq!(calls[0].input["displayCommandId"], dialogue.id);
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| record.kind == "audio.play"));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.result"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_route_absent_keeps_dialogue_without_audio() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        let dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+        let no_audio = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            next_command_of_kind(&mut receiver, "audio.play"),
+        )
+        .await;
+        assert!(no_audio.is_err());
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(!records.iter().any(|record| record.kind == "audio.play"));
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_failure_keeps_dialogue_without_audio() -> Result<()> {
+        let provider = SpeechSynthesisProvider::new(JsonMap::new()).failing();
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        let _dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        let no_audio = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            next_command_of_kind(&mut receiver, "audio.play"),
+        )
+        .await;
+        assert!(no_audio.is_err());
+        assert_eq!(calls.lock().expect("speech calls lock").len(), 1);
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(!records.iter().any(|record| record.kind == "audio.play"));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.result"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
         Ok(())
     }
 
@@ -4810,10 +5084,27 @@ mod tests {
 
     #[tokio::test]
     async fn extension_can_rewrite_dialogue_before_emit_and_tts() -> Result<()> {
-        let home =
-            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        let provider = SpeechSynthesisProvider::new(JsonMap::from([
+            (
+                "audioPath".to_string(),
+                json!("/tmp/yuukei-voicevox/rewrite.wav"),
+            ),
+            ("durationMs".to_string(), json!(500)),
+            ("format".to_string(), json!("wav")),
+        ]));
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
         home.register_extension(DialogueSuffixExtension::new("nya-suffix", "にゃ"))
             .await?;
+        let mut receiver = home.subscribe_commands();
         home.attach_surface(SurfaceSession {
             surface_id: "surface-main".to_string(),
             device_id: "device-local".to_string(),
@@ -4847,13 +5138,19 @@ mod tests {
             Some("聞こえています。こんにちはにゃ")
         );
 
+        // 合成は非同期に走るので、audio.playの配信を待ってから記録を確認する。
+        let _ = next_command_of_kind(&mut receiver, "audio.play").await;
+
         let records = home.event_log().read(EventLogQuery::default())?.records;
         assert!(records
             .iter()
             .any(|record| record.kind == "extension.hook.result"));
         let speech_request = records
             .iter()
-            .find(|record| record.kind == "capability.invocation.request")
+            .find(|record| {
+                record.kind == "capability.invocation.request"
+                    && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY
+            })
             .expect("speech request");
         assert_eq!(
             speech_request.payload["input"]["text"],
