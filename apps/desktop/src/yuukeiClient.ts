@@ -4,6 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   ExtensionCapabilityDeclaration,
   ExtensionEventSubscription,
+  ExtensionHealth,
   ExtensionHookPoint,
   ExtensionHookSubscription,
   ExtensionPermissions,
@@ -96,6 +97,12 @@ export type InstalledExtension = {
   installedAt: string;
   updatedAt: string;
   lastLoadError?: string;
+  runtimeStatus?: {
+    health: ExtensionHealth;
+    failureCount: number;
+    suspended: boolean;
+    message?: string | null;
+  };
 };
 
 export type ExtensionSettingsState = {
@@ -407,6 +414,7 @@ export type YuukeiClient = {
     key: string,
     value: string | null
   ): Promise<ExtensionSettingsChangeResult>;
+  restartExtensionProcess(extensionId: string): Promise<ExtensionSettingsState>;
   setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
@@ -554,6 +562,10 @@ export const tauriYuukeiClient: YuukeiClient = {
       extensionId,
       key,
       value
+    }),
+  restartExtensionProcess: (extensionId: string) =>
+    invoke<ExtensionSettingsState>("restart_extension_process", {
+      extensionId
     }),
   setAppTalkIntervalMinutes: (minutes: number) =>
     invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),

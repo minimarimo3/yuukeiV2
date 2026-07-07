@@ -1009,6 +1009,15 @@ input {
   font-size: 11px;
 }
 
+.extension-toggle .extension-runtime-status {
+  color: var(--muted);
+}
+
+.extension-toggle .extension-runtime-status.is-suspended {
+  color: #b42318;
+  font-weight: 700;
+}
+
 .extension-actions {
   display: flex;
   gap: 6px;

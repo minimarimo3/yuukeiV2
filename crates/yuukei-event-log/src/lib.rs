@@ -9,6 +9,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use yuukei_protocol::{EventLogRecord, NewEventLogRecord, Privacy};
 
+pub const DEFAULT_MAX_EVENT_LOG_RECORDS: usize = 1_000_000;
+pub const DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR: usize = 10;
+
 #[derive(Debug, Error)]
 pub enum EventLogError {
     #[error("event log record already exists: {0}")]
@@ -72,6 +75,13 @@ pub struct DeleteSelector {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteSummary {
     pub deleted: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrimSummary {
+    pub deleted: usize,
+    pub oldest_timestamp: Option<String>,
+    pub newest_timestamp: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -341,6 +351,41 @@ impl EventLog {
         let summary = self.delete_matching(selector)?;
         self.append(audit_record)?;
         Ok(summary)
+    }
+
+    pub fn trim_to_record_limit(
+        &self,
+        max_records: usize,
+        fraction_divisor: usize,
+    ) -> Result<TrimSummary> {
+        let records = self.read(EventLogQuery::default())?.records;
+        if records.len() <= max_records {
+            return Ok(TrimSummary {
+                deleted: 0,
+                oldest_timestamp: None,
+                newest_timestamp: None,
+            });
+        }
+        let delete_count = (max_records / fraction_divisor.max(1)).max(1);
+        let matching = records.into_iter().take(delete_count).collect::<Vec<_>>();
+        let oldest_timestamp = matching.first().map(|record| record.timestamp.clone());
+        let newest_timestamp = matching.last().map(|record| record.timestamp.clone());
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let mut deleted = 0;
+        for record in matching {
+            deleted += connection.execute(
+                "DELETE FROM event_log_records WHERE sequence = ?1",
+                params![record.sequence],
+            )?;
+        }
+        Ok(TrimSummary {
+            deleted,
+            oldest_timestamp,
+            newest_timestamp,
+        })
     }
 
     fn delete_matching(&self, selector: EventLogDeleteSelector) -> Result<DeleteSummary> {
@@ -678,6 +723,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["event_log.deleted", "conversation.text"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn trim_to_record_limit_removes_oldest_fraction() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        for index in 0..12 {
+            let mut event = record(&format!("evt_{index}"), "conversation.text");
+            event.timestamp = format!("2026-07-{day:02}T00:00:00.000Z", day = index + 1);
+            log.append(event)?;
+        }
+
+        let summary = log.trim_to_record_limit(10, 10)?;
+
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(
+            summary.oldest_timestamp.as_deref(),
+            Some("2026-07-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            summary.newest_timestamp.as_deref(),
+            Some("2026-07-01T00:00:00.000Z")
+        );
+        let records = log.read(EventLogQuery::default())?.records;
+        assert_eq!(records.len(), 11);
+        assert_eq!(records[0].id, "evt_1");
+        assert_eq!(records.last().map(|record| record.sequence), Some(12));
         Ok(())
     }
 }

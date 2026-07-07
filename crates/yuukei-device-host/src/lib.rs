@@ -13,8 +13,11 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use yuukei_capability::CapabilityRouter;
-use yuukei_event_log::{DeleteSummary, EventLog, EventLogPrivacyFilter, EventLogQuery};
-use yuukei_extension::ProcessHookExtension;
+use yuukei_event_log::{
+    DeleteSummary, EventLog, EventLogPrivacyFilter, EventLogQuery,
+    DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR, DEFAULT_MAX_EVENT_LOG_RECORDS,
+};
+use yuukei_extension::{ProcessHookExtension, ProcessRuntimeSupervisor};
 use yuukei_protocol::{
     new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
     MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, Privacy,
@@ -49,6 +52,7 @@ pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
 const PRESENCE_LOOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PRESENCE_IDLE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 const TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION: Duration = Duration::from_secs(60);
+const EVENT_LOG_TRIM_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Error)]
 pub enum DeviceHostError {
@@ -931,6 +935,7 @@ pub struct LocalYuukeiRuntime {
     actor_surface_assets: ActorSurfaceAssetCatalog,
     presence_state: Arc<Mutex<PresenceState>>,
     session_daihon_diagnostics: Arc<Mutex<Vec<DaihonDiagnosticEntry>>>,
+    process_runtime_supervisor: ProcessRuntimeSupervisor,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2021,8 +2026,13 @@ impl LocalYuukeiRuntime {
             }
         };
         let extension_settings = config.extension_settings_registry()?;
-        let capabilities =
-            build_extension_capability_router(&extension_settings, &logger, &config.data_dir)?;
+        let process_runtime_supervisor = ProcessRuntimeSupervisor::new();
+        let capabilities = build_extension_capability_router(
+            &extension_settings,
+            &logger,
+            &config.data_dir,
+            &process_runtime_supervisor,
+        )?;
         let scene_history_logger = {
             let logger = logger.clone();
             Arc::new(move |error: yuukei_world::SceneHistoryPersistenceError| {
@@ -2084,8 +2094,15 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
-        let loaded_extensions =
-            load_trusted_extensions(&extension_settings, &home, &logger, &config.data_dir).await?;
+        let loaded_extensions = load_trusted_extensions(
+            &extension_settings,
+            &home,
+            &logger,
+            &config.data_dir,
+            &process_runtime_supervisor,
+        )
+        .await?;
+        trim_event_log_if_needed(&home, &logger);
 
         logger.record(
             "runtime.open.ready",
@@ -2124,8 +2141,10 @@ impl LocalYuukeiRuntime {
             actor_surface_assets,
             presence_state: Arc::new(Mutex::new(PresenceState::default())),
             session_daihon_diagnostics: Arc::new(Mutex::new(initial_session_daihon_diagnostics)),
+            process_runtime_supervisor,
         };
         runtime.record_world_pack_activated().await?;
+        runtime.spawn_event_log_trim_loop();
         Ok(runtime)
     }
 
@@ -2135,6 +2154,18 @@ impl LocalYuukeiRuntime {
 
     pub fn logger(&self) -> AppLogger {
         self.logger.clone()
+    }
+
+    fn spawn_event_log_trim_loop(&self) {
+        let home = self.home.clone();
+        let logger = self.logger.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(EVENT_LOG_TRIM_CHECK_INTERVAL);
+            loop {
+                interval.tick().await;
+                trim_event_log_if_needed(&home, &logger);
+            }
+        });
     }
 
     pub fn paths(&self) -> &RuntimePaths {
@@ -2168,8 +2199,24 @@ impl LocalYuukeiRuntime {
     }
 
     pub fn extension_settings(&self) -> Result<ExtensionSettingsState> {
-        ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
-            .map(|registry| registry.state())
+        let mut state =
+            ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
+                .map(|registry| registry.state())?;
+        let statuses = self.process_runtime_supervisor.statuses();
+        for extension in &mut state.installed {
+            extension.runtime_status = statuses.get(&extension.extension_id).cloned();
+        }
+        Ok(state)
+    }
+
+    pub fn restart_extension_process(&self, extension_id: &str) -> Result<ExtensionSettingsState> {
+        self.process_runtime_supervisor.restart(extension_id);
+        self.logger.record(
+            "extension.process.restart",
+            "device-host",
+            JsonMap::from([("extensionId".to_string(), json!(extension_id))]),
+        )?;
+        self.extension_settings()
     }
 
     pub fn app_settings(&self) -> Result<AppSettingsState> {
@@ -2981,6 +3028,8 @@ pub enum AppLogError {
 pub struct AppLogger {
     path: PathBuf,
     file: Arc<Mutex<File>>,
+    max_bytes: u64,
+    max_generations: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2995,7 +3044,18 @@ pub struct AppLogRecord {
 }
 
 impl AppLogger {
+    const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
+    const DEFAULT_MAX_GENERATIONS: usize = 3;
+
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, AppLogError> {
+        Self::open_with_rotation(path, Self::DEFAULT_MAX_BYTES, Self::DEFAULT_MAX_GENERATIONS)
+    }
+
+    fn open_with_rotation(
+        path: impl AsRef<Path>,
+        max_bytes: u64,
+        max_generations: usize,
+    ) -> std::result::Result<Self, AppLogError> {
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?;
         }
@@ -3003,6 +3063,8 @@ impl AppLogger {
         Ok(Self {
             path: path.as_ref().to_path_buf(),
             file: Arc::new(Mutex::new(file)),
+            max_bytes,
+            max_generations,
         })
     }
 
@@ -3024,11 +3086,57 @@ impl AppLogger {
             payload,
         };
         let mut file = self.file.lock().map_err(|_| AppLogError::PoisonedLock)?;
+        if let Err(error) = self.rotate_if_needed(&mut file) {
+            eprintln!(
+                "failed to rotate app activity log {}: {error}",
+                self.path.display()
+            );
+        }
         serde_json::to_writer(&mut *file, &record)?;
         file.write_all(b"\n")?;
         file.flush()?;
         Ok(record)
     }
+
+    fn rotate_if_needed(&self, file: &mut File) -> std::result::Result<(), AppLogError> {
+        if self.max_generations == 0 {
+            return Ok(());
+        }
+        let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        if size <= self.max_bytes {
+            return Ok(());
+        }
+        file.flush()?;
+        let oldest = rotated_app_log_path(&self.path, self.max_generations);
+        if oldest.exists() {
+            fs::remove_file(&oldest)?;
+        }
+        for generation in (1..self.max_generations).rev() {
+            let from = rotated_app_log_path(&self.path, generation);
+            if from.exists() {
+                fs::rename(&from, rotated_app_log_path(&self.path, generation + 1))?;
+            }
+        }
+        if self.path.exists() {
+            fs::rename(&self.path, rotated_app_log_path(&self.path, 1))?;
+        }
+        *file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        Ok(())
+    }
+}
+
+fn rotated_app_log_path(path: &Path, generation: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("app-activity.jsonl");
+    path.with_file_name(format!(
+        "{stem}.{generation}.jsonl",
+        stem = file_name.trim_end_matches(".jsonl")
+    ))
 }
 
 pub fn tauri_surface_session(device_id: &str) -> SurfaceSession {
@@ -3459,6 +3567,7 @@ async fn load_trusted_extensions(
     home: &ResidentHome,
     logger: &AppLogger,
     data_dir: &Path,
+    process_runtime_supervisor: &ProcessRuntimeSupervisor,
 ) -> Result<usize> {
     let mut loaded = 0;
     let hook_order = extension_settings.hook_order(&ExtensionHookPoint::BeforeCommandEmit);
@@ -3475,6 +3584,7 @@ async fn load_trusted_extensions(
                     install.enabled,
                     extension_data_dir,
                     install.settings_json,
+                    process_runtime_supervisor.clone(),
                 ))
                 .await?;
                 loaded += 1;
@@ -3515,6 +3625,7 @@ fn build_extension_capability_router(
     extension_settings: &ExtensionSettingsRegistry,
     logger: &AppLogger,
     data_dir: &Path,
+    process_runtime_supervisor: &ProcessRuntimeSupervisor,
 ) -> Result<CapabilityRouter> {
     let mut router = CapabilityRouter::new();
     for entry in extension_settings.runtime_entries() {
@@ -3532,6 +3643,7 @@ fn build_extension_capability_router(
                         install.enabled,
                         extension_data_dir,
                         install.settings_json,
+                        process_runtime_supervisor.clone(),
                     ))
                     .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
             }
@@ -3563,13 +3675,54 @@ fn extension_with_runtime_environment(
     enabled: bool,
     data_dir: impl Into<PathBuf>,
     settings_json: Option<String>,
+    process_runtime_supervisor: ProcessRuntimeSupervisor,
 ) -> ProcessHookExtension {
     let extension = ProcessHookExtension::from_installed_manifest(manifest, install_dir, enabled)
-        .with_data_dir(data_dir);
+        .with_data_dir(data_dir)
+        .with_runtime_supervisor(process_runtime_supervisor);
     if let Some(settings_json) = settings_json {
         extension.with_settings_json(settings_json)
     } else {
         extension
+    }
+}
+
+fn trim_event_log_if_needed(home: &ResidentHome, logger: &AppLogger) {
+    match home.trim_event_log_to_record_limit(
+        DEFAULT_MAX_EVENT_LOG_RECORDS,
+        DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR,
+    ) {
+        Ok(summary) if summary.deleted > 0 => {
+            let _ = logger.record(
+                "event_log.trimmed",
+                "device-host",
+                JsonMap::from([
+                    ("deleted".to_string(), json!(summary.deleted)),
+                    (
+                        "oldestTimestamp".to_string(),
+                        summary
+                            .oldest_timestamp
+                            .map(Value::String)
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "newestTimestamp".to_string(),
+                        summary
+                            .newest_timestamp
+                            .map(Value::String)
+                            .unwrap_or(Value::Null),
+                    ),
+                ]),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let _ = logger.record(
+                "event_log.trim.error",
+                "device-host",
+                error_payload("event-log", &error),
+            );
+        }
     }
 }
 
@@ -3631,6 +3784,32 @@ mod tests {
         assert!(raw.contains("\"type\":\"test.event\""));
         assert!(raw.contains("\"ok\":true"));
         assert_eq!(logger.path(), path.as_path());
+        Ok(())
+    }
+
+    #[test]
+    fn app_logger_rotates_after_size_limit_and_keeps_three_generations(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("app-activity.jsonl");
+        let logger = AppLogger::open_with_rotation(&path, 180, 3)?;
+
+        for index in 0..12 {
+            logger.record(
+                "test.event",
+                "test",
+                JsonMap::from([
+                    ("index".to_string(), json!(index)),
+                    ("padding".to_string(), json!("xxxxxxxxxxxxxxxxxxxxxxxx")),
+                ]),
+            )?;
+        }
+
+        assert!(path.exists());
+        assert!(dir.path().join("app-activity.1.jsonl").exists());
+        assert!(dir.path().join("app-activity.2.jsonl").exists());
+        assert!(dir.path().join("app-activity.3.jsonl").exists());
+        assert!(!dir.path().join("app-activity.4.jsonl").exists());
         Ok(())
     }
 

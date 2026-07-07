@@ -564,6 +564,17 @@ async fn set_extension_secret(
 }
 
 #[tauri::command]
+async fn restart_extension_process(
+    state: State<'_, AppState>,
+    extension_id: String,
+) -> Result<ExtensionSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .restart_extension_process(&extension_id)
+        .map_err(to_message)
+}
+
+#[tauri::command]
 async fn set_app_talk_interval_minutes(
     state: State<'_, AppState>,
     minutes: u64,
@@ -703,6 +714,7 @@ pub fn run() {
             set_extension_hook_order,
             set_extension_setting_values,
             set_extension_secret,
+            restart_extension_process,
             set_app_talk_interval_minutes
         ])
         .run(tauri::generate_context!())

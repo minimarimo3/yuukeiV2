@@ -40,6 +40,13 @@ pub enum CapabilityError {
     },
     #[error("capability extension invocation failed: {0}")]
     Extension(String),
+    #[error("capability extension process suspended: {message}")]
+    ExtensionProcessSuspended {
+        extension_id: String,
+        display_name: String,
+        message: String,
+        suspension_started: bool,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CapabilityError>;

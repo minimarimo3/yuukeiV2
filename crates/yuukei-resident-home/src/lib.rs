@@ -14,7 +14,7 @@ use tokio::{
     time::timeout,
 };
 use yuukei_capability::{
-    CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
+    CapabilityError, CapabilityProvider, CapabilityResult, CapabilityRouter, EventLogReadGrant,
     DIALOGUE_EXTRACT_CAPABILITY, DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
     MEMORY_FORGET_CAPABILITY, MEMORY_INDEX_CAPABILITY, MEMORY_LIST_CAPABILITY,
     MEMORY_RETRIEVE_CAPABILITY, MEMORY_UPDATE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
@@ -22,11 +22,12 @@ use yuukei_capability::{
 };
 use yuukei_event_log::{
     DeleteSummary, EventLog, EventLogAdminQuery, EventLogDeleteSelector, EventLogError,
-    EventLogPage, EventLogPrivacyFilter, EventLogQuery,
+    EventLogPage, EventLogPrivacyFilter, EventLogQuery, TrimSummary,
 };
 use yuukei_extension::{
     event_type_matches, ExtensionCommandContext, ExtensionError, ExtensionEventContext,
-    ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, YuukeiExtension,
+    ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, ProcessFailureKind,
+    ProcessFailureReport, YuukeiExtension,
 };
 use yuukei_protocol::{
     new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget, DialogueExtractInput,
@@ -289,6 +290,53 @@ impl ResidentHome {
 
     pub fn event_log(&self) -> EventLog {
         self.event_log.clone()
+    }
+
+    pub fn trim_event_log_to_record_limit(
+        &self,
+        max_records: usize,
+        fraction_divisor: usize,
+    ) -> Result<TrimSummary> {
+        let summary = self
+            .event_log
+            .trim_to_record_limit(max_records, fraction_divisor)?;
+        if summary.deleted == 0 {
+            return Ok(summary);
+        }
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "event_log.trimmed".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: self.resident_id()?,
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                ("deleted".to_string(), json!(summary.deleted)),
+                (
+                    "oldestTimestamp".to_string(),
+                    summary
+                        .oldest_timestamp
+                        .as_ref()
+                        .map(|value| Value::String(value.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "newestTimestamp".to_string(),
+                    summary
+                        .newest_timestamp
+                        .as_ref()
+                        .map(|value| Value::String(value.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+            ]),
+            causality: None,
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(summary)
     }
 
     pub fn subscribe_commands(&self) -> broadcast::Receiver<RuntimeCommand> {
@@ -894,6 +942,18 @@ impl ResidentHome {
 
         let mut proposed_events = Vec::new();
         for report in result.reports {
+            if let Some(failure) = &report.process_failure {
+                self.handle_process_failure_report(
+                    failure,
+                    &record.id,
+                    &record.resident_id,
+                    record
+                        .causality
+                        .as_ref()
+                        .and_then(|causality| causality.trace_id.clone()),
+                )
+                .await?;
+            }
             for proposed in &report.result.proposed_events {
                 match self.normalize_extension_event(&registry, &report, proposed, record) {
                     Ok(event) => proposed_events.push(event),
@@ -1201,8 +1261,15 @@ impl ResidentHome {
             context: None,
         };
         self.record_capability_request(&invocation, source_event, None)?;
-        let result = timeout(MOOD_EVALUATE_TIMEOUT, router.invoke(invocation.clone())).await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                MOOD_EVALUATE_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
         self.record_capability_result(CapabilityResultRecord {
@@ -1479,6 +1546,19 @@ impl ResidentHome {
         Ok(command)
     }
 
+    fn emit_internal_command_without_extensions(
+        &self,
+        command: RuntimeCommand,
+    ) -> Result<RuntimeCommand> {
+        let appended_command = self
+            .event_log
+            .append(NewEventLogRecord::from(command.clone()))?;
+        self.set_cursor(appended_command.sequence)?;
+        self.apply_command_to_snapshot(&command)?;
+        let _ = self.command_tx.send(command.clone());
+        Ok(command)
+    }
+
     async fn maybe_generate_dialogue_fallback(
         &self,
         event: &RuntimeEvent,
@@ -1509,15 +1589,20 @@ impl ResidentHome {
         };
         self.record_capability_request(&invocation, event, None)?;
 
-        let result = {
-            let router = self
-                .capabilities
-                .lock()
-                .map_err(|_| ResidentHomeError::PoisonedLock)?
-                .clone();
-            router.invoke(invocation.clone()).await
-        };
-        let Ok(result) = result else {
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                event,
+            )
+            .await?
+        else {
             return Ok(Vec::new());
         };
 
@@ -1850,6 +1935,18 @@ impl ResidentHome {
             .await?;
         for report in &result.reports {
             self.record_extension_hook_result(report, source_event)?;
+            if let Some(failure) = &report.process_failure {
+                self.handle_process_failure_report(
+                    failure,
+                    &source_event.id,
+                    &source_event.resident_id,
+                    source_event
+                        .causality
+                        .as_ref()
+                        .and_then(|causality| causality.trace_id.clone()),
+                )
+                .await?;
+            }
         }
         Ok(result.command)
     }
@@ -1914,6 +2011,152 @@ impl ResidentHome {
                     .causality
                     .as_ref()
                     .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(())
+    }
+
+    async fn handle_process_failure_report(
+        &self,
+        failure: &ProcessFailureReport,
+        source_event_id: &str,
+        resident_id: &str,
+        trace_id: Option<String>,
+    ) -> Result<()> {
+        self.record_extension_process_failure(
+            "extension.process.failed",
+            failure,
+            source_event_id,
+            resident_id,
+            trace_id.clone(),
+        )?;
+        if !failure.suspension_started {
+            return Ok(());
+        }
+        self.record_extension_process_failure(
+            "extension.process.suspended",
+            failure,
+            source_event_id,
+            resident_id,
+            trace_id.clone(),
+        )?;
+        let mut command = RuntimeCommand::new("ui.notification", "resident-home", resident_id);
+        command.payload = JsonMap::from([
+            (
+                "extensionId".to_string(),
+                Value::String(failure.extension_id.clone()),
+            ),
+            (
+                "text".to_string(),
+                Value::String(format!(
+                    "{}が応答しないため、いったん休止しました。設定画面から再起動できます",
+                    failure.display_name
+                )),
+            ),
+        ]);
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event_id.to_string()),
+            source_command_id: None,
+            trace_id: trace_id.clone(),
+        });
+        self.emit_internal_command_without_extensions(command)?;
+        Ok(())
+    }
+
+    async fn handle_capability_error(
+        &self,
+        error: &CapabilityError,
+        source_event: &RuntimeEvent,
+    ) -> Result<()> {
+        if let CapabilityError::ExtensionProcessSuspended {
+            extension_id,
+            display_name,
+            message,
+            suspension_started,
+        } = error
+        {
+            let failure = ProcessFailureReport {
+                extension_id: extension_id.clone(),
+                display_name: display_name.clone(),
+                kind: ProcessFailureKind::Crash,
+                message: message.clone(),
+                suspended: true,
+                suspension_started: *suspension_started,
+            };
+            self.handle_process_failure_report(
+                &failure,
+                &source_event.id,
+                &source_event.resident_id,
+                source_event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn invoke_capability_with_timeout(
+        &self,
+        router: CapabilityRouter,
+        invocation: CapabilityInvocation,
+        timeout_duration: Duration,
+        source_event: &RuntimeEvent,
+    ) -> Result<Option<CapabilityResult>> {
+        match timeout(timeout_duration, router.invoke(invocation)).await {
+            Ok(Ok(result)) => Ok(Some(result)),
+            Ok(Err(error)) => {
+                self.handle_capability_error(&error, source_event).await?;
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn record_extension_process_failure(
+        &self,
+        kind: &str,
+        failure: &ProcessFailureReport,
+        source_event_id: &str,
+        resident_id: &str,
+        trace_id: Option<String>,
+    ) -> Result<()> {
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: kind.to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: resident_id.to_string(),
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                (
+                    "extensionId".to_string(),
+                    Value::String(failure.extension_id.clone()),
+                ),
+                (
+                    "displayName".to_string(),
+                    Value::String(failure.display_name.clone()),
+                ),
+                (
+                    "failureKind".to_string(),
+                    serde_json::to_value(&failure.kind)?,
+                ),
+                (
+                    "message".to_string(),
+                    Value::String(failure.message.clone()),
+                ),
+                ("suspended".to_string(), Value::Bool(failure.suspended)),
+            ]),
+            causality: Some(Causality {
+                source_event_id: Some(source_event_id.to_string()),
+                source_command_id: None,
+                trace_id,
             }),
             privacy: None,
         };
@@ -1997,12 +2240,15 @@ impl ResidentHome {
                 context: None,
             };
             self.record_capability_request(&invocation, trigger_event, None)?;
-            let result = timeout(
-                DIALOGUE_INTERPRET_TIMEOUT,
-                router.invoke(invocation.clone()),
-            )
-            .await;
-            let Ok(Ok(result)) = result else {
+            let Some(result) = self
+                .invoke_capability_with_timeout(
+                    router.clone(),
+                    invocation.clone(),
+                    DIALOGUE_INTERPRET_TIMEOUT,
+                    trigger_event,
+                )
+                .await?
+            else {
                 return Ok(());
             };
             self.record_capability_result(CapabilityResultRecord {
@@ -2051,11 +2297,15 @@ impl ResidentHome {
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
         let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation)).await;
-        let result = result.map_err(|_| {
-            ResidentHomeError::Capability(CapabilityError::Extension(format!(
-                "{capability} timed out"
-            )))
-        })??;
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => return Err(ResidentHomeError::Capability(error)),
+            Err(_) => {
+                return Err(ResidentHomeError::Capability(CapabilityError::Extension(
+                    format!("{capability} timed out"),
+                )))
+            }
+        };
         let output_value = Value::Object(result.output.into_iter().collect());
         Ok(serde_json::from_value(output_value)?)
     }
@@ -2099,8 +2349,15 @@ impl ResidentHome {
             context: None,
         };
         self.record_capability_request(&invocation, source_event, None)?;
-        let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation.clone())).await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                MEMORY_RETRIEVE_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
         self.record_capability_result(CapabilityResultRecord {
@@ -2173,12 +2430,15 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -2251,12 +2511,15 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
@@ -2325,12 +2588,15 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
@@ -2563,18 +2829,20 @@ impl ResidentHome {
 
         self.record_capability_request(&invocation, &source_event, Some(&command.id))?;
 
-        let result = {
-            let router = self
-                .capabilities
-                .lock()
-                .map_err(|_| ResidentHomeError::PoisonedLock)?
-                .clone();
-            timeout(SPEECH_SYNTHESIS_TIMEOUT, router.invoke(invocation)).await
-        };
-        let Ok(result) = result else {
-            return Ok(());
-        };
-        let Ok(result) = result else {
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation,
+                SPEECH_SYNTHESIS_TIMEOUT,
+                &source_event,
+            )
+            .await?
+        else {
             return Ok(());
         };
 
@@ -3055,7 +3323,8 @@ mod tests {
     use yuukei_protocol::{
         ExecutionLocation, ExtensionEventInvocation, ExtensionEventLogReadPermission,
         ExtensionEventResult, ExtensionEventSubscription, ExtensionHookAction,
-        ExtensionHookInvocation, ExtensionHookResult, ExtensionPermissions, ExtensionRuntimeKind,
+        ExtensionHookInvocation, ExtensionHookPoint, ExtensionHookResult,
+        ExtensionHookSubscription, ExtensionPermissions, ExtensionRuntimeKind,
         ExtensionSignalAlias, ExtensionSummary, Privacy, RetentionPolicy, SurfaceKind,
         SurfacePresentation, SurfaceRenderer,
     };
@@ -4809,6 +5078,126 @@ mod tests {
         assert_eq!(
             commands[0].payload["text"],
             "最近のダウンロードはありません。"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn event_log_trim_records_audit_event() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        for index in 0..12 {
+            let mut event = RuntimeEvent::new("conversation.text", "user", "resident-default");
+            event.id = format!("evt_trim_{index}");
+            event.timestamp = format!("2026-07-{day:02}T00:00:00.000Z", day = index + 1);
+            home.event_log().append(NewEventLogRecord::from(event))?;
+        }
+
+        let summary = home.trim_event_log_to_record_limit(10, 10)?;
+
+        assert_eq!(summary.deleted, 1);
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert_eq!(records.len(), 12);
+        assert_eq!(records[0].id, "evt_trim_1");
+        let audit = records.last().expect("trim audit record");
+        assert_eq!(audit.kind, "event_log.trimmed");
+        assert_eq!(audit.payload["deleted"], json!(1));
+        assert_eq!(
+            audit.payload["oldestTimestamp"],
+            json!("2026-07-01T00:00:00.000Z")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_extension_suspension_records_events_and_notifies_once() -> Result<()> {
+        let dir = tempdir().map_err(ExtensionError::from)?;
+        fs::write(
+            dir.path().join("invalid.js"),
+            r#"process.stdout.write("{bad");"#,
+        )
+        .map_err(ExtensionError::from)?;
+        let manifest = ProcessExtensionManifest {
+            schema_version: 1,
+            id: "bad-process".to_string(),
+            display_name: "Bad Process".to_string(),
+            runtime: None,
+            permissions: ExtensionPermissions::default(),
+            hooks: vec![ExtensionHookSubscription {
+                hook_point: ExtensionHookPoint::BeforeCommandEmit,
+                command_types: vec!["dialogue.say".to_string()],
+            }],
+            event_subscriptions: Vec::new(),
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
+            settings: None,
+            process: ProcessCommandSpec {
+                command: "node".to_string(),
+                args: vec!["invalid.js".to_string()],
+                cwd: None,
+                timeout_ms: Some(1_000),
+            },
+        };
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        home.register_extension(ProcessHookExtension::from_installed_manifest(
+            manifest,
+            dir.path(),
+            true,
+        ))
+        .await?;
+        home.set_extension_hook_order(
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["bad-process".to_string()],
+        )?;
+        let mut receiver = home.subscribe_commands();
+        let source_event = RuntimeEvent::new("conversation.text", "user", "resident-default");
+
+        for _ in 0..3 {
+            let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+            command.payload.insert("text".to_string(), json!("hello"));
+            home.emit_command_for_event(command, &source_event).await?;
+        }
+
+        let mut notifications = Vec::new();
+        for _ in 0..6 {
+            let command =
+                tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok);
+            let Some(command) = command else {
+                break;
+            };
+            if command.kind == "ui.notification" {
+                notifications.push(command);
+            }
+        }
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].payload["extensionId"],
+            json!("bad-process")
+        );
+        assert!(notifications[0].payload["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("いったん休止しました"));
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == "extension.process.suspended")
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == "extension.process.failed")
+                .count(),
+            3
         );
         Ok(())
     }

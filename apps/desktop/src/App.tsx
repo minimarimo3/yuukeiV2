@@ -343,6 +343,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function restartExtensionProcess(extensionId: string) {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      setExtensionState(await client.restartExtensionProcess(extensionId));
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
   async function moveExtension(extensionId: string, direction: -1 | 1) {
     if (!extensionState) return;
     const currentOrder = orderedBeforeCommandEmitExtensions.map(
@@ -806,6 +818,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         <span>
                           <strong>{extension.displayName}</strong>
                           <small>{extension.extensionId}</small>
+                          <small
+                            className={[
+                              "extension-runtime-status",
+                              extension.runtimeStatus?.suspended
+                                ? "is-suspended"
+                                : ""
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                          >
+                            {extensionRuntimeStatusLabel(extension)}
+                          </small>
                         </span>
                       </label>
                       {permissionRows.length > 0 ? (
@@ -864,6 +888,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         onClick={() => moveExtension(extension.extensionId, 1)}
                       >
                         下
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button compact-button"
+                        disabled={changingExtensions}
+                        onClick={() =>
+                          restartExtensionProcess(extension.extensionId)
+                        }
+                      >
+                        再起動
                       </button>
                       <button
                         type="button"
@@ -2035,6 +2069,17 @@ function orderExtensionsForHook(
 
 function subscribesToBeforeCommandEmit(extension: InstalledExtension): boolean {
   return extension.hooks.some((hook) => hook.hookPoint === "beforeCommandEmit");
+}
+
+function extensionRuntimeStatusLabel(extension: InstalledExtension): string {
+  if (!extension.enabled) return "状態: 無効";
+  const status = extension.runtimeStatus;
+  if (!status) return "状態: 正常";
+  if (status.suspended) return "状態: 休止";
+  if (status.health === "degraded") {
+    return `状態: 注意 (${status.failureCount})`;
+  }
+  return "状態: 正常";
 }
 
 function memoryErrorMessage(error: unknown): string {

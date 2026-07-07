@@ -314,6 +314,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),
+    restartExtensionProcess: vi.fn(async () => extensionSettings()),
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
       appSettings(minutes)
     ),
@@ -817,6 +818,42 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.uninstallExtension).toHaveBeenCalledWith("nya-suffix");
     });
+  });
+
+  it("shows suspended Extension status and restarts it", async () => {
+    const suspended = {
+      ...installedExtension("voicevox", "VOICEVOX"),
+      runtimeStatus: {
+        health: "unavailable" as const,
+        failureCount: 3,
+        suspended: true,
+        message: "timed out"
+      }
+    };
+    const restarted = {
+      ...suspended,
+      runtimeStatus: {
+        health: "ready" as const,
+        failureCount: 0,
+        suspended: false,
+        message: null
+      }
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([suspended])),
+      restartExtensionProcess: vi.fn(async () => extensionSettings([restarted]))
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    expect(await screen.findByText("状態: 休止")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "再起動" }));
+
+    await waitFor(() => {
+      expect(client.restartExtensionProcess).toHaveBeenCalledWith("voicevox");
+    });
+    expect(await screen.findByText("状態: 正常")).toBeInTheDocument();
   });
 
   it("shows Extension permission rows with a broad subscription warning", async () => {
