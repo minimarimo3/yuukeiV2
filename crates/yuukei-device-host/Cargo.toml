@@ -21,3 +21,4 @@ yuukei-world = { path = "../yuukei-world" }
 [dev-dependencies]
 tempfile.workspace = true
 notify.workspace = true
+zip.workspace = true
