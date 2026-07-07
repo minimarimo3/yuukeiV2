@@ -27,8 +27,10 @@ use yuukei_protocol::{
 use yuukei_world::resolve_pack_relative_path;
 
 mod desktop_stage;
+mod idle_observer;
 mod power_observer;
 use desktop_stage::{ActorStageAnchorReport, DesktopStageManager};
+use idle_observer::seconds_since_last_user_input;
 use power_observer::PowerObserver;
 
 pub struct AppState {
@@ -771,7 +773,7 @@ async fn replace_runtime(
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
-    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
 
@@ -842,7 +844,7 @@ async fn replace_runtime_snapshot(
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
-    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
 
@@ -895,9 +897,13 @@ async fn ensure_presence_loop(
     emit_app_startup_or_status(app, runtime).await?;
     let mut presence_loop = state.presence_loop.lock().await;
     if presence_loop.is_none() {
-        *presence_loop = Some(runtime.spawn_presence_loop());
+        *presence_loop = Some(spawn_desktop_presence_loop(runtime));
     }
     Ok(())
+}
+
+fn spawn_desktop_presence_loop(runtime: &LocalYuukeiRuntime) -> tokio::task::JoinHandle<()> {
+    runtime.spawn_presence_loop_with_idle_sampler(seconds_since_last_user_input)
 }
 
 async fn attach_tauri_surface_or_status(

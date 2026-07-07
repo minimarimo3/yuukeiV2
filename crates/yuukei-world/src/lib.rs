@@ -1453,6 +1453,12 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
             DaihonValue::String(period.to_string()),
         ));
     }
+    if let Some(idle_minutes) = event.payload.get("idleMinutes").and_then(Value::as_i64) {
+        inputs.push((
+            "不在分".to_string(),
+            DaihonValue::Number(DaihonNumber::Integer(idle_minutes)),
+        ));
+    }
     inputs
 }
 
@@ -2354,6 +2360,68 @@ mod tests {
         assert_eq!(result.commands[0].payload["text"], "top-level alias");
         assert_eq!(result.executed_scenes[0].event_name, "conversation.text");
         assert_eq!(result.executed_scenes[0].scene_name, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_gesture_scene_by_hit_surface_input() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["avatar.gesture.poke".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### cloth poke
+合図: ＠avatar.gesture.poke
+条件:（入力#hitSurface = 「cloth」）
+話者: yuukei
+「服だよ」
+
+### skin poke
+合図: ＠avatar.gesture.poke
+条件:（入力#hitSurface = 「skin」）
+話者: yuukei
+「肌だよ」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+        event.id = "evt_hit_surface".to_string();
+        event
+            .payload
+            .insert("hitSurface".to_string(), json!("cloth"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "服だよ");
+        assert_eq!(result.executed_scenes[0].scene_name, "cloth poke");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_idle_end_scene_by_friendly_idle_minutes_input() -> Result<()>
+    {
+        let mut world = pack();
+        world.signals.allow = vec!["presence.idle.end".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### welcome back
+合図: ＠復帰
+条件:（入力#不在分 = 7）
+話者: yuukei
+「おかえり」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("presence.idle.end", "device", "resident-default");
+        event.id = "evt_idle_end".to_string();
+        event.payload.insert("idleMinutes".to_string(), json!(7));
+        event.payload.insert("idleSeconds".to_string(), json!(421));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "おかえり");
+        assert_eq!(result.executed_scenes[0].scene_name, "welcome back");
         Ok(())
     }
 

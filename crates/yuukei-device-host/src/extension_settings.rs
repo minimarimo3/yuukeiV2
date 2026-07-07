@@ -788,10 +788,8 @@ impl ExtensionSettingsRegistry {
         let secret_keys = schema
             .fields
             .iter()
-            .filter_map(|field| {
-                matches!(field, ExtensionSettingField::Secret { .. })
-                    .then(|| field.key().to_string())
-            })
+            .filter(|field| matches!(field, ExtensionSettingField::Secret { .. }))
+            .map(|field| field.key().to_string())
             .collect::<BTreeSet<_>>();
         let mut keys = self
             .secrets
@@ -1056,9 +1054,9 @@ fn validate_setting_value(field: &ExtensionSettingField, value: &Value) -> Resul
             if options.iter().any(|option| option.value == selected) {
                 Ok(())
             } else {
-                return Err(DeviceHostError::ExtensionSettings(format!(
+                Err(DeviceHostError::ExtensionSettings(format!(
                     "setting {key} must be one of declared options"
-                )));
+                )))
             }
         }
         ExtensionSettingField::Secret { key, .. } => Err(DeviceHostError::ExtensionSettings(

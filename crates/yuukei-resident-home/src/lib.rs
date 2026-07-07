@@ -982,16 +982,16 @@ impl ResidentHome {
         let Ok(Ok(result)) = result else {
             return Ok(None);
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id.clone(),
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id.clone(),
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
 
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<MoodEvaluateOutput>(output_value) else {
@@ -1302,16 +1302,16 @@ impl ResidentHome {
         let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
             return Ok(Vec::new());
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output,
-            result.metadata,
-            event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output,
+            metadata: result.metadata,
+            source_event: event,
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
         self.commands_from_dialogue_generate_output(output, event)
     }
 
@@ -1782,16 +1782,16 @@ impl ResidentHome {
             let Ok(Ok(result)) = result else {
                 return Ok(());
             };
-            self.record_capability_result(
-                result.invocation_id,
-                result.extension_id,
-                result.capability,
-                result.output.clone(),
-                result.metadata,
-                trigger_event,
-                None,
-                None,
-            )?;
+            self.record_capability_result(CapabilityResultRecord {
+                invocation_id: result.invocation_id,
+                extension_id: result.extension_id,
+                capability: result.capability,
+                output: result.output.clone(),
+                metadata: result.metadata,
+                source_event: trigger_event,
+                source_command_id: None,
+                actor_id: None,
+            })?;
             let output_value = Value::Object(result.output.into_iter().collect());
             let Ok(output) = serde_json::from_value::<MemoryIndexOutput>(output_value) else {
                 return Ok(());
@@ -1880,16 +1880,16 @@ impl ResidentHome {
         let Ok(Ok(result)) = result else {
             return Ok(None);
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<MemoryRetrieveOutput>(output_value) else {
             return Ok(None);
@@ -1959,16 +1959,16 @@ impl ResidentHome {
             return Ok(None);
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
             return Ok(None);
@@ -2037,16 +2037,16 @@ impl ResidentHome {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueInterpretOutput>(output_value) else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
@@ -2111,16 +2111,16 @@ impl ResidentHome {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueExtractOutput>(output_value) else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
@@ -2204,19 +2204,19 @@ impl ResidentHome {
             command.payload.insert("speechRef".to_string(), speech_ref);
         }
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output,
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output,
+            metadata: result.metadata,
             source_event,
-            Some(&command.id),
-            command
+            source_command_id: Some(&command.id),
+            actor_id: command
                 .target
                 .as_ref()
                 .and_then(|target| target.actor_id.as_deref()),
-        )?;
+        })?;
         Ok(())
     }
 
@@ -2252,30 +2252,27 @@ impl ResidentHome {
         Ok(())
     }
 
-    fn record_capability_result(
-        &self,
-        invocation_id: String,
-        extension_id: String,
-        capability: String,
-        output: JsonMap,
-        metadata: JsonMap,
-        source_event: &RuntimeEvent,
-        source_command_id: Option<&str>,
-        actor_id: Option<&str>,
-    ) -> Result<()> {
+    fn record_capability_result(&self, record: CapabilityResultRecord<'_>) -> Result<()> {
         let result_payload = JsonMap::from([
-            ("invocationId".to_string(), Value::String(invocation_id)),
-            ("extensionId".to_string(), Value::String(extension_id)),
-            ("capability".to_string(), Value::String(capability)),
+            (
+                "invocationId".to_string(),
+                Value::String(record.invocation_id),
+            ),
+            (
+                "extensionId".to_string(),
+                Value::String(record.extension_id),
+            ),
+            ("capability".to_string(), Value::String(record.capability)),
             (
                 "output".to_string(),
-                Value::Object(output.into_iter().collect()),
+                Value::Object(record.output.into_iter().collect()),
             ),
             (
                 "metadata".to_string(),
-                Value::Object(metadata.into_iter().collect()),
+                Value::Object(record.metadata.into_iter().collect()),
             ),
         ]);
+        let source_event = record.source_event;
         let result_record = NewEventLogRecord {
             id: new_id("evt"),
             kind: "capability.invocation.result".to_string(),
@@ -2284,11 +2281,11 @@ impl ResidentHome {
             source: "capability".to_string(),
             device_id: source_event.device_id.clone(),
             surface_id: source_event.surface_id.clone(),
-            actor_id: actor_id.map(ToOwned::to_owned),
+            actor_id: record.actor_id.map(ToOwned::to_owned),
             payload: result_payload,
             causality: Some(Causality {
                 source_event_id: Some(source_event.id.clone()),
-                source_command_id: source_command_id.map(ToOwned::to_owned),
+                source_command_id: record.source_command_id.map(ToOwned::to_owned),
                 trace_id: source_event
                     .causality
                     .as_ref()
@@ -2374,6 +2371,17 @@ fn generated_command(
     command
 }
 
+struct CapabilityResultRecord<'a> {
+    invocation_id: String,
+    extension_id: String,
+    capability: String,
+    output: JsonMap,
+    metadata: JsonMap,
+    source_event: &'a RuntimeEvent,
+    source_command_id: Option<&'a str>,
+    actor_id: Option<&'a str>,
+}
+
 fn major_payload(payload: JsonMap) -> JsonMap {
     const KEYS: &[&str] = &[
         "text",
@@ -2385,6 +2393,7 @@ fn major_payload(payload: JsonMap) -> JsonMap {
         "button",
         "hitZoneId",
         "hitZoneLabel",
+        "hitSurface",
         "timePeriod",
         "localHour",
         "localMinute",
@@ -3881,7 +3890,7 @@ mod tests {
             .iter()
             .any(|command| command.payload["text"] == json!("記憶なしでも返します。")));
         let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
-        assert!(dialogue_calls[0].input.get("memories").is_none());
+        assert!(!dialogue_calls[0].input.contains_key("memories"));
         Ok(())
     }
 

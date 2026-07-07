@@ -47,6 +47,16 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "時間帯変化",
     },
     StandardSignalDefinition {
+        canonical_id: "presence.idle.start",
+        daihon_alias: "不在_開始",
+        display_label: "不在開始",
+    },
+    StandardSignalDefinition {
+        canonical_id: "presence.idle.end",
+        daihon_alias: "復帰",
+        display_label: "復帰",
+    },
+    StandardSignalDefinition {
         canonical_id: "device.sleep.before",
         daihon_alias: "端末_スリープ前",
         display_label: "端末スリープ前",
@@ -1132,6 +1142,8 @@ mod tests {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
         assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
         assert_eq!(canonical_signal_id("雑談_定期"), "presence.talk_impulse");
+        assert_eq!(canonical_signal_id("不在_開始"), "presence.idle.start");
+        assert_eq!(canonical_signal_id("復帰"), "presence.idle.end");
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
         assert_eq!(canonical_signal_id("住人_つつく"), "avatar.gesture.poke");
         assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");

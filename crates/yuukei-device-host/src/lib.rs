@@ -46,6 +46,7 @@ pub const CLI_SURFACE_ID: &str = "surface-cli";
 pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
 const PRESENCE_LOOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PRESENCE_IDLE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 const TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
@@ -403,6 +404,8 @@ struct PresenceState {
     talk_interval_minutes: Option<u64>,
     next_talk_impulse_at: Option<DateTime<Utc>>,
     talk_rng_state: u64,
+    idle_active: bool,
+    last_idle_elapsed_seconds: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,6 +530,17 @@ enum TalkImpulseDecision {
     Emit,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum IdlePresenceDecision {
+    Start {
+        threshold_seconds: u64,
+    },
+    End {
+        idle_seconds: u64,
+        idle_minutes: u64,
+    },
+}
+
 fn evaluate_life_tick(now: DateTime<Utc>, state: &mut PresenceState) -> bool {
     let next = state
         .next_life_tick_at
@@ -577,6 +591,47 @@ fn evaluate_talk_impulse(
         return TalkImpulseDecision::SkippedRecentActivity;
     }
     TalkImpulseDecision::Emit
+}
+
+fn evaluate_idle_presence(
+    idle_seconds_since_last_input: Option<f64>,
+    state: &mut PresenceState,
+) -> Option<IdlePresenceDecision> {
+    let idle_seconds = idle_seconds_since_last_input?;
+    if !idle_seconds.is_finite() || idle_seconds < 0.0 {
+        return None;
+    }
+
+    let threshold_seconds = PRESENCE_IDLE_THRESHOLD.as_secs();
+    if idle_seconds >= threshold_seconds as f64 {
+        state.last_idle_elapsed_seconds = Some(
+            state
+                .last_idle_elapsed_seconds
+                .map_or(idle_seconds, |previous| previous.max(idle_seconds)),
+        );
+        if state.idle_active {
+            return None;
+        }
+        state.idle_active = true;
+        return Some(IdlePresenceDecision::Start { threshold_seconds });
+    }
+
+    if !state.idle_active {
+        state.last_idle_elapsed_seconds = None;
+        return None;
+    }
+
+    state.idle_active = false;
+    let idle_seconds = state
+        .last_idle_elapsed_seconds
+        .take()
+        .unwrap_or(threshold_seconds as f64)
+        .floor()
+        .max(0.0) as u64;
+    Some(IdlePresenceDecision::End {
+        idle_seconds,
+        idle_minutes: idle_seconds / 60,
+    })
 }
 
 fn recently_active(now: DateTime<Utc>, last_user_activity_at: Option<DateTime<Utc>>) -> bool {
@@ -1400,11 +1455,23 @@ impl LocalYuukeiRuntime {
     }
 
     pub fn spawn_presence_loop(&self) -> JoinHandle<()> {
+        self.spawn_presence_loop_with_idle_sampler(|| None)
+    }
+
+    pub fn spawn_presence_loop_with_idle_sampler<F>(&self, idle_sampler: F) -> JoinHandle<()>
+    where
+        F: Fn() -> Option<f64> + Send + Sync + 'static,
+    {
         let runtime = self.clone();
+        let idle_sampler = Arc::new(idle_sampler);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PRESENCE_LOOP_POLL_INTERVAL).await;
-                if let Err(error) = runtime.run_presence_loop_step(Utc::now()).await {
+                let idle_seconds_since_last_input = idle_sampler();
+                if let Err(error) = runtime
+                    .run_presence_loop_step(Utc::now(), idle_seconds_since_last_input)
+                    .await
+                {
                     let _ = runtime.logger.record(
                         "presence.loop.error",
                         "device-host",
@@ -1415,7 +1482,11 @@ impl LocalYuukeiRuntime {
         })
     }
 
-    async fn run_presence_loop_step(&self, now: DateTime<Utc>) -> Result<()> {
+    async fn run_presence_loop_step(
+        &self,
+        now: DateTime<Utc>,
+        idle_seconds_since_last_input: Option<f64>,
+    ) -> Result<()> {
         let settings = self.app_settings()?;
         let random = {
             let mut state = self
@@ -1425,7 +1496,7 @@ impl LocalYuukeiRuntime {
             next_rng_permyriad(&mut state.talk_rng_state, now)
         };
 
-        let (emit_life_tick, talk_decision) = {
+        let (emit_life_tick, talk_decision, idle_decision) = {
             let mut state = self
                 .presence_state
                 .lock()
@@ -1433,9 +1504,33 @@ impl LocalYuukeiRuntime {
             let emit_life_tick = evaluate_life_tick(now, &mut state);
             let talk_decision =
                 evaluate_talk_impulse(now, settings.talk_interval_minutes, random, &mut state);
-            (emit_life_tick, talk_decision)
+            let idle_decision = evaluate_idle_presence(idle_seconds_since_last_input, &mut state);
+            (emit_life_tick, talk_decision, idle_decision)
         };
 
+        match idle_decision {
+            Some(IdlePresenceDecision::Start { threshold_seconds }) => {
+                self.emit_runtime_event(
+                    "presence.idle.start",
+                    JsonMap::from([("thresholdSeconds".to_string(), json!(threshold_seconds))]),
+                )
+                .await?;
+            }
+            Some(IdlePresenceDecision::End {
+                idle_seconds,
+                idle_minutes,
+            }) => {
+                self.emit_runtime_event(
+                    "presence.idle.end",
+                    JsonMap::from([
+                        ("idleMinutes".to_string(), json!(idle_minutes)),
+                        ("idleSeconds".to_string(), json!(idle_seconds)),
+                    ]),
+                )
+                .await?;
+            }
+            None => {}
+        }
         if emit_life_tick {
             self.emit_presence_tick().await?;
         }
@@ -2365,6 +2460,70 @@ mod tests {
         assert_eq!(
             state.next_talk_impulse_at,
             Some(now + chrono::Duration::seconds(480))
+        );
+    }
+
+    #[test]
+    fn idle_presence_evaluation_emits_start_and_end_once() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(evaluate_idle_presence(Some(299.0), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(300.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(evaluate_idle_presence(Some(301.9), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(1.0), &mut state),
+            Some(IdlePresenceDecision::End {
+                idle_seconds: 301,
+                idle_minutes: 5
+            })
+        );
+        assert_eq!(evaluate_idle_presence(Some(0.5), &mut state), None);
+    }
+
+    #[test]
+    fn idle_presence_evaluation_ignores_unavailable_input() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(evaluate_idle_presence(None, &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(f64::NAN), &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(-1.0), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(300.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(evaluate_idle_presence(None, &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(300.5), &mut state), None);
+    }
+
+    #[test]
+    fn idle_presence_evaluation_reemits_after_returning_active() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(
+            evaluate_idle_presence(Some(320.2), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(
+            evaluate_idle_presence(Some(10.0), &mut state),
+            Some(IdlePresenceDecision::End {
+                idle_seconds: 320,
+                idle_minutes: 5
+            })
+        );
+        assert_eq!(
+            evaluate_idle_presence(Some(600.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
         );
     }
 
@@ -3691,6 +3850,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn usage_record(
         sequence: i64,
         timestamp: &str,
