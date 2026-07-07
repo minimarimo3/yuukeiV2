@@ -32,9 +32,27 @@
       ]
     },
     {
+      "capability": "memory.list",
+      "methods": [
+        "list"
+      ]
+    },
+    {
       "capability": "memory.retrieve",
       "methods": [
         "retrieve"
+      ]
+    },
+    {
+      "capability": "memory.update",
+      "methods": [
+        "update"
+      ]
+    },
+    {
+      "capability": "memory.forget",
+      "methods": [
+        "forget"
       ]
     },
     {

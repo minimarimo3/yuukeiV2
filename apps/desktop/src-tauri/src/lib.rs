@@ -20,7 +20,10 @@ use yuukei_device_host::{
     ExtensionSettingsState, LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState,
     WorldPackSwitchResult, TAURI_SURFACE_ID,
 };
-use yuukei_protocol::{ExtensionHookPoint, ResidentSnapshot, RuntimeCommand};
+use yuukei_protocol::{
+    ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
+    MemoryUpdateOutput, ResidentSnapshot, RuntimeCommand,
+};
 use yuukei_world::resolve_pack_relative_path;
 
 mod desktop_stage;
@@ -155,6 +158,46 @@ async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsState
 async fn get_capability_usage(state: State<'_, AppState>) -> Result<CapabilityUsageState, String> {
     let runtime = state.runtime.lock().await;
     runtime.capability_usage().map_err(to_message)
+}
+
+#[tauri::command]
+async fn list_resident_memories(
+    state: State<'_, AppState>,
+    episode_limit: Option<usize>,
+    episode_offset: Option<usize>,
+) -> Result<MemoryListOutput, String> {
+    let runtime = state.runtime.lock().await.clone();
+    runtime
+        .list_resident_memories(episode_limit, episode_offset)
+        .await
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn update_resident_memory(
+    state: State<'_, AppState>,
+    kind: MemoryEntryKind,
+    id: String,
+    text: String,
+) -> Result<MemoryUpdateOutput, String> {
+    let runtime = state.runtime.lock().await.clone();
+    runtime
+        .update_resident_memory(kind, id, text)
+        .await
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn forget_resident_memories(
+    state: State<'_, AppState>,
+    entries: Option<Vec<MemoryForgetEntry>>,
+    all: Option<bool>,
+) -> Result<MemoryForgetOutput, String> {
+    let runtime = state.runtime.lock().await.clone();
+    runtime
+        .forget_resident_memories(entries.unwrap_or_default(), all.unwrap_or(false))
+        .await
+        .map_err(to_message)
 }
 
 #[tauri::command]
@@ -434,6 +477,9 @@ pub fn run() {
             get_extension_settings,
             get_app_settings,
             get_capability_usage,
+            list_resident_memories,
+            update_resident_memory,
+            forget_resident_memories,
             get_actor_surface_assets,
             set_actor_window_click_through,
             set_stage_overlay_click_through,

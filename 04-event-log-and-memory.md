@@ -48,10 +48,16 @@ Extensionはmanifestで許可されたevent log範囲を読み、好きな方式
 
 Yuukei Coreは、それらの内部構造を知らない。Coreは `memory.index`、`memory.retrieve`、`memory.forget`、`memory.rebuild` のようなcapabilityを、選択されたExtensionへルーティングするだけにする。
 
-最初の契約は次の2つに限定する。
+対話経路の契約は次の2つに限定する。
 
 - `memory.index`: Resident Homeが日単位のevent log抜粋を渡し、Memory Extensionが内部DBへ統合する。入力は `residentId`、`worldPackId`、`date`、最小payload化されたevent一覧であり、出力は `indexed` と任意の `noteCount` だけである。
 - `memory.retrieve`: Resident Homeが発話生成前に短いqueryと件数上限を渡し、Memory Extensionが `fact` / `episode` の短いテキスト断片を返す。Coreはその内部根拠や保存形式を知らず、`dialogue.generate` にはtext配列として渡す。
+
+ユーザーによる記憶の管理のために、管理系の契約を3つ持つ。設定画面はDevice Host経由のcapability呼び出しとしてこれらを使い、Extensionの内部ファイルを直接読み書きしない。
+
+- `memory.list`: factsは全件、episodesは新しい順のページングで返す。各エントリは安定IDを持ち、ID欠落の既存データは読み込み時に付与される。
+- `memory.update`: factテキストの編集のみ(episodeは出来事の記録なので編集不可)。空文字と500文字超は拒否する。
+- `memory.forget`: ID指定の個別削除、または `all: true` での全削除。全削除UIは確認を必須にする。
 
 統合は遅延実行でよい。Resident Homeは `app.startup` と `device.sleep.before` を受けたとき、event log上の `memory.index` 成功記録を見て、今日より前の未統合日を直近7日分までMemory Extensionへ渡す。失敗やprovider未登録はCoreの動作を止めず、次回の起動やスリープ前に再試行される。
 

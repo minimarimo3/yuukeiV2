@@ -10,6 +10,9 @@ import {
   type ExtensionSettingsChangeResult,
   type ExtensionSettingsState,
   type InstalledExtension,
+  type MemoryEntryKind,
+  type MemoryForgetEntry,
+  type ResidentMemoryState,
   type WorldPackSelectionState,
   type YuukeiClient
 } from "./yuukeiClient";
@@ -18,7 +21,8 @@ type AppProps = {
   client?: YuukeiClient;
 };
 
-type SettingsCategoryId = "app" | "worldPack" | "extensions";
+type SettingsCategoryId = "app" | "worldPack" | "memories" | "extensions";
+const MEMORY_PAGE_SIZE = 50;
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -43,6 +47,11 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
+  const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(null);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [loadingMemories, setLoadingMemories] = useState(false);
+  const [editingFactId, setEditingFactId] = useState<string | null>(null);
+  const [editingFactText, setEditingFactText] = useState("");
   const [switchingPack, setSwitchingPack] = useState(false);
   const [changingExtensions, setChangingExtensions] = useState(false);
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
@@ -56,15 +65,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       try {
         unlisteners.push(await client.onAssetsChanged(() => {
           void refreshSettings();
+          void loadMemories();
         }));
         unlisteners.push(
           await client.onWorldPackStatus((nextWorldPackStatus) => {
             if (!disposed) {
               setWorldPackStatus(nextWorldPackStatus);
             }
+            void loadMemories();
           })
         );
         await refreshSettings();
+        await loadMemories();
         if (!disposed) {
           setStatus("ready");
         }
@@ -118,6 +130,30 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     );
   }, [extensionState]);
 
+  async function loadMemories(offset = 0, append = false) {
+    setLoadingMemories(true);
+    try {
+      const next = await client.listResidentMemories(MEMORY_PAGE_SIZE, offset);
+      setMemoryError(null);
+      setMemoryState((current) =>
+        append && current
+          ? {
+              ...next,
+              facts: next.facts,
+              episodes: [...current.episodes, ...next.episodes]
+            }
+          : next
+      );
+    } catch (error) {
+      setMemoryError(memoryErrorMessage(error));
+      if (!append) {
+        setMemoryState(null);
+      }
+    } finally {
+      setLoadingMemories(false);
+    }
+  }
+
   async function chooseWorldPack() {
     setWorldPackError(null);
     setSwitchingPack(true);
@@ -127,6 +163,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const result = await client.selectWorldPackDirectory(path);
       setWorldPackStatus(result.status);
       setStatus("ready");
+      void loadMemories();
     } catch (error) {
       setWorldPackError(error instanceof Error ? error.message : String(error));
       try {
@@ -146,6 +183,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const result = await client.resetWorldPackToDefault();
       setWorldPackStatus(result.status);
       setStatus("ready");
+      void loadMemories();
     } catch (error) {
       setWorldPackError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -156,6 +194,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   function applyExtensionResult(result: ExtensionSettingsChangeResult) {
     setExtensionState(result.state);
     setStatus("ready");
+    void loadMemories();
   }
 
   async function chooseExtension() {
@@ -242,6 +281,71 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     } catch (error) {
       setAppSettingsError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  function beginFactEdit(id: string, text: string) {
+    setEditingFactId(id);
+    setEditingFactText(text);
+  }
+
+  async function saveFactEdit(id: string) {
+    const text = editingFactText.trim();
+    if (!text) {
+      setMemoryError("空の記憶は保存できません。");
+      return;
+    }
+    setMemoryError(null);
+    setLoadingMemories(true);
+    try {
+      const result = await client.updateResidentMemory("fact", id, text);
+      if (!result.updated) {
+        throw new Error("記憶を保存できませんでした。");
+      }
+      setEditingFactId(null);
+      setEditingFactText("");
+      await loadMemories();
+    } catch (error) {
+      setMemoryError(memoryErrorMessage(error));
+    } finally {
+      setLoadingMemories(false);
+    }
+  }
+
+  async function forgetMemoryEntry(kind: MemoryEntryKind, id: string) {
+    const entry: MemoryForgetEntry = { kind, id };
+    setMemoryError(null);
+    setLoadingMemories(true);
+    try {
+      await client.forgetResidentMemories([entry], false);
+      await loadMemories();
+    } catch (error) {
+      setMemoryError(memoryErrorMessage(error));
+    } finally {
+      setLoadingMemories(false);
+    }
+  }
+
+  async function forgetAllMemories() {
+    const confirmed = window.confirm(
+      "すべての記憶を忘れます。この操作は取り消せません。続けますか？"
+    );
+    if (!confirmed) return;
+    setMemoryError(null);
+    setLoadingMemories(true);
+    try {
+      await client.forgetResidentMemories(undefined, true);
+      setEditingFactId(null);
+      setEditingFactText("");
+      await loadMemories();
+    } catch (error) {
+      setMemoryError(memoryErrorMessage(error));
+    } finally {
+      setLoadingMemories(false);
+    }
+  }
+
+  async function loadMoreEpisodes() {
+    await loadMemories(memoryState?.episodes.length ?? 0, true);
   }
 
   const settingsCategories: SettingsCategory[] = [
@@ -332,6 +436,33 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
+      )
+    },
+    {
+      id: "memories",
+      label: "記憶",
+      ariaLabel: "記憶 settings",
+      panelId: "settings-memories-panel",
+      panelClassName: "memory-panel",
+      content: (
+        <MemorySettingsPanel
+          memoryState={memoryState}
+          memoryError={memoryError}
+          loading={loadingMemories}
+          editingFactId={editingFactId}
+          editingFactText={editingFactText}
+          onBeginFactEdit={beginFactEdit}
+          onCancelFactEdit={() => {
+            setEditingFactId(null);
+            setEditingFactText("");
+          }}
+          onFactDraftChange={setEditingFactText}
+          onSaveFact={saveFactEdit}
+          onForgetEntry={forgetMemoryEntry}
+          onForgetAll={forgetAllMemories}
+          onLoadMore={loadMoreEpisodes}
+          onRefresh={() => loadMemories()}
+        />
       )
     },
     {
@@ -546,6 +677,184 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         </div>
       </section>
     </main>
+  );
+}
+
+type MemorySettingsPanelProps = {
+  memoryState: ResidentMemoryState | null;
+  memoryError: string | null;
+  loading: boolean;
+  editingFactId: string | null;
+  editingFactText: string;
+  onBeginFactEdit: (id: string, text: string) => void;
+  onCancelFactEdit: () => void;
+  onFactDraftChange: (text: string) => void;
+  onSaveFact: (id: string) => Promise<void>;
+  onForgetEntry: (kind: MemoryEntryKind, id: string) => Promise<void>;
+  onForgetAll: () => Promise<void>;
+  onLoadMore: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+};
+
+function MemorySettingsPanel({
+  memoryState,
+  memoryError,
+  loading,
+  editingFactId,
+  editingFactText,
+  onBeginFactEdit,
+  onCancelFactEdit,
+  onFactDraftChange,
+  onSaveFact,
+  onForgetEntry,
+  onForgetAll,
+  onLoadMore,
+  onRefresh
+}: MemorySettingsPanelProps) {
+  const facts = memoryState?.facts ?? [];
+  const episodes = memoryState?.episodes ?? [];
+  const episodeTotal = memoryState?.episodeTotal ?? 0;
+  const hasMemory = facts.length > 0 || episodeTotal > 0;
+  const hasMoreEpisodes = episodes.length < episodeTotal;
+
+  return (
+    <>
+      <div className="settings-copy memory-copy">
+        <h2>記憶</h2>
+        <p className="settings-title">派生記憶</p>
+        <p className="settings-note">
+          facts は編集できます。episodes は出来事の記録として削除のみできます。
+        </p>
+        {memoryError ? <p className="settings-error">{memoryError}</p> : null}
+        {!memoryError && !loading && !hasMemory ? (
+          <p className="settings-note">まだ記憶がありません。</p>
+        ) : null}
+
+        <section className="memory-section" aria-label="facts">
+          <div className="memory-section-head">
+            <h3>facts</h3>
+            <span>{facts.length}</span>
+          </div>
+          <div className="memory-list">
+            {facts.map((fact) => {
+              const editing = editingFactId === fact.id;
+              return (
+                <article className="memory-row" key={fact.id}>
+                  {editing ? (
+                    <textarea
+                      aria-label={`fact ${fact.id}`}
+                      value={editingFactText}
+                      maxLength={500}
+                      onChange={(event) =>
+                        onFactDraftChange(event.currentTarget.value)
+                      }
+                    />
+                  ) : (
+                    <div className="memory-text">
+                      <p>{fact.text}</p>
+                      <small>{formatMemoryTimestamp(fact.updatedAt)}</small>
+                    </div>
+                  )}
+                  <div className="memory-actions">
+                    {editing ? (
+                      <>
+                        <button
+                          type="button"
+                          className="compact-button"
+                          disabled={loading}
+                          onClick={() => void onSaveFact(fact.id)}
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={loading}
+                          onClick={onCancelFactEdit}
+                        >
+                          キャンセル
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={loading}
+                          onClick={() => onBeginFactEdit(fact.id, fact.text)}
+                        >
+                          編集
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={loading}
+                          onClick={() => void onForgetEntry("fact", fact.id)}
+                        >
+                          削除
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="memory-section" aria-label="episodes">
+          <div className="memory-section-head">
+            <h3>episodes</h3>
+            <span>
+              {episodes.length}/{episodeTotal}
+            </span>
+          </div>
+          <div className="memory-list">
+            {episodes.map((episode) => (
+              <article className="memory-row" key={episode.id}>
+                <div className="memory-text">
+                  <p>{episode.text}</p>
+                  <small>{formatMemoryTimestamp(episode.timestamp)}</small>
+                </div>
+                <div className="memory-actions">
+                  <button
+                    type="button"
+                    className="secondary-button compact-button"
+                    disabled={loading}
+                    onClick={() => void onForgetEntry("episode", episode.id)}
+                  >
+                    削除
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+          {hasMoreEpisodes ? (
+            <button
+              type="button"
+              className="secondary-button memory-more-button"
+              disabled={loading}
+              onClick={() => void onLoadMore()}
+            >
+              もっと見る
+            </button>
+          ) : null}
+        </section>
+      </div>
+      <div className="settings-actions memory-panel-actions">
+        <button type="button" onClick={() => void onRefresh()} disabled={loading}>
+          更新
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => void onForgetAll()}
+          disabled={loading || !hasMemory}
+        >
+          すべて忘れる
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -996,6 +1305,29 @@ function orderExtensionsForHook(
 
 function subscribesToBeforeCommandEmit(extension: InstalledExtension): boolean {
   return extension.hooks.some((hook) => hook.hookPoint === "beforeCommandEmit");
+}
+
+function memoryErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/memory\.|capability|extension|provider/i.test(message)) {
+    return "記憶機能が無効です";
+  }
+  return message;
+}
+
+function formatMemoryTimestamp(value: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 type ExtensionPermissionRow = {

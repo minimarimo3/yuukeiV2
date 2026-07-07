@@ -317,6 +317,7 @@ type CapabilityInvocation = {
 - `speech.recognition`: 音声入力をテキストへ変換。
 - `memory.index`: canonical event logからExtension固有の記憶索引を作る。
 - `memory.retrieve`: 現在文脈から必要な記憶を取り出す。
+- `memory.list` / `memory.update` / `memory.forget`: 設定画面からの派生記憶の閲覧、factテキストの編集、個別または全部の忘却。
 - `mood.evaluate`: 最近の出来事から住人の現在の気分を固定語彙、話したい度、短い話題として評価する。
 - `embedding.generate`: Memory Extensionなどが使うembedding生成。
 

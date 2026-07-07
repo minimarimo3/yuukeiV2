@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{sync::broadcast, time::timeout};
@@ -13,7 +14,8 @@ use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
     DIALOGUE_EXTRACT_CAPABILITY, DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
-    MEMORY_INDEX_CAPABILITY, MEMORY_RETRIEVE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
+    MEMORY_FORGET_CAPABILITY, MEMORY_INDEX_CAPABILITY, MEMORY_LIST_CAPABILITY,
+    MEMORY_RETRIEVE_CAPABILITY, MEMORY_UPDATE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
 };
 use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
 use yuukei_extension::{
@@ -25,11 +27,12 @@ use yuukei_protocol::{
     DialogueExtractOutput, DialogueGenerateConstraints, DialogueGenerateEvent,
     DialogueGenerateInput, DialogueGenerateOutput, DialogueGeneratePersona,
     DialogueGenerateRecentContext, DialogueInterpretInput, DialogueInterpretOutput,
-    DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryIndexEvent,
-    MemoryIndexInput, MemoryIndexOutput, MemoryRetrieveInput, MemoryRetrieveLimits,
-    MemoryRetrieveOutput, MemoryRetrieveQuery, MoodEvaluateInput, MoodEvaluateOutput,
-    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
-    SurfaceSession,
+    DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
+    MemoryForgetEntry, MemoryForgetInput, MemoryForgetOutput, MemoryIndexEvent, MemoryIndexInput,
+    MemoryIndexOutput, MemoryListInput, MemoryListOutput, MemoryRetrieveInput,
+    MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery, MemoryUpdateInput,
+    MemoryUpdateOutput, MoodEvaluateInput, MoodEvaluateOutput, NewEventLogRecord, ResidentSnapshot,
+    RuntimeCommand, RuntimeEvent, SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
     DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonExtractRequest,
@@ -517,6 +520,53 @@ impl ResidentHome {
             .await?;
         emitted.extend(self.drain_interpretation_queue().await?);
         Ok(emitted)
+    }
+
+    pub async fn list_memories(
+        &self,
+        episode_limit: Option<usize>,
+        episode_offset: Option<usize>,
+    ) -> Result<MemoryListOutput> {
+        let input = MemoryListInput {
+            resident_id: self.resident_id()?,
+            world_pack_id: self.world_pack.id.clone(),
+            episode_limit,
+            episode_offset,
+        };
+        self.invoke_memory_admin(MEMORY_LIST_CAPABILITY, "list", input)
+            .await
+    }
+
+    pub async fn update_memory(
+        &self,
+        kind: MemoryEntryKind,
+        id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<MemoryUpdateOutput> {
+        let input = MemoryUpdateInput {
+            resident_id: self.resident_id()?,
+            world_pack_id: self.world_pack.id.clone(),
+            kind,
+            id: id.into(),
+            text: text.into(),
+        };
+        self.invoke_memory_admin(MEMORY_UPDATE_CAPABILITY, "update", input)
+            .await
+    }
+
+    pub async fn forget_memories(
+        &self,
+        entries: Vec<MemoryForgetEntry>,
+        all: bool,
+    ) -> Result<MemoryForgetOutput> {
+        let input = MemoryForgetInput {
+            resident_id: self.resident_id()?,
+            world_pack_id: self.world_pack.id.clone(),
+            entries,
+            all,
+        };
+        self.invoke_memory_admin(MEMORY_FORGET_CAPABILITY, "forget", input)
+            .await
     }
 
     fn defer_event_while_interpreting(
@@ -1753,6 +1803,40 @@ impl ResidentHome {
         Ok(())
     }
 
+    async fn invoke_memory_admin<TInput, TOutput>(
+        &self,
+        capability: &str,
+        method: &str,
+        input: TInput,
+    ) -> Result<TOutput>
+    where
+        TInput: Serialize,
+        TOutput: DeserializeOwned,
+    {
+        let invocation = CapabilityInvocation {
+            id: new_id("cap"),
+            capability: capability.to_string(),
+            method: method.to_string(),
+            resident_id: self.resident_id()?,
+            actor_id: None,
+            input: json_map_omitting_null_values(serde_json::to_value(input)?),
+            context: None,
+        };
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation)).await;
+        let result = result.map_err(|_| {
+            ResidentHomeError::Capability(CapabilityError::Extension(format!(
+                "{capability} timed out"
+            )))
+        })??;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        Ok(serde_json::from_value(output_value)?)
+    }
+
     async fn retrieve_memories_for_dialogue_generate(
         &self,
         source_event: &RuntimeEvent,
@@ -2883,9 +2967,18 @@ mod tests {
                 extension_id: "fake-memory".to_string(),
                 capabilities: vec![
                     MEMORY_INDEX_CAPABILITY.to_string(),
+                    MEMORY_LIST_CAPABILITY.to_string(),
                     MEMORY_RETRIEVE_CAPABILITY.to_string(),
+                    MEMORY_UPDATE_CAPABILITY.to_string(),
+                    MEMORY_FORGET_CAPABILITY.to_string(),
                 ],
-                methods: vec!["index".to_string(), "retrieve".to_string()],
+                methods: vec![
+                    "index".to_string(),
+                    "list".to_string(),
+                    "retrieve".to_string(),
+                    "update".to_string(),
+                    "forget".to_string(),
+                ],
                 required_permissions: Vec::new(),
                 location: ExecutionLocation::ResidentHome,
                 health: yuukei_protocol::ExtensionHealth::Ready,
@@ -2906,13 +2999,17 @@ mod tests {
             if invocation.capability == MEMORY_RETRIEVE_CAPABILITY && self.fail_retrieve {
                 return Err(CapabilityError::Extension("retrieve failed".to_string()));
             }
-            let output = if invocation.capability == MEMORY_INDEX_CAPABILITY {
-                JsonMap::from([
+            let output = match invocation.capability.as_str() {
+                MEMORY_INDEX_CAPABILITY => JsonMap::from([
                     ("indexed".to_string(), json!(true)),
                     ("noteCount".to_string(), json!(1)),
-                ])
-            } else {
-                self.retrieve_output.clone()
+                ]),
+                MEMORY_UPDATE_CAPABILITY => JsonMap::from([("updated".to_string(), json!(true))]),
+                MEMORY_FORGET_CAPABILITY => JsonMap::from([
+                    ("removedFacts".to_string(), json!(1)),
+                    ("removedEpisodes".to_string(), json!(1)),
+                ]),
+                _ => self.retrieve_output.clone(),
             };
             Ok(CapabilityResult {
                 invocation_id: invocation.id,
@@ -3785,6 +3882,95 @@ mod tests {
             .any(|command| command.payload["text"] == json!("記憶なしでも返します。")));
         let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
         assert!(dialogue_calls[0].input.get("memories").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_admin_invokes_router_round_trip() -> Result<()> {
+        let memory = MemoryProvider::new(JsonMap::from([
+            (
+                "facts".to_string(),
+                json!([
+                    {
+                        "id": "fact-1",
+                        "text": "唐揚げが好き。",
+                        "createdAt": "2026-06-25T00:00:00.000Z",
+                        "updatedAt": "2026-06-25T00:00:00.000Z"
+                    }
+                ]),
+            ),
+            (
+                "episodes".to_string(),
+                json!([
+                    {
+                        "id": "episode-1",
+                        "text": "公園へ行った。",
+                        "timestamp": "2026-06-25T00:00:00.000Z"
+                    }
+                ]),
+            ),
+            ("episodeTotal".to_string(), json!(1)),
+        ]));
+        let calls = memory.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(memory)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let listed = home.list_memories(Some(10), Some(0)).await?;
+        assert_eq!(listed.facts[0].id, "fact-1");
+        assert_eq!(listed.episodes[0].id, "episode-1");
+        assert!(
+            home.update_memory(MemoryEntryKind::Fact, "fact-1", "唐揚げがとても好き。")
+                .await?
+                .updated
+        );
+        let forgotten = home
+            .forget_memories(
+                vec![MemoryForgetEntry {
+                    kind: MemoryEntryKind::Episode,
+                    id: "episode-1".to_string(),
+                }],
+                false,
+            )
+            .await?;
+        assert_eq!(forgotten.removed_facts, 1);
+        assert_eq!(forgotten.removed_episodes, 1);
+
+        let calls = calls.lock().expect("memory calls lock");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].capability, MEMORY_LIST_CAPABILITY);
+        assert_eq!(calls[0].input["episodeLimit"], 10);
+        assert_eq!(calls[0].input["episodeOffset"], 0);
+        assert_eq!(calls[1].capability, MEMORY_UPDATE_CAPABILITY);
+        assert_eq!(calls[1].input["kind"], "fact");
+        assert_eq!(calls[2].capability, MEMORY_FORGET_CAPABILITY);
+        assert_eq!(calls[2].input["entries"][0]["kind"], "episode");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_admin_returns_error_when_extension_missing() -> Result<()> {
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            CapabilityRouter::new(),
+        )
+        .await?;
+
+        let error = home
+            .list_memories(Some(10), Some(0))
+            .await
+            .expect_err("memory provider should be missing");
+        assert!(matches!(error, ResidentHomeError::Capability(_)));
         Ok(())
     }
 

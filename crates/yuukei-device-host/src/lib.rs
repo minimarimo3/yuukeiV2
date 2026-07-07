@@ -16,7 +16,8 @@ use yuukei_capability::CapabilityRouter;
 use yuukei_event_log::{EventLog, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
-    new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, ResidentSnapshot,
+    new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
+    MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, ResidentSnapshot,
     RuntimeCommand, RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer,
     SurfaceSession,
 };
@@ -1094,6 +1095,40 @@ impl LocalYuukeiRuntime {
 
     pub fn app_settings(&self) -> Result<AppSettingsState> {
         AppSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
+    }
+
+    pub async fn list_resident_memories(
+        &self,
+        episode_limit: Option<usize>,
+        episode_offset: Option<usize>,
+    ) -> Result<MemoryListOutput> {
+        self.home
+            .list_memories(episode_limit, episode_offset)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn update_resident_memory(
+        &self,
+        kind: MemoryEntryKind,
+        id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<MemoryUpdateOutput> {
+        self.home
+            .update_memory(kind, id, text)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn forget_resident_memories(
+        &self,
+        entries: Vec<MemoryForgetEntry>,
+        all: bool,
+    ) -> Result<MemoryForgetOutput> {
+        self.home
+            .forget_memories(entries, all)
+            .await
+            .map_err(Into::into)
     }
 
     pub fn record_session_daihon_diagnostics_from_error(

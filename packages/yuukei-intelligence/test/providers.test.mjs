@@ -790,6 +790,65 @@ test("capability result normalizes dialogue.extract output", () => {
   }
 });
 
+test("capability result normalizes memory admin output", () => {
+  const listed = capabilityResult(
+    { id: "cap_memory_1", capability: "memory.list", input: {} },
+    {
+      facts: [
+        {
+          id: "fact-1",
+          text: "  唐揚げが好き。 ",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-02T00:00:00.000Z"
+        },
+        { id: "", text: "消える。" }
+      ],
+      episodes: [
+        {
+          id: "episode-1",
+          text: " 公園へ行った。 ",
+          timestamp: "2026-01-03T00:00:00.000Z"
+        },
+        { id: "episode-2", text: "" }
+      ],
+      episodeTotal: 4.8
+    },
+    {}
+  );
+  assert.deepEqual(listed.output, {
+    facts: [
+      {
+        id: "fact-1",
+        text: "唐揚げが好き。",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z"
+      }
+    ],
+    episodes: [
+      {
+        id: "episode-1",
+        text: "公園へ行った。",
+        timestamp: "2026-01-03T00:00:00.000Z"
+      }
+    ],
+    episodeTotal: 4
+  });
+
+  const updated = capabilityResult(
+    { id: "cap_memory_2", capability: "memory.update", input: {} },
+    { updated: true },
+    {}
+  );
+  assert.deepEqual(updated.output, { updated: true });
+
+  const forgotten = capabilityResult(
+    { id: "cap_memory_3", capability: "memory.forget", input: {} },
+    { removedFacts: 1.8, removedEpisodes: -2 },
+    {}
+  );
+  assert.deepEqual(forgotten.output, { removedFacts: 1, removedEpisodes: 0 });
+});
+
 test("capability result normalizes mood.evaluate output", () => {
   const result = capabilityResult(
     { id: "cap_3", capability: "mood.evaluate", input: sampleMoodInput },

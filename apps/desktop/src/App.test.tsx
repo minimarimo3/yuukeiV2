@@ -8,6 +8,7 @@ import type {
   CapabilityUsageState,
   DaihonDiagnosticEntry,
   ExtensionSettingsState,
+  ResidentMemoryState,
   WorldPackSelectionState,
   YuukeiClient
 } from "./yuukeiClient";
@@ -127,6 +128,27 @@ function capabilityUsage(
   return { extensions };
 }
 
+function residentMemories(): ResidentMemoryState {
+  return {
+    facts: [
+      {
+        id: "fact-1",
+        text: "唐揚げが好き。",
+        createdAt: "2026-06-25T00:00:00.000Z",
+        updatedAt: "2026-06-25T00:00:00.000Z"
+      }
+    ],
+    episodes: [
+      {
+        id: "episode-1",
+        text: "昨日は公園へ行った。",
+        timestamp: "2026-06-26T00:00:00.000Z"
+      }
+    ],
+    episodeTotal: 1
+  };
+}
+
 function installedExtension(
   extensionId: string,
   displayName = extensionId,
@@ -165,6 +187,12 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getAppSettings: vi.fn(async () => appSettings()),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
     getCapabilityUsage: vi.fn(async () => capabilityUsage()),
+    listResidentMemories: vi.fn(async () => residentMemories()),
+    updateResidentMemory: vi.fn(async () => ({ updated: true })),
+    forgetResidentMemories: vi.fn(async () => ({
+      removedFacts: 1,
+      removedEpisodes: 0
+    })),
     getActorSurfaceAssets: vi.fn(async () => ({
       worldPackId: "default-yuukei",
       actors: []
@@ -245,6 +273,65 @@ describe("App", () => {
       "false"
     );
     expect(screen.queryByText("Default Yuukei")).not.toBeInTheDocument();
+  });
+
+  it("lists resident memories and saves fact edits", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "記憶" }));
+    const factText = await screen.findByText("唐揚げが好き。");
+    const factRow = factText.closest("article");
+    expect(factRow).not.toBeNull();
+
+    await userEvent.click(
+      within(factRow as HTMLElement).getByRole("button", { name: "編集" })
+    );
+    const editor = screen.getByRole("textbox", { name: "fact fact-1" });
+    await userEvent.clear(editor);
+    await userEvent.type(editor, "唐揚げと散歩が好き。");
+    await userEvent.click(
+      within(factRow as HTMLElement).getByRole("button", { name: "保存" })
+    );
+
+    await waitFor(() =>
+      expect(client.updateResidentMemory).toHaveBeenCalledWith(
+        "fact",
+        "fact-1",
+        "唐揚げと散歩が好き。"
+      )
+    );
+  });
+
+  it("forgets memories from the settings panel", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "記憶" }));
+    const episodeText = await screen.findByText("昨日は公園へ行った。");
+    const episodeRow = episodeText.closest("article");
+    expect(episodeRow).not.toBeNull();
+    await userEvent.click(
+      within(episodeRow as HTMLElement).getByRole("button", { name: "削除" })
+    );
+    await waitFor(() =>
+      expect(client.forgetResidentMemories).toHaveBeenCalledWith(
+        [{ kind: "episode", id: "episode-1" }],
+        false
+      )
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "すべて忘れる" }));
+    expect(confirm).toHaveBeenCalledWith(
+      "すべての記憶を忘れます。この操作は取り消せません。続けますか？"
+    );
+    await waitFor(() =>
+      expect(client.forgetResidentMemories).toHaveBeenCalledWith(undefined, true)
+    );
+    confirm.mockRestore();
   });
 
   it("saves app talk interval settings", async () => {

@@ -262,8 +262,14 @@ export function capabilityResult(invocation, output, metadata = {}) {
     normalizedOutput = normalizeExtractOutput(output);
   } else if (capability === "memory.index") {
     normalizedOutput = normalizeMemoryIndexCapabilityOutput(output);
+  } else if (capability === "memory.list") {
+    normalizedOutput = normalizeMemoryListCapabilityOutput(output);
   } else if (capability === "memory.retrieve") {
     normalizedOutput = normalizeMemoryRetrieveCapabilityOutput(output);
+  } else if (capability === "memory.update") {
+    normalizedOutput = normalizeMemoryUpdateCapabilityOutput(output);
+  } else if (capability === "memory.forget") {
+    normalizedOutput = normalizeMemoryForgetCapabilityOutput(output);
   } else if (capability === "mood.evaluate") {
     normalizedOutput = normalizeMoodEvaluateOutput(output);
   } else {
@@ -289,6 +295,41 @@ function normalizeMemoryIndexCapabilityOutput(value) {
   return output;
 }
 
+function normalizeMemoryListCapabilityOutput(value) {
+  if (!value || typeof value !== "object") {
+    return { facts: [], episodes: [], episodeTotal: 0 };
+  }
+  const facts = Array.isArray(value.facts)
+    ? value.facts
+        .filter((fact) => fact && typeof fact === "object")
+        .map((fact) => ({
+          id: typeof fact.id === "string" ? fact.id : "",
+          text: typeof fact.text === "string" ? fact.text.trim() : "",
+          createdAt: typeof fact.createdAt === "string" ? fact.createdAt : "",
+          updatedAt: typeof fact.updatedAt === "string" ? fact.updatedAt : ""
+        }))
+        .filter((fact) => fact.id && fact.text)
+    : [];
+  const episodes = Array.isArray(value.episodes)
+    ? value.episodes
+        .filter((episode) => episode && typeof episode === "object")
+        .map((episode) => ({
+          id: typeof episode.id === "string" ? episode.id : "",
+          text: typeof episode.text === "string" ? episode.text.trim() : "",
+          timestamp: typeof episode.timestamp === "string" ? episode.timestamp : ""
+        }))
+        .filter((episode) => episode.id && episode.text)
+    : [];
+  return {
+    facts,
+    episodes,
+    episodeTotal:
+      typeof value.episodeTotal === "number" && Number.isFinite(value.episodeTotal)
+        ? Math.max(0, Math.trunc(value.episodeTotal))
+        : episodes.length
+  };
+}
+
 function normalizeMemoryRetrieveCapabilityOutput(value) {
   if (!value || typeof value !== "object" || !Array.isArray(value.memories)) {
     return { memories: [] };
@@ -306,5 +347,25 @@ function normalizeMemoryRetrieveCapabilityOutput(value) {
         return output;
       })
       .filter((memory) => memory.text)
+  };
+}
+
+function normalizeMemoryUpdateCapabilityOutput(value) {
+  return { updated: Boolean(value && typeof value === "object" && value.updated === true) };
+}
+
+function normalizeMemoryForgetCapabilityOutput(value) {
+  if (!value || typeof value !== "object") {
+    return { removedFacts: 0, removedEpisodes: 0 };
+  }
+  return {
+    removedFacts:
+      typeof value.removedFacts === "number" && Number.isFinite(value.removedFacts)
+        ? Math.max(0, Math.trunc(value.removedFacts))
+        : 0,
+    removedEpisodes:
+      typeof value.removedEpisodes === "number" && Number.isFinite(value.removedEpisodes)
+        ? Math.max(0, Math.trunc(value.removedEpisodes))
+        : 0
   };
 }

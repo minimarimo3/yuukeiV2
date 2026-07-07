@@ -632,6 +632,8 @@ input {
 
 .settings-actions button:disabled,
 .extension-actions button:disabled,
+.memory-actions button:disabled,
+.memory-more-button:disabled,
 .input-row button:disabled {
   cursor: progress;
   opacity: 0.6;
@@ -652,6 +654,128 @@ input {
 
 .extension-panel {
   align-items: start;
+}
+
+.memory-panel {
+  align-items: start;
+}
+
+.memory-copy {
+  display: grid;
+  gap: 12px;
+}
+
+.memory-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.memory-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-section-head h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.memory-section-head span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.memory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--panel-muted);
+}
+
+.memory-text {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.memory-text p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.memory-text small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.memory-row textarea {
+  min-width: 0;
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  padding: 8px;
+  background: #ffffff;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.memory-row textarea:focus {
+  border-color: rgba(37, 99, 235, 0.55);
+  outline: 3px solid rgba(37, 99, 235, 0.12);
+}
+
+.memory-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.memory-actions .secondary-button,
+.memory-more-button {
+  border: 1px solid #d0d5dd;
+  background: #ffffff;
+  color: #344054;
+  box-shadow: none;
+}
+
+.memory-actions .secondary-button:hover,
+.memory-more-button:hover {
+  background: var(--panel-muted);
+}
+
+.memory-more-button {
+  justify-self: start;
+  min-width: 100px;
+  height: 32px;
+  border-radius: var(--radius);
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.memory-panel-actions {
+  align-items: flex-start;
 }
 
 .extension-list {
@@ -1036,15 +1160,18 @@ input {
     padding: 18px;
   }
 
-  .extension-row {
+  .extension-row,
+  .memory-row {
     grid-template-columns: 1fr;
   }
 
-  .extension-actions {
+  .extension-actions,
+  .memory-actions {
     justify-content: stretch;
   }
 
-  .extension-actions button {
+  .extension-actions button,
+  .memory-actions button {
     flex: 1;
   }
 

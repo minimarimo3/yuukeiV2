@@ -135,6 +135,41 @@ export type CapabilityUsageState = {
   extensions: ExtensionCapabilityUsage[];
 };
 
+export type MemoryEntryKind = "fact" | "episode";
+
+export type ResidentMemoryFact = {
+  id: string;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ResidentMemoryEpisode = {
+  id: string;
+  text: string;
+  timestamp: string;
+};
+
+export type ResidentMemoryState = {
+  facts: ResidentMemoryFact[];
+  episodes: ResidentMemoryEpisode[];
+  episodeTotal: number;
+};
+
+export type MemoryForgetEntry = {
+  kind: MemoryEntryKind;
+  id: string;
+};
+
+export type MemoryUpdateResult = {
+  updated: boolean;
+};
+
+export type MemoryForgetResult = {
+  removedFacts: number;
+  removedEpisodes: number;
+};
+
 export type ActorSurfaceAssetCatalog = {
   worldPackId: string;
   actors: ActorSurfaceAsset[];
@@ -231,6 +266,19 @@ export type YuukeiClient = {
   getExtensionSettings(): Promise<ExtensionSettingsState>;
   getAppSettings(): Promise<AppSettingsState>;
   getCapabilityUsage(): Promise<CapabilityUsageState>;
+  listResidentMemories(
+    episodeLimit?: number,
+    episodeOffset?: number
+  ): Promise<ResidentMemoryState>;
+  updateResidentMemory(
+    kind: MemoryEntryKind,
+    id: string,
+    text: string
+  ): Promise<MemoryUpdateResult>;
+  forgetResidentMemories(
+    entries?: MemoryForgetEntry[],
+    all?: boolean
+  ): Promise<MemoryForgetResult>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
   setStageOverlayClickThrough(passthrough: boolean): Promise<void>;
@@ -288,6 +336,15 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<ExtensionSettingsState>("get_extension_settings"),
   getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
   getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
+  listResidentMemories: (episodeLimit?: number, episodeOffset?: number) =>
+    invoke<ResidentMemoryState>("list_resident_memories", {
+      episodeLimit,
+      episodeOffset
+    }),
+  updateResidentMemory: (kind: MemoryEntryKind, id: string, text: string) =>
+    invoke<MemoryUpdateResult>("update_resident_memory", { kind, id, text }),
+  forgetResidentMemories: (entries?: MemoryForgetEntry[], all?: boolean) =>
+    invoke<MemoryForgetResult>("forget_resident_memories", { entries, all }),
   getActorSurfaceAssets: () =>
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
   setActorWindowClickThrough: (passthrough: boolean) =>

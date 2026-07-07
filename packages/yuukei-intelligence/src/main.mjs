@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.mjs";
-import { indexMemory, retrieveMemory } from "./memory.mjs";
+import { forgetMemory, indexMemory, listMemory, retrieveMemory, updateMemory } from "./memory.mjs";
 import { capabilityResult, silentOutput, unknownChoiceOutput, unknownExtractOutput } from "./output.mjs";
 import { evaluateMoodWithProvider, extractWithProvider, generateWithProvider, interpretWithProvider } from "./providers/index.mjs";
 
@@ -24,8 +24,17 @@ async function dispatchInvocation(invocation, config) {
   if (invocation.capability === "memory.index") {
     return indexMemory(invocation.input, config);
   }
+  if (invocation.capability === "memory.list") {
+    return listMemory(invocation.input);
+  }
   if (invocation.capability === "memory.retrieve") {
     return retrieveMemory(invocation.input);
+  }
+  if (invocation.capability === "memory.update") {
+    return updateMemory(invocation.input);
+  }
+  if (invocation.capability === "memory.forget") {
+    return forgetMemory(invocation.input);
   }
   if (invocation.capability === "mood.evaluate") {
     return evaluateMoodWithProvider(invocation.input, config);

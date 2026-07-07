@@ -802,6 +802,102 @@ pub struct MemoryIndexInput {
     pub events: Vec<MemoryIndexEvent>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryListInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub episode_limit: Option<usize>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub episode_offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryFactEntry {
+    pub id: String,
+    pub text: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryEpisodeEntry {
+    pub id: String,
+    pub text: String,
+    pub timestamp: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryListOutput {
+    pub facts: Vec<MemoryFactEntry>,
+    pub episodes: Vec<MemoryEpisodeEntry>,
+    pub episode_total: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryUpdateInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    pub kind: MemoryEntryKind,
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryUpdateOutput {
+    pub updated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum MemoryEntryKind {
+    Fact,
+    Episode,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryForgetEntry {
+    pub kind: MemoryEntryKind,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryForgetInput {
+    pub resident_id: String,
+    pub world_pack_id: String,
+    #[serde(default)]
+    pub entries: Vec<MemoryForgetEntry>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct MemoryForgetOutput {
+    pub removed_facts: usize,
+    pub removed_episodes: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]

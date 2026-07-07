@@ -16,7 +16,10 @@ pub const DIALOGUE_GENERATE_CAPABILITY: &str = "dialogue.generate";
 pub const DIALOGUE_INTERPRET_CAPABILITY: &str = "dialogue.interpret";
 pub const DIALOGUE_EXTRACT_CAPABILITY: &str = "dialogue.extract";
 pub const MEMORY_INDEX_CAPABILITY: &str = "memory.index";
+pub const MEMORY_LIST_CAPABILITY: &str = "memory.list";
 pub const MEMORY_RETRIEVE_CAPABILITY: &str = "memory.retrieve";
+pub const MEMORY_UPDATE_CAPABILITY: &str = "memory.update";
+pub const MEMORY_FORGET_CAPABILITY: &str = "memory.forget";
 pub const MOOD_EVALUATE_CAPABILITY: &str = "mood.evaluate";
 pub const DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID: &str = "yuukei.default-tts";
 

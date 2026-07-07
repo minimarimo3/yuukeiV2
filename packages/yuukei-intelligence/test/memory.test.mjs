@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { indexMemory, retrieveMemory } from "../src/memory.mjs";
+import { forgetMemory, indexMemory, listMemory, retrieveMemory, updateMemory } from "../src/memory.mjs";
 
 const config = {
   provider: "openai-compatible",
@@ -34,9 +34,11 @@ test("memory.index saves diary and facts", async () => {
       model: "stub-model",
       provider: "openai-compatible"
     });
-    assert.deepEqual(await readEpisodes(dataDir), [
-      { date: "2026-01-02", text: "ユーザーは唐揚げの話をした。" }
-    ]);
+    const episodes = await readEpisodes(dataDir);
+    assert.equal(episodes[0].date, "2026-01-02");
+    assert.equal(episodes[0].timestamp, "2026-01-02");
+    assert.equal(episodes[0].text, "ユーザーは唐揚げの話をした。");
+    assert.match(episodes[0].id, /^[0-9a-f-]{36}$/i);
     assert.equal((await readFacts(dataDir))[0].text, "唐揚げが好き。");
   } finally {
     globalThis.fetch = originalFetch;
@@ -57,8 +59,13 @@ test("memory.index replaces same-date diary", async () => {
   };
   try {
     await indexMemory(sampleIndexInput(), config, env(dataDir));
+    const firstId = (await readEpisodes(dataDir))[0].id;
     await indexMemory(sampleIndexInput(), config, env(dataDir));
-    assert.deepEqual(await readEpisodes(dataDir), [{ date: "2026-01-02", text: "新しい日記。" }]);
+    const episodes = await readEpisodes(dataDir);
+    assert.equal(episodes.length, 1);
+    assert.equal(episodes[0].id, firstId);
+    assert.equal(episodes[0].date, "2026-01-02");
+    assert.equal(episodes[0].text, "新しい日記。");
   } finally {
     globalThis.fetch = originalFetch;
     await rm(dataDir, { recursive: true, force: true });
@@ -176,6 +183,113 @@ test("memory storage is separated by worldPackId and residentId", async () => {
     env(dataDir)
   );
   assert.deepEqual(result.output, { memories: [] });
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+test("memory.list pages episodes and migrates missing ids", async () => {
+  const dataDir = await tempDataDir();
+  await seedMemory(dataDir, {
+    facts: [
+      { text: "唐揚げが好き。", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }
+    ],
+    episodes: [
+      { date: "2026-01-01", text: "一日目。" },
+      { date: "2026-01-03", text: "三日目。" },
+      { date: "2026-01-02", text: "二日目。" }
+    ]
+  });
+
+  const result = await listMemory(
+    {
+      residentId: "resident-default",
+      worldPackId: "default-yuukei",
+      episodeLimit: 2,
+      episodeOffset: 1
+    },
+    env(dataDir)
+  );
+
+  assert.equal(result.output.facts.length, 1);
+  assert.match(result.output.facts[0].id, /^[0-9a-f-]{36}$/i);
+  assert.deepEqual(result.output.episodes.map((episode) => episode.text), ["二日目。", "一日目。"]);
+  assert.equal(result.output.episodeTotal, 3);
+  const storedFacts = await readFacts(dataDir);
+  const storedEpisodes = await readEpisodes(dataDir);
+  assert.ok(storedFacts.every((fact) => typeof fact.id === "string" && fact.id));
+  assert.ok(storedEpisodes.every((episode) => typeof episode.id === "string" && episode.id));
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+test("memory.update validates fact text and id", async () => {
+  const dataDir = await tempDataDir();
+  await seedMemory(dataDir, {
+    facts: [
+      {
+        id: "fact-1",
+        text: "古い事実。",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  });
+
+  assert.deepEqual(
+    (await updateMemory({ residentId: "resident-default", worldPackId: "default-yuukei", kind: "fact", id: "fact-1", text: "" }, env(dataDir))).output,
+    { updated: false }
+  );
+  assert.deepEqual(
+    (await updateMemory({ residentId: "resident-default", worldPackId: "default-yuukei", kind: "fact", id: "fact-1", text: "x".repeat(501) }, env(dataDir))).output,
+    { updated: false }
+  );
+  assert.deepEqual(
+    (await updateMemory({ residentId: "resident-default", worldPackId: "default-yuukei", kind: "fact", id: "missing", text: "新しい事実。" }, env(dataDir))).output,
+    { updated: false }
+  );
+  assert.deepEqual(
+    (await updateMemory({ residentId: "resident-default", worldPackId: "default-yuukei", kind: "fact", id: "fact-1", text: "新しい事実。" }, env(dataDir))).output,
+    { updated: true }
+  );
+  const facts = await readFacts(dataDir);
+  assert.equal(facts[0].text, "新しい事実。");
+  assert.notEqual(facts[0].updatedAt, "2026-01-01T00:00:00.000Z");
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+test("memory.forget removes individual entries and all memory", async () => {
+  const dataDir = await tempDataDir();
+  await seedMemory(dataDir, {
+    facts: [
+      { id: "fact-1", text: "A", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+      { id: "fact-2", text: "B", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }
+    ],
+    episodes: [
+      { id: "episode-1", date: "2026-01-01", timestamp: "2026-01-01", text: "一日目。" },
+      { id: "episode-2", date: "2026-01-02", timestamp: "2026-01-02", text: "二日目。" }
+    ]
+  });
+
+  const individual = await forgetMemory(
+    {
+      residentId: "resident-default",
+      worldPackId: "default-yuukei",
+      entries: [
+        { kind: "fact", id: "fact-1" },
+        { kind: "episode", id: "episode-2" }
+      ]
+    },
+    env(dataDir)
+  );
+  assert.deepEqual(individual.output, { removedFacts: 1, removedEpisodes: 1 });
+  assert.deepEqual((await readFacts(dataDir)).map((fact) => fact.id), ["fact-2"]);
+  assert.deepEqual((await readEpisodes(dataDir)).map((episode) => episode.id), ["episode-1"]);
+
+  const all = await forgetMemory(
+    { residentId: "resident-default", worldPackId: "default-yuukei", all: true },
+    env(dataDir)
+  );
+  assert.deepEqual(all.output, { removedFacts: 1, removedEpisodes: 1 });
+  assert.deepEqual(await readFacts(dataDir), []);
+  assert.deepEqual(await readEpisodes(dataDir), []);
   await rm(dataDir, { recursive: true, force: true });
 });
 

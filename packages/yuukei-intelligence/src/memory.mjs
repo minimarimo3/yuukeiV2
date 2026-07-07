@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { summarizeMemoryIndexWithProvider } from "./providers/index.mjs";
@@ -55,6 +56,117 @@ export async function retrieveMemory(input, env = process.env) {
   }
 }
 
+export async function listMemory(input, env = process.env) {
+  try {
+    const store = await openMemoryStore(input, env);
+    const [factsResult, episodesResult] = await Promise.all([
+      readFactsWithMigration(store),
+      readEpisodesWithMigration(store)
+    ]);
+    if (factsResult.changed) {
+      await writeFacts(store, factsResult.entries);
+    }
+    if (episodesResult.changed) {
+      await writeEpisodes(store, episodesResult.entries);
+    }
+    const episodeOffset = nonNegativeInteger(input?.episodeOffset, 0);
+    const episodeLimit = positiveInteger(input?.episodeLimit, 50);
+    const episodes = [...episodesResult.entries]
+      .sort((left, right) => String(right.timestamp).localeCompare(String(left.timestamp)))
+      .slice(episodeOffset, episodeOffset + episodeLimit)
+      .map((episode) => ({
+        id: episode.id,
+        text: episode.text,
+        timestamp: episode.timestamp
+      }));
+    return {
+      output: {
+        facts: factsResult.entries.map((fact) => ({
+          id: fact.id,
+          text: fact.text,
+          createdAt: fact.createdAt,
+          updatedAt: fact.updatedAt
+        })),
+        episodes,
+        episodeTotal: episodesResult.entries.length
+      },
+      metadata: { facts: factsResult.entries.length, episodes: episodesResult.entries.length }
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: memory list failed: ${error.message}`);
+    return { output: { facts: [], episodes: [], episodeTotal: 0 }, metadata: { reason: "storage-error" } };
+  }
+}
+
+export async function updateMemory(input, env = process.env) {
+  try {
+    const text = typeof input?.text === "string" ? input.text.trim() : "";
+    if (input?.kind !== "fact" || !text || text.length > 500 || typeof input?.id !== "string") {
+      return { output: { updated: false }, metadata: { reason: "invalid-input" } };
+    }
+    const store = await openMemoryStore(input, env);
+    const factsResult = await readFactsWithMigration(store);
+    const facts = factsResult.entries;
+    const fact = facts.find((candidate) => candidate.id === input.id);
+    if (!fact) {
+      if (factsResult.changed) {
+        await writeFacts(store, facts);
+      }
+      return { output: { updated: false }, metadata: { reason: "not-found" } };
+    }
+    fact.text = text;
+    fact.updatedAt = new Date().toISOString();
+    await writeFacts(store, facts);
+    return { output: { updated: true }, metadata: {} };
+  } catch (error) {
+    console.error(`yuukei-intelligence: memory update failed: ${error.message}`);
+    return { output: { updated: false }, metadata: { reason: "storage-error" } };
+  }
+}
+
+export async function forgetMemory(input, env = process.env) {
+  try {
+    const store = await openMemoryStore(input, env);
+    const [factsResult, episodesResult] = await Promise.all([
+      readFactsWithMigration(store),
+      readEpisodesWithMigration(store)
+    ]);
+    let facts = factsResult.entries;
+    let episodes = episodesResult.entries;
+    const previousFacts = facts.length;
+    const previousEpisodes = episodes.length;
+    if (input?.all === true) {
+      facts = [];
+      episodes = [];
+    } else {
+      const entries = Array.isArray(input?.entries) ? input.entries : [];
+      const factIds = new Set(
+        entries
+          .filter((entry) => entry?.kind === "fact" && typeof entry.id === "string")
+          .map((entry) => entry.id)
+      );
+      const episodeIds = new Set(
+        entries
+          .filter((entry) => entry?.kind === "episode" && typeof entry.id === "string")
+          .map((entry) => entry.id)
+      );
+      facts = facts.filter((fact) => !factIds.has(fact.id));
+      episodes = episodes.filter((episode) => !episodeIds.has(episode.id));
+    }
+    await Promise.all([writeFacts(store, facts), writeEpisodes(store, episodes)]);
+    return {
+      output: {
+        removedFacts: previousFacts - facts.length,
+        removedEpisodes: previousEpisodes - episodes.length
+      },
+      metadata: {}
+    };
+  } catch (error) {
+    console.error(`yuukei-intelligence: memory forget failed: ${error.message}`);
+    return { output: { removedFacts: 0, removedEpisodes: 0 }, metadata: { reason: "storage-error" } };
+  }
+}
+
 async function openMemoryStore(input, env) {
   const dataDir = env.YUUKEI_EXTENSION_DATA_DIR;
   if (!dataDir) {
@@ -76,9 +188,15 @@ async function upsertEpisode(store, episode) {
     return;
   }
   const episodes = await readEpisodes(store);
+  const existing = episodes.find((candidate) => candidate.date === episode.date);
   const next = [
     ...episodes.filter((existing) => existing.date !== episode.date),
-    { date: episode.date, text: episode.text }
+    {
+      id: existing?.id ?? randomUUID(),
+      date: episode.date,
+      timestamp: episode.date,
+      text: episode.text
+    }
   ].sort((left, right) => left.date.localeCompare(right.date));
   await writeEpisodes(store, next);
 }
@@ -103,7 +221,7 @@ async function mergeFacts(store, newFacts) {
       duplicate.updatedAt = now;
       continue;
     }
-    facts.push({ text: fact, createdAt: now, updatedAt: now });
+    facts.push({ id: randomUUID(), text: fact, createdAt: now, updatedAt: now });
   }
   facts.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
   const trimmed = facts.slice(0, MAX_FACTS);
@@ -112,20 +230,34 @@ async function mergeFacts(store, newFacts) {
 }
 
 async function readFacts(store) {
+  return (await readFactsWithMigration(store)).entries;
+}
+
+async function readFactsWithMigration(store) {
   try {
     const value = JSON.parse(await readFile(store.factsPath, "utf8"));
-    return Array.isArray(value)
-      ? value
-          .filter((fact) => fact && typeof fact === "object" && typeof fact.text === "string")
-          .map((fact) => ({
-            text: fact.text,
-            createdAt: typeof fact.createdAt === "string" ? fact.createdAt : "",
-            updatedAt: typeof fact.updatedAt === "string" ? fact.updatedAt : ""
-          }))
-      : [];
+    if (!Array.isArray(value)) {
+      return { entries: [], changed: false };
+    }
+    let changed = false;
+    const entries = value
+      .filter((fact) => fact && typeof fact === "object" && typeof fact.text === "string")
+      .map((fact) => {
+        const id = typeof fact.id === "string" && fact.id.trim() ? fact.id : randomUUID();
+        if (id !== fact.id) {
+          changed = true;
+        }
+        return {
+          id,
+          text: fact.text,
+          createdAt: typeof fact.createdAt === "string" ? fact.createdAt : "",
+          updatedAt: typeof fact.updatedAt === "string" ? fact.updatedAt : ""
+        };
+      });
+    return { entries, changed };
   } catch (error) {
     if (error.code === "ENOENT") {
-      return [];
+      return { entries: [], changed: false };
     }
     throw error;
   }
@@ -136,9 +268,14 @@ async function writeFacts(store, facts) {
 }
 
 async function readEpisodes(store) {
+  return (await readEpisodesWithMigration(store)).entries;
+}
+
+async function readEpisodesWithMigration(store) {
   try {
     const raw = await readFile(store.episodesPath, "utf8");
-    return raw
+    let changed = false;
+    const entries = raw
       .split(/\r?\n/)
       .filter(Boolean)
       .map((line) => JSON.parse(line))
@@ -146,13 +283,24 @@ async function readEpisodes(store) {
         (episode) =>
           episode &&
           typeof episode === "object" &&
-          typeof episode.date === "string" &&
+          (typeof episode.date === "string" || typeof episode.timestamp === "string") &&
           typeof episode.text === "string"
       )
-      .map((episode) => ({ date: episode.date, text: episode.text }));
+      .map((episode) => {
+        const id = typeof episode.id === "string" && episode.id.trim() ? episode.id : randomUUID();
+        const timestamp =
+          typeof episode.timestamp === "string" && episode.timestamp.trim()
+            ? episode.timestamp
+            : episode.date;
+        if (id !== episode.id || timestamp !== episode.timestamp) {
+          changed = true;
+        }
+        return { id, date: timestamp.slice(0, 10), timestamp, text: episode.text };
+      });
+    return { entries, changed };
   } catch (error) {
     if (error.code === "ENOENT") {
-      return [];
+      return { entries: [], changed: false };
     }
     throw error;
   }
@@ -249,6 +397,11 @@ function normalizeForDuplicate(value) {
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.trunc(number) : fallback;
+}
+
+function nonNegativeInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
 }
 
 function safeSegment(value) {
