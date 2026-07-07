@@ -436,6 +436,14 @@ pub struct SceneHistoryPersistenceError {
 
 pub type SceneHistoryErrorLogger = Arc<dyn Fn(SceneHistoryPersistenceError) + Send + Sync>;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneHistoryEntry {
+    pub event_name: String,
+    pub scene_name: String,
+    pub last_executed_at: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariablePersistenceError {
     pub path: PathBuf,
@@ -498,6 +506,16 @@ impl YuukeiDaihonAdapter {
                 ..YuukeiDaihonState::default()
             }),
         }
+    }
+
+    pub async fn scene_history_entries(&self) -> Vec<SceneHistoryEntry> {
+        let state = self.state.lock().await;
+        state.history.entries()
+    }
+
+    pub async fn reset_scene_history(&self) {
+        let mut state = self.state.lock().await;
+        state.history.clear();
     }
 }
 
@@ -645,6 +663,28 @@ impl YuukeiSceneHistory {
                 );
             }
         }
+    }
+
+    fn entries(&self) -> Vec<SceneHistoryEntry> {
+        let mut entries = self
+            .entries
+            .iter()
+            .map(
+                |((event_name, scene_name), last_executed_at)| SceneHistoryEntry {
+                    event_name: event_name.clone(),
+                    scene_name: scene_name.clone(),
+                    last_executed_at: last_executed_at.to_rfc3339(),
+                },
+            )
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| b.last_executed_at.cmp(&a.last_executed_at));
+        entries
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last_by_event.clear();
+        self.save_to_storage();
     }
 }
 

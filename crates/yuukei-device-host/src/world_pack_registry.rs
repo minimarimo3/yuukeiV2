@@ -215,6 +215,7 @@ impl WorldPackRegistry {
             event_log_path: resident_dir.join("events.sqlite3"),
             scene_history_path: resident_dir.join("scene-history.json"),
             variables_path: resident_dir.join("variables.json"),
+            mood_state_path: resident_dir.join("mood.json"),
             app_log_path: self.env.app_log_path(),
         }
     }

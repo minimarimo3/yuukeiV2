@@ -25,10 +25,12 @@ use yuukei_protocol::{
     SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
 pub use yuukei_resident_home::ResidentEventLogPage;
-use yuukei_resident_home::{ResidentEventLogReadOptions, ResidentHome, ResidentHomeError};
+use yuukei_resident_home::{
+    ResidentEventLogReadOptions, ResidentHome, ResidentHomeError, ResidentRuntimeSettings,
+};
 use yuukei_world::{
-    ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, DaihonDiagnosticEntry, WorldError,
-    WorldPack, YuukeiDaihonAdapter,
+    ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, DaihonDiagnosticEntry,
+    SceneHistoryEntry, WorldError, WorldPack, YuukeiDaihonAdapter,
 };
 
 mod extension_settings;
@@ -49,6 +51,13 @@ pub const TAURI_SURFACE_ID: &str = "surface-tauri";
 pub const CLI_SURFACE_ID: &str = "surface-cli";
 pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
+pub const DEFAULT_LLM_TIMEOUT_MS: u64 = 30_000;
+pub const MIN_LLM_TIMEOUT_MS: u64 = 1_000;
+pub const MAX_LLM_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_RECENT_CONTEXT_COUNT: usize = 20;
+pub const MAX_RECENT_CONTEXT_COUNT: usize = 100;
+pub const DEFAULT_TALK_DESIRE_LOW: u8 = 30;
+pub const DEFAULT_TALK_DESIRE_HIGH: u8 = 80;
 const PRESENCE_LOOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PRESENCE_IDLE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 const TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION: Duration = Duration::from_secs(60);
@@ -72,6 +81,8 @@ pub enum DeviceHostError {
     ExtensionSettings(String),
     #[error("app settings error: {0}")]
     AppSettings(String),
+    #[error("runtime settings error: {0}")]
+    RuntimeSettings(String),
     #[error("observation settings error: {0}")]
     ObservationSettings(String),
     #[error("onboarding settings error: {0}")]
@@ -97,6 +108,7 @@ impl DeviceHostError {
             | Self::AppLog(_)
             | Self::ExtensionSettings(_)
             | Self::AppSettings(_)
+            | Self::RuntimeSettings(_)
             | Self::ObservationSettings(_)
             | Self::OnboardingSettings(_)
             | Self::WorldPackImport(_)
@@ -115,6 +127,7 @@ pub struct RuntimePaths {
     pub event_log_path: PathBuf,
     pub scene_history_path: PathBuf,
     pub variables_path: PathBuf,
+    pub mood_state_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -130,6 +143,7 @@ pub struct LocalRuntimeConfig {
     pub event_log_path: PathBuf,
     pub scene_history_path: PathBuf,
     pub variables_path: PathBuf,
+    pub mood_state_path: PathBuf,
     pub app_log_path: PathBuf,
 }
 
@@ -156,6 +170,10 @@ impl LocalRuntimeConfig {
                 .join("residents")
                 .join(DEFAULT_WORLD_PACK_INSTALL_ID)
                 .join("variables.json"),
+            mood_state_path: data_dir
+                .join("residents")
+                .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+                .join("mood.json"),
             app_log_path: data_dir.join("app-activity.jsonl"),
             workspace_root,
             data_dir,
@@ -173,6 +191,7 @@ impl LocalRuntimeConfig {
             event_log_path: self.event_log_path.clone(),
             scene_history_path: self.scene_history_path.clone(),
             variables_path: self.variables_path.clone(),
+            mood_state_path: self.mood_state_path.clone(),
             app_log_path: self.app_log_path.clone(),
         }
     }
@@ -261,6 +280,161 @@ impl AppSettingsRegistry {
         )?;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSettingsState {
+    pub llm_timeout_ms: u64,
+    pub recent_context_count: usize,
+    pub talk_desire_low: u8,
+    pub talk_desire_high: u8,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSettingsUpdate {
+    pub llm_timeout_ms: u64,
+    pub recent_context_count: usize,
+    pub talk_desire_low: u8,
+    pub talk_desire_high: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneHistoryState {
+    pub install_id: String,
+    pub history_path: PathBuf,
+    pub entries: Vec<SceneHistoryEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeSettingsRegistry {
+    settings_path: PathBuf,
+    stored: StoredRuntimeSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRuntimeSettings {
+    #[serde(default = "default_llm_timeout_ms")]
+    llm_timeout_ms: u64,
+    #[serde(default = "default_recent_context_count")]
+    recent_context_count: usize,
+    #[serde(default = "default_talk_desire_low")]
+    talk_desire_low: u8,
+    #[serde(default = "default_talk_desire_high")]
+    talk_desire_high: u8,
+}
+
+impl Default for StoredRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            llm_timeout_ms: DEFAULT_LLM_TIMEOUT_MS,
+            recent_context_count: DEFAULT_RECENT_CONTEXT_COUNT,
+            talk_desire_low: DEFAULT_TALK_DESIRE_LOW,
+            talk_desire_high: DEFAULT_TALK_DESIRE_HIGH,
+        }
+    }
+}
+
+impl StoredRuntimeSettings {
+    fn normalized(mut self) -> Self {
+        self.llm_timeout_ms = self
+            .llm_timeout_ms
+            .clamp(MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS);
+        self.recent_context_count = self.recent_context_count.min(MAX_RECENT_CONTEXT_COUNT);
+        self.talk_desire_low = self.talk_desire_low.min(100);
+        self.talk_desire_high = self.talk_desire_high.min(100);
+        if self.talk_desire_low >= self.talk_desire_high {
+            self.talk_desire_high = self.talk_desire_low.saturating_add(1).min(100);
+            if self.talk_desire_low >= self.talk_desire_high {
+                self.talk_desire_low = self.talk_desire_high.saturating_sub(1);
+            }
+        }
+        self
+    }
+}
+
+impl RuntimeSettingsRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("runtime.json");
+        let exists = settings_path.exists();
+        let stored = if exists {
+            let raw = fs::read_to_string(&settings_path)?;
+            serde_json::from_str::<StoredRuntimeSettings>(&raw)?.normalized()
+        } else {
+            StoredRuntimeSettings::default()
+        };
+        let registry = Self {
+            settings_path,
+            stored,
+        };
+        if !exists {
+            registry.save()?;
+        }
+        Ok(registry)
+    }
+
+    fn state(&self) -> RuntimeSettingsState {
+        RuntimeSettingsState {
+            llm_timeout_ms: self.stored.llm_timeout_ms,
+            recent_context_count: self.stored.recent_context_count,
+            talk_desire_low: self.stored.talk_desire_low,
+            talk_desire_high: self.stored.talk_desire_high,
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn set(&mut self, next: RuntimeSettingsUpdate) -> Result<RuntimeSettingsState> {
+        self.stored = StoredRuntimeSettings {
+            llm_timeout_ms: next.llm_timeout_ms,
+            recent_context_count: next.recent_context_count,
+            talk_desire_low: next.talk_desire_low,
+            talk_desire_high: next.talk_desire_high,
+        }
+        .normalized();
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn resident_runtime_settings(&self) -> ResidentRuntimeSettings {
+        ResidentRuntimeSettings {
+            llm_timeout: Duration::from_millis(self.stored.llm_timeout_ms),
+            recent_context_count: self.stored.recent_context_count,
+            talk_desire_low: self.stored.talk_desire_low,
+            talk_desire_high: self.stored.talk_desire_high,
+            mood_state_path: None,
+        }
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
+}
+
+fn default_llm_timeout_ms() -> u64 {
+    DEFAULT_LLM_TIMEOUT_MS
+}
+
+fn default_recent_context_count() -> usize {
+    DEFAULT_RECENT_CONTEXT_COUNT
+}
+
+fn default_talk_desire_low() -> u8 {
+    DEFAULT_TALK_DESIRE_LOW
+}
+
+fn default_talk_desire_high() -> u8 {
+    DEFAULT_TALK_DESIRE_HIGH
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -926,6 +1100,7 @@ pub struct AvatarGestureScreen {
 #[derive(Clone)]
 pub struct LocalYuukeiRuntime {
     home: Arc<ResidentHome>,
+    daihon_adapter: Arc<YuukeiDaihonAdapter>,
     logger: AppLogger,
     install_id: String,
     resident_id: String,
@@ -1745,6 +1920,15 @@ impl LocalYuukeiRuntime {
         Ok(registry.state())
     }
 
+    pub fn runtime_settings_state() -> Result<RuntimeSettingsState> {
+        Self::runtime_settings_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn runtime_settings_state_in(env: LocalRuntimeEnvironment) -> Result<RuntimeSettingsState> {
+        let registry = RuntimeSettingsRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
     pub fn observation_settings_state() -> Result<ObservationSettingsState> {
         Self::observation_settings_state_in(LocalRuntimeEnvironment::default_local())
     }
@@ -1798,6 +1982,18 @@ impl LocalYuukeiRuntime {
     ) -> Result<AppSettingsState> {
         let mut registry = AppSettingsRegistry::open(&env.data_dir)?;
         registry.set_talk_interval_minutes(minutes)
+    }
+
+    pub fn set_runtime_settings(settings: RuntimeSettingsUpdate) -> Result<RuntimeSettingsState> {
+        Self::set_runtime_settings_in(LocalRuntimeEnvironment::default_local(), settings)
+    }
+
+    pub fn set_runtime_settings_in(
+        env: LocalRuntimeEnvironment,
+        settings: RuntimeSettingsUpdate,
+    ) -> Result<RuntimeSettingsState> {
+        let mut registry = RuntimeSettingsRegistry::open(&env.data_dir)?;
+        registry.set(settings)
     }
 
     pub fn install_extension_directory(path: impl AsRef<Path>) -> Result<ExtensionSettingsState> {
@@ -2026,6 +2222,9 @@ impl LocalYuukeiRuntime {
             }
         };
         let extension_settings = config.extension_settings_registry()?;
+        let mut resident_runtime_settings =
+            RuntimeSettingsRegistry::open(&config.data_dir)?.resident_runtime_settings();
+        resident_runtime_settings.mood_state_path = Some(config.mood_state_path.clone());
         let process_runtime_supervisor = ProcessRuntimeSupervisor::new();
         let capabilities = build_extension_capability_router(
             &extension_settings,
@@ -2059,17 +2258,19 @@ impl LocalYuukeiRuntime {
                 );
             })
         };
-        let home = match ResidentHome::with_parts(
+        let daihon_adapter = Arc::new(YuukeiDaihonAdapter::with_persistent_state_loggers(
+            config.scene_history_path.clone(),
+            scene_history_logger,
+            config.variables_path.clone(),
+            variable_logger,
+        ));
+        let home = match ResidentHome::with_parts_and_runtime_settings(
             &config.resident_id,
             world,
             event_log,
-            Arc::new(YuukeiDaihonAdapter::with_persistent_state_loggers(
-                config.scene_history_path.clone(),
-                scene_history_logger,
-                config.variables_path.clone(),
-                variable_logger,
-            )),
+            daihon_adapter.clone(),
             capabilities,
+            resident_runtime_settings,
         )
         .await
         {
@@ -2132,6 +2333,7 @@ impl LocalYuukeiRuntime {
 
         let runtime = Self {
             home,
+            daihon_adapter,
             logger,
             install_id: config.install_id,
             resident_id: config.resident_id,
@@ -2170,6 +2372,30 @@ impl LocalYuukeiRuntime {
 
     pub fn paths(&self) -> &RuntimePaths {
         &self.paths
+    }
+
+    pub async fn scene_history_state(&self) -> Result<SceneHistoryState> {
+        Ok(SceneHistoryState {
+            install_id: self.install_id.clone(),
+            history_path: self.paths.scene_history_path.clone(),
+            entries: self.daihon_adapter.scene_history_entries().await,
+        })
+    }
+
+    pub async fn reset_scene_history(&self) -> Result<SceneHistoryState> {
+        self.daihon_adapter.reset_scene_history().await;
+        self.logger.record(
+            "scene-history.reset",
+            "device-host",
+            JsonMap::from([
+                ("installId".to_string(), json!(self.install_id)),
+                (
+                    "historyPath".to_string(),
+                    json!(display_path(&self.paths.scene_history_path)),
+                ),
+            ]),
+        )?;
+        self.scene_history_state().await
     }
 
     pub fn install_id(&self) -> &str {
@@ -2221,6 +2447,10 @@ impl LocalYuukeiRuntime {
 
     pub fn app_settings(&self) -> Result<AppSettingsState> {
         AppSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
+    }
+
+    pub fn runtime_settings(&self) -> Result<RuntimeSettingsState> {
+        RuntimeSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
     }
 
     pub fn observation_settings(&self) -> Result<ObservationSettingsState> {
@@ -3367,6 +3597,10 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         .join("residents")
         .join(DEFAULT_WORLD_PACK_INSTALL_ID)
         .join("variables.json");
+    let mood_state_path = data_dir
+        .join("residents")
+        .join(DEFAULT_WORLD_PACK_INSTALL_ID)
+        .join("mood.json");
     let app_log_path = data_dir.join("app-activity.jsonl");
     LocalRuntimeConfig {
         install_id: DEFAULT_WORLD_PACK_INSTALL_ID.to_string(),
@@ -3378,6 +3612,7 @@ fn extension_config_for_env(env: LocalRuntimeEnvironment) -> LocalRuntimeConfig 
         event_log_path,
         scene_history_path,
         variables_path,
+        mood_state_path,
         app_log_path,
         data_dir,
     }
@@ -3461,6 +3696,10 @@ fn paths_payload(paths: &RuntimePaths) -> JsonMap {
         (
             "variablesPath".to_string(),
             json!(display_path(&paths.variables_path)),
+        ),
+        (
+            "moodStatePath".to_string(),
+            json!(display_path(&paths.mood_state_path)),
         ),
         (
             "appLogPath".to_string(),
@@ -3828,6 +4067,59 @@ mod tests {
         let reopened = AppSettingsRegistry::open(data.path())?;
         assert_eq!(reopened.state().talk_interval_minutes, 12);
         assert!(data.path().join("settings").join("app.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_settings_persist_and_clamp_llm_and_context(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = RuntimeSettingsRegistry::open(data.path())?;
+        let settings_path = data.path().join("settings").join("runtime.json");
+
+        assert_eq!(
+            registry.state(),
+            RuntimeSettingsState {
+                llm_timeout_ms: DEFAULT_LLM_TIMEOUT_MS,
+                recent_context_count: DEFAULT_RECENT_CONTEXT_COUNT,
+                talk_desire_low: DEFAULT_TALK_DESIRE_LOW,
+                talk_desire_high: DEFAULT_TALK_DESIRE_HIGH,
+                settings_path: settings_path.clone(),
+            }
+        );
+        let updated = registry.set(RuntimeSettingsUpdate {
+            llm_timeout_ms: 999_999,
+            recent_context_count: 999,
+            talk_desire_low: 100,
+            talk_desire_high: 5,
+        })?;
+        assert_eq!(updated.llm_timeout_ms, MAX_LLM_TIMEOUT_MS);
+        assert_eq!(updated.recent_context_count, MAX_RECENT_CONTEXT_COUNT);
+        assert_eq!(updated.talk_desire_low, 99);
+        assert_eq!(updated.talk_desire_high, 100);
+
+        fs::write(
+            &settings_path,
+            r#"{"llmTimeoutMs":500,"recentContextCount":101,"talkDesireLow":80,"talkDesireHigh":80}"#,
+        )?;
+        let reopened = RuntimeSettingsRegistry::open(data.path())?;
+        assert_eq!(reopened.state().llm_timeout_ms, MIN_LLM_TIMEOUT_MS);
+        assert_eq!(
+            reopened.state().recent_context_count,
+            MAX_RECENT_CONTEXT_COUNT
+        );
+        assert_eq!(reopened.state().talk_desire_low, 80);
+        assert_eq!(reopened.state().talk_desire_high, 81);
+        assert_eq!(
+            reopened.resident_runtime_settings(),
+            ResidentRuntimeSettings {
+                llm_timeout: Duration::from_millis(MIN_LLM_TIMEOUT_MS),
+                recent_context_count: MAX_RECENT_CONTEXT_COUNT,
+                talk_desire_low: 80,
+                talk_desire_high: 81,
+                mood_state_path: None,
+            }
+        );
         Ok(())
     }
 
@@ -4617,14 +4909,27 @@ mod tests {
         let first_commands = first_runtime.emit_talk_impulse().await?;
         assert_eq!(first_commands.len(), 1);
         assert!(first_runtime.paths().scene_history_path.exists());
+        let history = first_runtime.scene_history_state().await?;
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].event_name, "雑談");
         drop(first_runtime);
 
-        let second_runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        let second_runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
         second_runtime
             .attach_surface(cli_surface_session(second_runtime.device_id()))
             .await?;
         let second_commands = second_runtime.emit_talk_impulse().await?;
         assert!(second_commands.is_empty());
+        let cleared = second_runtime.reset_scene_history().await?;
+        assert!(cleared.entries.is_empty());
+        drop(second_runtime);
+
+        let third_runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        third_runtime
+            .attach_surface(cli_surface_session(third_runtime.device_id()))
+            .await?;
+        let third_commands = third_runtime.emit_talk_impulse().await?;
+        assert_eq!(third_commands.len(), 1);
         Ok(())
     }
 

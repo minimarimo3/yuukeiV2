@@ -13,6 +13,8 @@ import type {
   ObservationSettingsState,
   OnboardingState,
   ResidentMemoryState,
+  RuntimeSettingsState,
+  SceneHistoryState,
   WorldPackSelectionState,
   YuukeiClient
 } from "./yuukeiClient";
@@ -123,6 +125,35 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   return {
     talkIntervalMinutes,
     settingsPath: "/tmp/yuukei-v2/settings/app.json"
+  };
+}
+
+function runtimeSettings(
+  overrides: Partial<RuntimeSettingsState> = {}
+): RuntimeSettingsState {
+  return {
+    llmTimeoutMs: 30000,
+    recentContextCount: 20,
+    talkDesireLow: 30,
+    talkDesireHigh: 80,
+    settingsPath: "/tmp/yuukei-v2/settings/runtime.json",
+    ...overrides
+  };
+}
+
+function sceneHistory(
+  entries: SceneHistoryState["entries"] = [
+    {
+      eventName: "conversation.text",
+      sceneName: "greeting",
+      lastExecutedAt: "2026-07-07T00:00:00.000+09:00"
+    }
+  ]
+): SceneHistoryState {
+  return {
+    installId: "default-yuukei",
+    historyPath: "/tmp/yuukei-v2/residents/default-yuukei/scene-history.json",
+    entries
   };
 }
 
@@ -250,6 +281,10 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getAppSettings: vi.fn(async () => appSettings()),
+    getRuntimeSettings: vi.fn(async () => runtimeSettings()),
+    getSceneHistory: vi.fn(async () => sceneHistory()),
+    getAutostartEnabled: vi.fn(async () => false),
+    setAutostartEnabled: vi.fn(async (enabled: boolean) => enabled),
     getObservationSettings: vi.fn(async () => observationSettings()),
     getOnboardingState: vi.fn(async () => onboardingState()),
     completeOnboarding: vi.fn(async () => onboardingState()),
@@ -318,6 +353,8 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
       appSettings(minutes)
     ),
+    setRuntimeSettings: vi.fn(async (settings) => runtimeSettings(settings)),
+    resetSceneHistory: vi.fn(async () => sceneHistory([])),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
@@ -508,6 +545,124 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.setAppTalkIntervalMinutes).toHaveBeenLastCalledWith(12);
     });
+  });
+
+  it("toggles login autostart settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const toggle = await screen.findByRole("checkbox", {
+      name: /ログイン時に自動起動/
+    });
+    expect(toggle).not.toBeChecked();
+
+    await userEvent.click(toggle);
+    await waitFor(() => {
+      expect(client.setAutostartEnabled).toHaveBeenLastCalledWith(true);
+    });
+    expect(toggle).toBeChecked();
+
+    await userEvent.click(toggle);
+    await waitFor(() => {
+      expect(client.setAutostartEnabled).toHaveBeenLastCalledWith(false);
+    });
+  });
+
+  it("saves runtime LLM timeout and recent context settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const timeoutInput = await screen.findByRole("spinbutton", {
+      name: /AI待ち時間/
+    });
+    await userEvent.clear(timeoutInput);
+    await userEvent.type(timeoutInput, "45000");
+
+    await waitFor(() => {
+      expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
+        llmTimeoutMs: 45000,
+        recentContextCount: 20,
+        talkDesireLow: 30,
+        talkDesireHigh: 80
+      });
+    });
+
+    const contextInput = await screen.findByRole("spinbutton", {
+      name: /直近文脈の件数/
+    });
+    await userEvent.clear(contextInput);
+    await userEvent.type(contextInput, "8");
+
+    await waitFor(() => {
+      expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
+        llmTimeoutMs: 45000,
+        recentContextCount: 8,
+        talkDesireLow: 30,
+        talkDesireHigh: 80
+      });
+    });
+  });
+
+  it("saves talk desire threshold settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const lowInput = await screen.findByRole("spinbutton", {
+      name: /話したい度: 低/
+    });
+    await userEvent.clear(lowInput);
+    await userEvent.type(lowInput, "25");
+
+    await waitFor(() => {
+      expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
+        llmTimeoutMs: 30000,
+        recentContextCount: 20,
+        talkDesireLow: 25,
+        talkDesireHigh: 80
+      });
+    });
+
+    const highInput = await screen.findByRole("spinbutton", {
+      name: /話したい度: 高/
+    });
+    await userEvent.clear(highInput);
+    await userEvent.type(highInput, "75");
+
+    await waitFor(() => {
+      expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
+        llmTimeoutMs: 30000,
+        recentContextCount: 20,
+        talkDesireLow: 25,
+        talkDesireHigh: 75
+      });
+    });
+  });
+
+  it("lists and resets scene history", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "シーン履歴" }));
+    expect(await screen.findByText("greeting")).toBeInTheDocument();
+    expect(screen.getByText("conversation.text")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "全リセット" }));
+    expect(confirm).toHaveBeenCalledWith(
+      "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？"
+    );
+    await waitFor(() => {
+      expect(client.resetSceneHistory).toHaveBeenCalledTimes(1);
+    });
+    expect(await screen.findByText("まだ記録されたシーンはありません。")).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("toggles observation privacy settings", async () => {

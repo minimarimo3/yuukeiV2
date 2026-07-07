@@ -19,6 +19,8 @@ import {
   type ObservationSettingsUpdate,
   type OnboardingState,
   type ResidentMemoryState,
+  type RuntimeSettingsState,
+  type SceneHistoryState,
   type WorldPackSelectionState,
   type YuukeiClient
 } from "./yuukeiClient";
@@ -31,6 +33,7 @@ type SettingsCategoryId =
   | "app"
   | "worldPack"
   | "observations"
+  | "sceneHistory"
   | "eventLog"
   | "memories"
   | "extensions";
@@ -53,6 +56,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
+  const [runtimeSettings, setRuntimeSettings] =
+    useState<RuntimeSettingsState | null>(null);
+  const [sceneHistory, setSceneHistory] = useState<SceneHistoryState | null>(null);
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [observationSettings, setObservationSettings] =
     useState<ObservationSettingsState | null>(null);
   const [onboardingState, setOnboardingState] =
@@ -132,6 +139,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const [
         nextWorldPackStatus,
         nextAppSettings,
+        nextRuntimeSettings,
+        nextSceneHistory,
+        nextAutostartEnabled,
         nextObservationSettings,
         nextOnboardingState,
         nextExtensionState,
@@ -140,6 +150,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         await Promise.all([
           client.getWorldPackStatus(),
           client.getAppSettings(),
+          client.getRuntimeSettings(),
+          client.getSceneHistory(),
+          client.getAutostartEnabled(),
           client.getObservationSettings(),
           client.getOnboardingState(),
           client.getExtensionSettings(),
@@ -148,6 +161,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
         setAppSettings(nextAppSettings);
+        setRuntimeSettings(nextRuntimeSettings);
+        setSceneHistory(nextSceneHistory);
+        setAutostartEnabled(nextAutostartEnabled);
         setObservationSettings(nextObservationSettings);
         setOnboardingState(nextOnboardingState);
         setExtensionState(nextExtensionState);
@@ -403,6 +419,74 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function toggleAutostart(enabled: boolean) {
+    setAppSettingsError(null);
+    try {
+      setAutostartEnabled(await client.setAutostartEnabled(enabled));
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveRuntimeSettings(
+    key:
+      | "llmTimeoutMs"
+      | "recentContextCount"
+      | "talkDesireLow"
+      | "talkDesireHigh",
+    value: number
+  ) {
+    const current =
+      runtimeSettings ??
+      ({
+        llmTimeoutMs: 30_000,
+        recentContextCount: 20,
+        talkDesireLow: 30,
+        talkDesireHigh: 80,
+        settingsPath: ""
+      } satisfies RuntimeSettingsState);
+    const next = {
+      llmTimeoutMs:
+        key === "llmTimeoutMs"
+          ? Math.max(0, Math.trunc(value || 0))
+          : current.llmTimeoutMs,
+      recentContextCount:
+        key === "recentContextCount"
+          ? Math.max(0, Math.trunc(value || 0))
+          : current.recentContextCount,
+      talkDesireLow:
+        key === "talkDesireLow"
+          ? Math.max(0, Math.trunc(value || 0))
+          : current.talkDesireLow,
+      talkDesireHigh:
+        key === "talkDesireHigh"
+          ? Math.max(0, Math.trunc(value || 0))
+          : current.talkDesireHigh
+    };
+    setAppSettingsError(null);
+    try {
+      setRuntimeSettings(await client.setRuntimeSettings(next));
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function resetSceneHistory() {
+    if (
+      !window.confirm(
+        "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？"
+      )
+    ) {
+      return;
+    }
+    setWorldPackError(null);
+    try {
+      setSceneHistory(await client.resetSceneHistory());
+    } catch (error) {
+      setWorldPackError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function toggleObservationSetting(
     key: keyof ObservationSettingsUpdate,
     enabled: boolean
@@ -595,6 +679,112 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 }}
               />
             </label>
+            <label className="extension-toggle" htmlFor="autostart-enabled">
+              <span>
+                <strong>ログイン時に自動起動</strong>
+                <small>このデバイスにログインしたとき、Yuukeiを起動します。</small>
+              </span>
+              <input
+                id="autostart-enabled"
+                type="checkbox"
+                checked={autostartEnabled}
+                onChange={(event) => {
+                  void toggleAutostart(event.currentTarget.checked);
+                }}
+              />
+            </label>
+            <p className="settings-title">AI呼び出し</p>
+            <p className="settings-note">
+              台本や会話補完で使うAI待ち時間と、直近文脈の件数です。
+            </p>
+            <label className="app-setting-field" htmlFor="llm-timeout-ms">
+              <span>
+                <strong>AI待ち時間</strong>
+                <small>1000〜300000ミリ秒に丸められます。</small>
+              </span>
+              <input
+                id="llm-timeout-ms"
+                type="number"
+                min={1000}
+                max={300000}
+                step={1000}
+                value={runtimeSettings?.llmTimeoutMs ?? 30000}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  void saveRuntimeSettings(
+                    "llmTimeoutMs",
+                    Number.isFinite(value) ? value : 30000
+                  );
+                }}
+              />
+            </label>
+            <label className="app-setting-field" htmlFor="recent-context-count">
+              <span>
+                <strong>直近文脈の件数</strong>
+                <small>{runtimeSettings?.settingsPath ?? ""}</small>
+              </span>
+              <input
+                id="recent-context-count"
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={runtimeSettings?.recentContextCount ?? 20}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  void saveRuntimeSettings(
+                    "recentContextCount",
+                    Number.isFinite(value) ? value : 20
+                  );
+                }}
+              />
+            </label>
+            <p className="settings-title">気分の話しかけやすさ</p>
+            <p className="settings-note">
+              低い値未満では話しかけを控え、高い値以上では気分変化で話しかけます。
+            </p>
+            <label className="app-setting-field" htmlFor="talk-desire-low">
+              <span>
+                <strong>話したい度: 低</strong>
+                <small>0〜100。高より小さく丸められます。</small>
+              </span>
+              <input
+                id="talk-desire-low"
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={runtimeSettings?.talkDesireLow ?? 30}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  void saveRuntimeSettings(
+                    "talkDesireLow",
+                    Number.isFinite(value) ? value : 30
+                  );
+                }}
+              />
+            </label>
+            <label className="app-setting-field" htmlFor="talk-desire-high">
+              <span>
+                <strong>話したい度: 高</strong>
+                <small>0〜100。低より大きく丸められます。</small>
+              </span>
+              <input
+                id="talk-desire-high"
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={runtimeSettings?.talkDesireHigh ?? 80}
+                onChange={(event) => {
+                  const value = Number(event.currentTarget.value);
+                  void saveRuntimeSettings(
+                    "talkDesireHigh",
+                    Number.isFinite(value) ? value : 80
+                  );
+                }}
+              />
+            </label>
             {appSettingsError ? (
               <p className="settings-error">{appSettingsError}</p>
             ) : null}
@@ -660,6 +850,43 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
+      )
+    },
+    {
+      id: "sceneHistory",
+      label: "シーン履歴",
+      ariaLabel: "Scene history settings",
+      panelId: "settings-scene-history-panel",
+      content: (
+        <div className="settings-copy">
+          <h2>シーン履歴</h2>
+          <p className="settings-title">このWorld Packの実行履歴</p>
+          <p className="settings-path">{sceneHistory?.historyPath ?? ""}</p>
+          <div className="settings-actions">
+            <button type="button" className="secondary-button" onClick={resetSceneHistory}>
+              全リセット
+            </button>
+          </div>
+          {sceneHistory?.entries.length ? (
+            <div className="event-log-list" aria-label="シーン実行履歴">
+              {sceneHistory.entries.map((entry) => (
+                <article
+                  className="event-log-row"
+                  key={`${entry.eventName}:${entry.sceneName}`}
+                >
+                  <div>
+                    <strong>{entry.sceneName}</strong>
+                    <small>{entry.eventName}</small>
+                  </div>
+                  <span>{new Date(entry.lastExecutedAt).toLocaleString()}</span>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="settings-note">まだ記録されたシーンはありません。</p>
+          )}
+          {worldPackError ? <p className="settings-error">{worldPackError}</p> : null}
+        </div>
       )
     },
     {

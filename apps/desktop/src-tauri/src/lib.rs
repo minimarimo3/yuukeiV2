@@ -16,6 +16,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, UriSchemeContext, WebviewWindow, WindowEvent,
 };
+use tauri_plugin_autostart::ManagerExt as _;
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
@@ -23,8 +24,8 @@ use yuukei_device_host::{
     DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
     ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
     LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
-    ResidentEventLogPage, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
-    TAURI_SURFACE_ID,
+    ResidentEventLogPage, RuntimeSettingsState, RuntimeSettingsUpdate, SceneHistoryState,
+    WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -166,6 +167,36 @@ async fn get_extension_settings(
 async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsState, String> {
     let runtime = state.runtime.lock().await;
     runtime.app_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_runtime_settings(state: State<'_, AppState>) -> Result<RuntimeSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.runtime_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_scene_history(state: State<'_, AppState>) -> Result<SceneHistoryState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.scene_history_state().await.map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|error| error.to_string())?;
+    } else {
+        manager.disable().map_err(|error| error.to_string())?;
+    }
+    manager.is_enabled().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -583,9 +614,27 @@ async fn set_app_talk_interval_minutes(
         .map_err(to_message)
 }
 
+#[tauri::command]
+async fn set_runtime_settings(
+    state: State<'_, AppState>,
+    settings: RuntimeSettingsUpdate,
+) -> Result<RuntimeSettingsState, String> {
+    LocalYuukeiRuntime::set_runtime_settings_in(state.env.clone(), settings).map_err(to_message)
+}
+
+#[tauri::command]
+async fn reset_scene_history(state: State<'_, AppState>) -> Result<SceneHistoryState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.reset_scene_history().await.map_err(to_message)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .register_uri_scheme_protocol(PACK_ASSET_SCHEME, pack_asset_protocol_response)
         .setup(|app| {
             let env = local_runtime_environment(app.handle())
@@ -679,6 +728,10 @@ pub fn run() {
             get_world_pack_status,
             get_extension_settings,
             get_app_settings,
+            get_runtime_settings,
+            get_scene_history,
+            get_autostart_enabled,
+            set_autostart_enabled,
             get_observation_settings,
             get_onboarding_state,
             complete_onboarding,
@@ -715,7 +768,9 @@ pub fn run() {
             set_extension_setting_values,
             set_extension_secret,
             restart_extension_process,
-            set_app_talk_interval_minutes
+            set_app_talk_interval_minutes,
+            set_runtime_settings,
+            reset_scene_history
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");

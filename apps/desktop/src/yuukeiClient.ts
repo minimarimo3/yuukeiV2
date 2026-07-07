@@ -124,6 +124,33 @@ export type AppSettingsState = {
   settingsPath: string;
 };
 
+export type RuntimeSettingsState = {
+  llmTimeoutMs: number;
+  recentContextCount: number;
+  talkDesireLow: number;
+  talkDesireHigh: number;
+  settingsPath: string;
+};
+
+export type RuntimeSettingsUpdate = {
+  llmTimeoutMs: number;
+  recentContextCount: number;
+  talkDesireLow: number;
+  talkDesireHigh: number;
+};
+
+export type SceneHistoryEntry = {
+  eventName: string;
+  sceneName: string;
+  lastExecutedAt: string;
+};
+
+export type SceneHistoryState = {
+  installId: string;
+  historyPath: string;
+  entries: SceneHistoryEntry[];
+};
+
 export type ObservationSettingsState = {
   windows: boolean;
   folders: boolean;
@@ -338,6 +365,10 @@ export type YuukeiClient = {
   getWorldPackStatus(): Promise<WorldPackSelectionState>;
   getExtensionSettings(): Promise<ExtensionSettingsState>;
   getAppSettings(): Promise<AppSettingsState>;
+  getRuntimeSettings(): Promise<RuntimeSettingsState>;
+  getSceneHistory(): Promise<SceneHistoryState>;
+  getAutostartEnabled(): Promise<boolean>;
+  setAutostartEnabled(enabled: boolean): Promise<boolean>;
   getObservationSettings(): Promise<ObservationSettingsState>;
   getOnboardingState(): Promise<OnboardingState>;
   completeOnboarding(): Promise<OnboardingState>;
@@ -416,6 +447,10 @@ export type YuukeiClient = {
   ): Promise<ExtensionSettingsChangeResult>;
   restartExtensionProcess(extensionId: string): Promise<ExtensionSettingsState>;
   setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
+  setRuntimeSettings(
+    settings: RuntimeSettingsUpdate
+  ): Promise<RuntimeSettingsState>;
+  resetSceneHistory(): Promise<SceneHistoryState>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
   onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
   onWorldPackStatus(
@@ -436,6 +471,11 @@ export const tauriYuukeiClient: YuukeiClient = {
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
   getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
+  getRuntimeSettings: () => invoke<RuntimeSettingsState>("get_runtime_settings"),
+  getSceneHistory: () => invoke<SceneHistoryState>("get_scene_history"),
+  getAutostartEnabled: () => invoke<boolean>("get_autostart_enabled"),
+  setAutostartEnabled: (enabled: boolean) =>
+    invoke<boolean>("set_autostart_enabled", { enabled }),
   getObservationSettings: () =>
     invoke<ObservationSettingsState>("get_observation_settings"),
   getOnboardingState: () => invoke<OnboardingState>("get_onboarding_state"),
@@ -569,6 +609,9 @@ export const tauriYuukeiClient: YuukeiClient = {
     }),
   setAppTalkIntervalMinutes: (minutes: number) =>
     invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),
+  setRuntimeSettings: (settings: RuntimeSettingsUpdate) =>
+    invoke<RuntimeSettingsState>("set_runtime_settings", { settings }),
+  resetSceneHistory: () => invoke<SceneHistoryState>("reset_scene_history"),
   onCommand: async (callback) => {
     const unlisten = await listen<RuntimeCommand>("yuukei-command", (event) => {
       callback(event.payload);

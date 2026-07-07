@@ -1,12 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{
@@ -86,7 +87,8 @@ pub enum ResidentHomeError {
 pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
-const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_LLM_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_RECENT_CONTEXT_COUNT: usize = 20;
 const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
 const SPEECH_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MOOD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -96,8 +98,9 @@ const MEMORY_RETRIEVE_EPISODE_LIMIT: usize = 5;
 const MAX_QUEUED_CONVERSATION_EVENTS_DURING_INTERPRET: usize = 16;
 const UNKNOWN_INTERPRETATION: &str = "不明";
 const DEFAULT_MOOD_INTERVAL_MINUTES: u64 = 10;
-const LOW_TALK_DESIRE_THRESHOLD: u8 = 30;
-const HIGH_TALK_DESIRE_THRESHOLD: u8 = 80;
+const DEFAULT_LOW_TALK_DESIRE_THRESHOLD: u8 = 30;
+const DEFAULT_HIGH_TALK_DESIRE_THRESHOLD: u8 = 80;
+const MOOD_STATE_MAX_AGE: chrono::Duration = chrono::Duration::minutes(60);
 const MOOD_CHANGED_EVENT: &str = "ext.yuukei-intelligence.mood.changed";
 const TALK_IMPULSE_EVENT: &str = "presence.talk_impulse";
 
@@ -123,8 +126,30 @@ pub struct ResidentHome {
     daihon: Arc<dyn DaihonAdapter>,
     capabilities: Arc<Mutex<CapabilityRouter>>,
     extensions: Arc<Mutex<ExtensionRegistry>>,
+    runtime_settings: ResidentRuntimeSettings,
     state: Arc<Mutex<HomeState>>,
     command_tx: broadcast::Sender<RuntimeCommand>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResidentRuntimeSettings {
+    pub llm_timeout: Duration,
+    pub recent_context_count: usize,
+    pub talk_desire_low: u8,
+    pub talk_desire_high: u8,
+    pub mood_state_path: Option<PathBuf>,
+}
+
+impl Default for ResidentRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            llm_timeout: DEFAULT_LLM_TIMEOUT,
+            recent_context_count: DEFAULT_RECENT_CONTEXT_COUNT,
+            talk_desire_low: DEFAULT_LOW_TALK_DESIRE_THRESHOLD,
+            talk_desire_high: DEFAULT_HIGH_TALK_DESIRE_THRESHOLD,
+            mood_state_path: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -165,13 +190,15 @@ struct PendingChoice {
     sender: oneshot::Sender<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MoodState {
     last_evaluated_at: Option<DateTime<Utc>>,
     current: Option<MoodSnapshot>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MoodSnapshot {
     mood: String,
     talk_desire: u8,
@@ -223,6 +250,26 @@ impl ResidentHome {
         .await
     }
 
+    pub async fn with_parts_and_runtime_settings(
+        resident_id: impl Into<String>,
+        world_pack: WorldPack,
+        event_log: EventLog,
+        daihon: Arc<dyn DaihonAdapter>,
+        capabilities: CapabilityRouter,
+        runtime_settings: ResidentRuntimeSettings,
+    ) -> Result<Self> {
+        Self::with_parts_and_extensions_and_runtime_settings(
+            resident_id,
+            world_pack,
+            event_log,
+            daihon,
+            capabilities,
+            ExtensionRegistry::new(),
+            runtime_settings,
+        )
+        .await
+    }
+
     pub async fn with_parts_and_extensions(
         resident_id: impl Into<String>,
         world_pack: WorldPack,
@@ -230,6 +277,27 @@ impl ResidentHome {
         daihon: Arc<dyn DaihonAdapter>,
         capabilities: CapabilityRouter,
         extensions: ExtensionRegistry,
+    ) -> Result<Self> {
+        Self::with_parts_and_extensions_and_runtime_settings(
+            resident_id,
+            world_pack,
+            event_log,
+            daihon,
+            capabilities,
+            extensions,
+            ResidentRuntimeSettings::default(),
+        )
+        .await
+    }
+
+    pub async fn with_parts_and_extensions_and_runtime_settings(
+        resident_id: impl Into<String>,
+        world_pack: WorldPack,
+        event_log: EventLog,
+        daihon: Arc<dyn DaihonAdapter>,
+        capabilities: CapabilityRouter,
+        extensions: ExtensionRegistry,
+        runtime_settings: ResidentRuntimeSettings,
     ) -> Result<Self> {
         world_pack.validate()?;
         daihon
@@ -266,6 +334,7 @@ impl ResidentHome {
                 )
             })
             .collect();
+        let mood = load_mood_state(runtime_settings.mood_state_path.as_ref());
         let (command_tx, _) = broadcast::channel(128);
         Ok(Self {
             event_log,
@@ -273,6 +342,7 @@ impl ResidentHome {
             daihon,
             capabilities: Arc::new(Mutex::new(capabilities)),
             extensions: Arc::new(Mutex::new(extensions)),
+            runtime_settings,
             state: Arc::new(Mutex::new(HomeState {
                 resident_id,
                 active_surface_id: None,
@@ -282,7 +352,7 @@ impl ResidentHome {
                 daihon_diagnostics: Vec::new(),
                 llm_delegation: LlmDelegationCounters::default(),
                 interpretation: InterpretationState::default(),
-                mood: MoodState::default(),
+                mood,
             })),
             command_tx,
         })
@@ -1292,13 +1362,19 @@ impl ResidentHome {
             talk_desire: output.talk_desire.min(100),
             topic: output.topic.trim().to_string(),
         };
-        {
+        let mood_to_save = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.mood.current = Some(snapshot.clone());
             state.mood.last_evaluated_at = Some(now);
-        }
+            state.mood.clone()
+        };
+        save_mood_state(
+            self.runtime_settings.mood_state_path.as_ref(),
+            &mood_to_save,
+        );
         if !self.extension_can_emit_mood_changed(&result.extension_id)? {
             return Ok(None);
         }
@@ -1426,14 +1502,20 @@ impl ResidentHome {
         record: &EventLogRecord,
     ) -> Result<Option<RuntimeEvent>> {
         let snapshot = mood_snapshot_from_payload(&event.payload);
-        {
+        let mood_to_save = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| ResidentHomeError::PoisonedLock)?;
             state.mood.current = Some(snapshot.clone());
-        }
-        if snapshot.talk_desire < HIGH_TALK_DESIRE_THRESHOLD {
+            state.mood.last_evaluated_at = event_record_timestamp(&record.timestamp);
+            state.mood.clone()
+        };
+        save_mood_state(
+            self.runtime_settings.mood_state_path.as_ref(),
+            &mood_to_save,
+        );
+        if snapshot.talk_desire < self.runtime_settings.talk_desire_high {
             return Ok(None);
         }
         let mut talk = RuntimeEvent::new(
@@ -1476,7 +1558,7 @@ impl ResidentHome {
         event
             .payload
             .insert("talkDesire".to_string(), json!(mood.talk_desire));
-        if mood.talk_desire < LOW_TALK_DESIRE_THRESHOLD {
+        if mood.talk_desire < self.runtime_settings.talk_desire_low {
             return Ok(TalkImpulseModeration::Skip {
                 source_event: event,
             });
@@ -1598,7 +1680,7 @@ impl ResidentHome {
             .invoke_capability_with_timeout(
                 router,
                 invocation.clone(),
-                DIALOGUE_INTERPRET_TIMEOUT,
+                self.runtime_settings.llm_timeout,
                 event,
             )
             .await?
@@ -1728,6 +1810,10 @@ impl ResidentHome {
         &self,
         resident_id: &str,
     ) -> Result<Vec<DialogueGenerateRecentContext>> {
+        let limit = self.runtime_settings.recent_context_count;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut records = self
             .event_log
             .read(EventLogQuery {
@@ -1738,8 +1824,8 @@ impl ResidentHome {
                 extension_readable_only: false,
             })?
             .records;
-        if records.len() > 20 {
-            records = records.split_off(records.len() - 20);
+        if records.len() > limit {
+            records = records.split_off(records.len() - limit);
         }
         Ok(records
             .into_iter()
@@ -2244,7 +2330,7 @@ impl ResidentHome {
                 .invoke_capability_with_timeout(
                     router.clone(),
                     invocation.clone(),
-                    DIALOGUE_INTERPRET_TIMEOUT,
+                    self.runtime_settings.llm_timeout,
                     trigger_event,
                 )
                 .await?
@@ -2434,7 +2520,7 @@ impl ResidentHome {
             .invoke_capability_with_timeout(
                 router,
                 invocation.clone(),
-                DIALOGUE_INTERPRET_TIMEOUT,
+                self.runtime_settings.llm_timeout,
                 source_event,
             )
             .await?
@@ -2515,7 +2601,7 @@ impl ResidentHome {
             .invoke_capability_with_timeout(
                 router,
                 invocation.clone(),
-                DIALOGUE_INTERPRET_TIMEOUT,
+                self.runtime_settings.llm_timeout,
                 source_event,
             )
             .await?
@@ -2592,7 +2678,7 @@ impl ResidentHome {
             .invoke_capability_with_timeout(
                 router,
                 invocation.clone(),
-                DIALOGUE_INTERPRET_TIMEOUT,
+                self.runtime_settings.llm_timeout,
                 source_event,
             )
             .await?
@@ -3149,6 +3235,37 @@ fn mood_interval_minutes(router: &CapabilityRouter) -> Option<u64> {
         .runtime_settings_for(MOOD_EVALUATE_CAPABILITY)?
         .get("mood.intervalMinutes")
         .and_then(Value::as_u64)
+}
+
+fn load_mood_state(path: Option<&PathBuf>) -> MoodState {
+    let Some(path) = path else {
+        return MoodState::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return MoodState::default();
+    };
+    let Ok(state) = serde_json::from_str::<MoodState>(&raw) else {
+        return MoodState::default();
+    };
+    let Some(last) = state.last_evaluated_at else {
+        return MoodState::default();
+    };
+    if Utc::now().signed_duration_since(last) > MOOD_STATE_MAX_AGE {
+        return MoodState::default();
+    }
+    state
+}
+
+fn save_mood_state(path: Option<&PathBuf>, state: &MoodState) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(state) {
+        let _ = std::fs::write(path, bytes);
+    }
 }
 
 fn normalize_mood_word(value: &str) -> &str {
@@ -4802,6 +4919,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dialogue_generate_uses_configured_recent_context_count() -> Result<()> {
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("文脈つきです。")),
+        ]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts_and_runtime_settings(
+            "resident-default",
+            llm_fallback_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+            ResidentRuntimeSettings {
+                llm_timeout: std::time::Duration::from_secs(30),
+                recent_context_count: 2,
+                talk_desire_low: 30,
+                talk_desire_high: 80,
+                mood_state_path: None,
+            },
+        )
+        .await?;
+
+        for index in 0..3 {
+            let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+            event.id = format!("evt_context_{index}");
+            event.payload.insert("text".to_string(), json!(index));
+            home.event_log().append(event.into())?;
+        }
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_generate_recent_context".to_string();
+        event.payload.insert("text".to_string(), json!("ねえ"));
+        home.ingest_event(event).await?;
+
+        let calls = calls.lock().expect("calls lock");
+        let recent_context = calls[0].input["recentContext"]
+            .as_array()
+            .expect("recent context array");
+        assert_eq!(recent_context.len(), 2);
+        assert_eq!(recent_context[0]["payload"]["text"], json!(2));
+        assert_eq!(recent_context[1]["payload"]["text"], json!("ねえ"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dialogue_generate_input_includes_retrieved_memories() -> Result<()> {
         let memory = MemoryProvider::new(JsonMap::from([(
             "memories".to_string(),
@@ -5267,6 +5430,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_high_talk_desire_threshold_suppresses_mood_interrupt() -> Result<()> {
+        let home = ResidentHome::with_parts_and_runtime_settings(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            CapabilityRouter::new(),
+            ResidentRuntimeSettings {
+                talk_desire_high: 95,
+                ..ResidentRuntimeSettings::default()
+            },
+        )
+        .await?;
+        let mut mood_event = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
+        mood_event.payload = JsonMap::from([
+            ("mood".to_string(), json!("さみしい")),
+            ("talkDesire".to_string(), json!(92)),
+            ("topic".to_string(), json!("静かな画面")),
+        ]);
+        assert!(home.ingest_event(mood_event).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mood_state_persists_restores_and_expires_after_one_hour() -> Result<()> {
+        let dir = tempdir().expect("tempdir");
+        let mood_path = dir.path().join("mood.json");
+        let runtime_settings = ResidentRuntimeSettings {
+            mood_state_path: Some(mood_path.clone()),
+            ..ResidentRuntimeSettings::default()
+        };
+        let home = ResidentHome::with_parts_and_runtime_settings(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            CapabilityRouter::new(),
+            runtime_settings.clone(),
+        )
+        .await?;
+        let mut mood_event = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
+        mood_event.payload = JsonMap::from([
+            ("mood".to_string(), json!("さみしい")),
+            ("talkDesire".to_string(), json!(50)),
+            ("topic".to_string(), json!("静かな画面")),
+        ]);
+        home.ingest_event(mood_event).await?;
+        assert!(mood_path.exists());
+
+        let restored = ResidentHome::with_parts_and_runtime_settings(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            CapabilityRouter::new(),
+            runtime_settings.clone(),
+        )
+        .await?;
+        let restored_commands = restored
+            .ingest_event(RuntimeEvent::new(
+                TALK_IMPULSE_EVENT,
+                "device",
+                "resident-default",
+            ))
+            .await?;
+        assert_eq!(restored_commands[0].payload["text"], "少し静かですね。");
+
+        let stale_state = MoodState {
+            last_evaluated_at: Some(Utc::now() - chrono::Duration::minutes(61)),
+            current: Some(MoodSnapshot {
+                mood: "さみしい".to_string(),
+                talk_desire: 50,
+                topic: "古い画面".to_string(),
+            }),
+        };
+        std::fs::write(
+            &mood_path,
+            serde_json::to_vec_pretty(&stale_state).expect("stale mood json"),
+        )
+        .expect("write stale mood state");
+        let expired = ResidentHome::with_parts_and_runtime_settings(
+            "resident-default",
+            random_talk_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            CapabilityRouter::new(),
+            runtime_settings,
+        )
+        .await?;
+        let expired_commands = expired
+            .ingest_event(RuntimeEvent::new(
+                TALK_IMPULSE_EVENT,
+                "device",
+                "resident-default",
+            ))
+            .await?;
+        assert_eq!(expired_commands[0].payload["text"], "ふつうに話します。");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn life_tick_evaluates_mood_and_records_changed_event() -> Result<()> {
         let mut router = CapabilityRouter::new();
         let mood = MoodProvider::new(JsonMap::from([
@@ -5361,13 +5625,17 @@ mod tests {
         home.register_extension(yuukei_intelligence_events_extension())
             .await?;
 
-        let mut previous = RuntimeEvent::new(MOOD_CHANGED_EVENT, "extension", "resident-default");
-        previous.payload = JsonMap::from([
-            ("mood".to_string(), json!("さみしい")),
-            ("talkDesire".to_string(), json!(10)),
-            ("topic".to_string(), json!("静かな画面")),
-        ]);
-        home.ingest_event(previous).await?;
+        {
+            let mut state = home
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.mood.current = Some(MoodSnapshot {
+                mood: "さみしい".to_string(),
+                talk_desire: 10,
+                topic: "静かな画面".to_string(),
+            });
+        }
         home.ingest_event(RuntimeEvent::new(
             "presence.life_tick",
             "device",
@@ -5390,7 +5658,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.kind == MOOD_CHANGED_EVENT)
                 .count(),
-            1
+            0
         );
         assert!(records
             .iter()
