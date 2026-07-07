@@ -12,12 +12,12 @@ use serde_json::{Map, Number, Value};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use yuukei_daihon::{
-    has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
-    DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
+    has_errors, parse_script, validate_script, ActionHandler, ChoiceRequest, DaihonDiagnostic,
+    DaihonNumber, DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
     GenerateRequest, GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest,
     Interpreter, ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script,
     Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
-    EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
+    CHOICE_FUNCTION_NAME, EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -328,6 +328,12 @@ pub struct DaihonInterpretRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonChoiceRequest {
+    pub choices: Vec<String>,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaihonExtractRequest {
     pub input_text: String,
     pub instruction: String,
@@ -349,6 +355,14 @@ pub struct DaihonGenerateResponse {
 #[async_trait]
 pub trait DaihonInterpretHandler: Send {
     async fn interpret(&mut self, request: DaihonInterpretRequest) -> String;
+
+    async fn flush_commands_before_choice(&mut self, _commands: Vec<RuntimeCommand>) -> bool {
+        false
+    }
+
+    async fn choose(&mut self, _request: DaihonChoiceRequest) -> String {
+        yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+    }
 
     async fn extract(&mut self, _request: DaihonExtractRequest) -> String {
         yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
@@ -999,9 +1013,16 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             .iter()
             .filter(|loaded| script_accepts_event(&loaded.script, &event.kind))
         {
-            let mut action_handler =
-                YuukeiActionHandler::new(event, world.default_actor_id.clone());
-            let mut interpret_bridge = YuukeiInterpretBridge { interpret_handler };
+            let command_buffer = Arc::new(Mutex::new(Vec::new()));
+            let mut action_handler = YuukeiActionHandler::new(
+                event,
+                world.default_actor_id.clone(),
+                command_buffer.clone(),
+            );
+            let mut interpret_bridge = YuukeiInterpretBridge {
+                interpret_handler,
+                command_buffer,
+            };
             let mut interpreter = Interpreter {
                 action_handler: &mut action_handler,
                 interpret_handler: &mut interpret_bridge,
@@ -1016,6 +1037,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                 },
                 interpretation_count: 0,
                 generation_count: 0,
+                choice_count: 0,
                 diagnostics: Vec::new(),
             };
             let run = interpreter
@@ -1044,7 +1066,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     scene_name: scene.name,
                 });
             }
-            commands.extend(action_handler.commands);
+            commands.extend(action_handler.drain_commands().await);
         }
 
         let next_variables = variables.into_values();
@@ -1066,11 +1088,12 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
 struct YuukeiActionHandler {
     event: RuntimeEvent,
     default_actor_id: String,
-    commands: Vec<RuntimeCommand>,
+    commands: Arc<Mutex<Vec<RuntimeCommand>>>,
 }
 
 struct YuukeiInterpretBridge<'a> {
     interpret_handler: &'a mut dyn DaihonInterpretHandler,
+    command_buffer: Arc<Mutex<Vec<RuntimeCommand>>>,
 }
 
 #[async_trait]
@@ -1119,15 +1142,46 @@ impl InterpretHandler for YuukeiInterpretBridge<'_> {
             })
             .await)
     }
+
+    async fn choose(
+        &mut self,
+        request: ChoiceRequest,
+    ) -> std::result::Result<String, DaihonRuntimeError> {
+        let pending_commands: Vec<RuntimeCommand> =
+            self.command_buffer.lock().await.drain(..).collect();
+        if !pending_commands.is_empty()
+            && !self
+                .interpret_handler
+                .flush_commands_before_choice(pending_commands.clone())
+                .await
+        {
+            self.command_buffer.lock().await.extend(pending_commands);
+        }
+        Ok(self
+            .interpret_handler
+            .choose(DaihonChoiceRequest {
+                choices: request.choices,
+                timeout_seconds: request.timeout_seconds,
+            })
+            .await)
+    }
 }
 
 impl YuukeiActionHandler {
-    fn new(event: &RuntimeEvent, default_actor_id: String) -> Self {
+    fn new(
+        event: &RuntimeEvent,
+        default_actor_id: String,
+        commands: Arc<Mutex<Vec<RuntimeCommand>>>,
+    ) -> Self {
         Self {
             event: event.clone(),
             default_actor_id,
-            commands: Vec::new(),
+            commands,
         }
+    }
+
+    async fn drain_commands(&self) -> Vec<RuntimeCommand> {
+        self.commands.lock().await.drain(..).collect()
     }
 
     fn command(&self, kind: &str, speaker_id: Option<&str>) -> RuntimeCommand {
@@ -1165,7 +1219,7 @@ impl ActionHandler for YuukeiActionHandler {
             ("speakerId".to_string(), Value::String(actor_id)),
             ("emotion".to_string(), Value::String("neutral".to_string())),
         ]);
-        self.commands.push(command);
+        self.commands.lock().await.push(command);
         Ok(())
     }
 
@@ -1195,7 +1249,7 @@ impl ActionHandler for YuukeiActionHandler {
                     Value::String(instruction.to_string()),
                 ),
             ]);
-            self.commands.push(command);
+            self.commands.lock().await.push(command);
         }
         if let Some(motion) = dialogue.motion.filter(|value| !value.trim().is_empty()) {
             let mut command = self.command("avatar.motion", speaker_id);
@@ -1216,7 +1270,7 @@ impl ActionHandler for YuukeiActionHandler {
                     Value::String(instruction.to_string()),
                 ),
             ]);
-            self.commands.push(command);
+            self.commands.lock().await.push(command);
         }
         let mut command = self.command("dialogue.say", speaker_id);
         command.source = "capability.dialogue.generate".to_string();
@@ -1237,7 +1291,7 @@ impl ActionHandler for YuukeiActionHandler {
                 Value::String(instruction.to_string()),
             ),
         ]);
-        self.commands.push(command);
+        self.commands.lock().await.push(command);
         Ok(())
     }
 
@@ -1263,7 +1317,7 @@ impl ActionHandler for YuukeiActionHandler {
                         Value::String(name.to_string()),
                     ),
                 ]);
-                self.commands.push(command);
+                self.commands.lock().await.push(command);
             }
             "動作" | "モーション" | "motion" => {
                 let mut command = self.command("avatar.motion", speaker_id);
@@ -1275,7 +1329,7 @@ impl ActionHandler for YuukeiActionHandler {
                         Value::String(name.to_string()),
                     ),
                 ]);
-                self.commands.push(command);
+                self.commands.lock().await.push(command);
             }
             _ => {}
         }
@@ -1559,6 +1613,25 @@ fn yuukei_function_registry() -> FunctionRegistry {
             },
         ],
         named: BTreeMap::new(),
+        return_type: Some(yuukei_daihon::ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: CHOICE_FUNCTION_NAME.to_string(),
+        positional: (0..6)
+            .map(|index| ParamSpec {
+                name: Some(format!("選択肢{}", index + 1)),
+                ty: ParamType::String,
+                required: index == 0,
+            })
+            .collect(),
+        named: BTreeMap::from([(
+            "秒数".to_string(),
+            ParamSpec {
+                name: Some("秒数".to_string()),
+                ty: ParamType::Number,
+                required: false,
+            },
+        )]),
         return_type: Some(yuukei_daihon::ValueType::String),
     });
     registry.register(FunctionSpec {
@@ -2422,6 +2495,62 @@ mod tests {
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].payload["text"], "おかえり");
         assert_eq!(result.executed_scenes[0].scene_name, "welcome back");
+        Ok(())
+    }
+
+    struct ChoiceHandler {
+        choice: String,
+        requests: Vec<DaihonChoiceRequest>,
+    }
+
+    #[async_trait]
+    impl DaihonInterpretHandler for ChoiceHandler {
+        async fn interpret(&mut self, _request: DaihonInterpretRequest) -> String {
+            yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+        }
+
+        async fn choose(&mut self, request: DaihonChoiceRequest) -> String {
+            self.requests.push(request);
+            self.choice.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_choice_scene_with_mock_handler() -> Result<()> {
+        let mut world = pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### invite
+合図: ＠conversation.text
+話者: yuukei
+返事=＜選択 「見る」 「あとで」＞
+※（返事 = 「見る」）なら:
+「見よう」
+※あるいは（返事 = 「不明」）なら:
+「わからない」
+※それ以外:
+「あとでね」
+おわり
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut handler = ChoiceHandler {
+            choice: "見る".to_string(),
+            requests: Vec::new(),
+        };
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice".to_string();
+
+        let result = adapter
+            .dispatch_with_interpret(&event, &world, &mut handler)
+            .await?;
+
+        assert_eq!(handler.requests.len(), 1);
+        assert_eq!(handler.requests[0].choices, vec!["見る", "あとで"]);
+        assert_eq!(handler.requests[0].timeout_seconds, 30);
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "見よう");
         Ok(())
     }
 

@@ -249,6 +249,11 @@ export type StageBubble = {
   bubbleId: string;
   actorId: string;
   text: string;
+  choice?: {
+    choiceId: string;
+    choices: string[];
+    timeoutSeconds: number;
+  };
   createdAtMs: number;
   durationMs: number;
 };
@@ -287,6 +292,11 @@ export type YuukeiClient = {
   dismissStageBubble(bubbleId: string): Promise<void>;
   openSettingsWindow(): Promise<void>;
   sendConversationText(text: string): Promise<RuntimeCommand[]>;
+  sendConversationChoice(
+    choiceId: string,
+    choice: string,
+    index: number
+  ): Promise<RuntimeCommand[]>;
   sendAvatarGesturePoke(
     gesture: AvatarGesturePokeInput
   ): Promise<RuntimeCommand[]>;
@@ -363,6 +373,12 @@ export const tauriYuukeiClient: YuukeiClient = {
   openSettingsWindow: () => invoke<void>("open_settings_window"),
   sendConversationText: (text: string) =>
     invoke<RuntimeCommand[]>("send_conversation_text", { text }),
+  sendConversationChoice: (choiceId: string, choice: string, index: number) =>
+    invoke<RuntimeCommand[]>("send_conversation_choice", {
+      choiceId,
+      choice,
+      index
+    }),
   sendAvatarGesturePoke: (gesture: AvatarGesturePokeInput) =>
     invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
   openWorldPackDirectory: async () => {

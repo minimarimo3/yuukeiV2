@@ -1318,6 +1318,72 @@ impl LocalYuukeiRuntime {
         }
     }
 
+    pub async fn send_conversation_choice(
+        &self,
+        surface_id: &str,
+        choice_id: &str,
+        choice: &str,
+        index: usize,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.mark_user_activity(Utc::now())?;
+        let event = build_conversation_choice_event(
+            self.resident_id(),
+            self.device_id(),
+            surface_id,
+            choice_id,
+            choice,
+            index,
+        );
+        self.logger.record(
+            "surface.input.conversation_choice",
+            "surface",
+            JsonMap::from([
+                ("eventId".to_string(), json!(event.id)),
+                ("surfaceId".to_string(), json!(surface_id)),
+                ("choiceId".to_string(), json!(choice_id)),
+                ("choice".to_string(), json!(choice)),
+                ("index".to_string(), json!(index)),
+            ]),
+        )?;
+
+        match self.home.ingest_event(event.clone()).await {
+            Ok(commands) => {
+                self.logger.record(
+                    "runtime.commands.emitted",
+                    "resident-home",
+                    JsonMap::from([
+                        ("sourceEventId".to_string(), json!(event.id)),
+                        (
+                            "commandIds".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.id)
+                                .collect::<Vec<_>>()),
+                        ),
+                        (
+                            "commandTypes".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.kind)
+                                .collect::<Vec<_>>()),
+                        ),
+                        ("count".to_string(), json!(commands.len())),
+                    ]),
+                )?;
+                Ok(commands)
+            }
+            Err(error) => {
+                self.record_runtime_daihon_diagnostics("conversation.choice", &error);
+                let _ = self.logger.record(
+                    "runtime.commands.error",
+                    "resident-home",
+                    error_payload("conversation.choice", &error),
+                );
+                Err(error.into())
+            }
+        }
+    }
+
     pub async fn send_avatar_gesture_poke(
         &self,
         surface_id: &str,
@@ -1861,6 +1927,32 @@ pub fn build_conversation_text_event(
         source: "surface".to_string(),
         resident_id: resident_id.to_string(),
         payload: JsonMap::from([("text".to_string(), Value::String(text.to_string()))]),
+        causality: None,
+        device_id: Some(device_id.to_string()),
+        surface_id: Some(surface_id.to_string()),
+        actor_id: None,
+    }
+}
+
+pub fn build_conversation_choice_event(
+    resident_id: &str,
+    device_id: &str,
+    surface_id: &str,
+    choice_id: &str,
+    choice: &str,
+    index: usize,
+) -> RuntimeEvent {
+    RuntimeEvent {
+        id: new_id("evt"),
+        kind: "conversation.choice".to_string(),
+        timestamp: now_timestamp(),
+        source: "surface".to_string(),
+        resident_id: resident_id.to_string(),
+        payload: JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("choice".to_string(), json!(choice)),
+            ("index".to_string(), json!(index)),
+        ]),
         causality: None,
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
@@ -2537,6 +2629,26 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-test"));
         assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[test]
+    fn conversation_choice_event_uses_surface_boundary_fields() {
+        let event = build_conversation_choice_event(
+            "resident-test",
+            "device-test",
+            "surface-test",
+            "choice-1",
+            "見る",
+            0,
+        );
+        assert_eq!(event.kind, "conversation.choice");
+        assert_eq!(event.source, "surface");
+        assert_eq!(event.resident_id, "resident-test");
+        assert_eq!(event.device_id.as_deref(), Some("device-test"));
+        assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
+        assert_eq!(event.payload["choiceId"], json!("choice-1"));
+        assert_eq!(event.payload["choice"], json!("見る"));
+        assert_eq!(event.payload["index"], json!(0));
     }
 
     #[test]

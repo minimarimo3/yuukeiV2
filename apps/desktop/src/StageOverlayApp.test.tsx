@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StageOverlayApp } from "./StageOverlayApp";
 import type { DesktopStageState, YuukeiClient } from "./yuukeiClient";
@@ -145,6 +146,33 @@ describe("StageOverlayApp", () => {
       expect(client.dismissStageBubble).toHaveBeenCalledWith("bubble-1");
     });
   });
+
+  it("renders choice buttons and sends the selected choice", async () => {
+    const client = clientFixture(
+      stageState({
+        choice: {
+          choiceId: "choice-1",
+          choices: ["見る", "あとで"],
+          timeoutSeconds: 30
+        }
+      })
+    );
+    const user = userEvent.setup();
+
+    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+
+    const choice = await screen.findByRole("button", { name: "見る" });
+    expect(screen.getByRole("button", { name: "あとで" })).toBeInTheDocument();
+
+    await user.click(choice);
+
+    expect(client.sendConversationChoice).toHaveBeenCalledWith(
+      "choice-1",
+      "見る",
+      0
+    );
+    expect(screen.queryByRole("button", { name: "見る" })).not.toBeInTheDocument();
+  });
 });
 
 function clientFixture(stage: DesktopStageState): YuukeiClient {
@@ -166,6 +194,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(),
     sendConversationText: vi.fn(),
+    sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(),
     openWorldPackDirectory: vi.fn(),
     openExtensionDirectory: vi.fn(),

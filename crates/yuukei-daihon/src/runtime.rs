@@ -20,9 +20,11 @@ use crate::variable::{builtin_time_value, VariableRef, VariableStore};
 pub const INTERPRET_FUNCTION_NAME: &str = "解釈";
 pub const EXTRACT_FUNCTION_NAME: &str = "抽出";
 pub const GENERATE_FUNCTION_NAME: &str = "生成";
+pub const CHOICE_FUNCTION_NAME: &str = "選択";
 pub const UNKNOWN_INTERPRETATION: &str = "不明";
 pub const DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH: usize = 4;
 pub const DEFAULT_MAX_GENERATIONS_PER_DISPATCH: usize = 4;
+pub const DEFAULT_MAX_CHOICES_PER_DISPATCH: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedDialogue {
@@ -76,6 +78,12 @@ pub struct GenerateRequest {
     pub speaker_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRequest {
+    pub choices: Vec<String>,
+    pub timeout_seconds: u64,
+}
+
 #[async_trait]
 pub trait InterpretHandler {
     async fn interpret(&mut self, request: InterpretRequest) -> Result<String, DaihonRuntimeError>;
@@ -89,6 +97,10 @@ pub trait InterpretHandler {
         _request: GenerateRequest,
     ) -> Result<Option<GeneratedDialogue>, DaihonRuntimeError> {
         Ok(None)
+    }
+
+    async fn choose(&mut self, _request: ChoiceRequest) -> Result<String, DaihonRuntimeError> {
+        Ok(UNKNOWN_INTERPRETATION.to_string())
     }
 }
 
@@ -157,6 +169,7 @@ pub struct RunOptions {
     pub max_jumps: usize,
     pub max_interpretations_per_dispatch: usize,
     pub max_generations_per_dispatch: usize,
+    pub max_choices_per_dispatch: usize,
     pub now: Option<DateTime<FixedOffset>>,
     pub validation_mode: ValidationMode,
 }
@@ -170,6 +183,7 @@ impl Default for RunOptions {
             max_jumps: 1000,
             max_interpretations_per_dispatch: DEFAULT_MAX_INTERPRETATIONS_PER_DISPATCH,
             max_generations_per_dispatch: DEFAULT_MAX_GENERATIONS_PER_DISPATCH,
+            max_choices_per_dispatch: DEFAULT_MAX_CHOICES_PER_DISPATCH,
             now: None,
             validation_mode: ValidationMode::Strict,
         }
@@ -209,6 +223,7 @@ pub struct Interpreter<'a, A, V, H, I> {
     pub options: RunOptions,
     pub interpretation_count: usize,
     pub generation_count: usize,
+    pub choice_count: usize,
     pub diagnostics: Vec<DaihonDiagnostic>,
 }
 
@@ -225,6 +240,7 @@ where
     ) -> Result<DaihonRunResult, DaihonRuntimeError> {
         self.interpretation_count = 0;
         self.generation_count = 0;
+        self.choice_count = 0;
         self.diagnostics.clear();
         let mut registry = self.function_registry.clone();
         registry.set_mode(self.options.validation_mode);
@@ -850,6 +866,9 @@ where
                 .call_generate(function, speaker, positional, named)
                 .await;
         }
+        if function.name.value == CHOICE_FUNCTION_NAME {
+            return self.call_choice(function, positional, named).await;
+        }
         self.action_handler
             .call_function(speaker, &function.name.value, positional, named)
             .await
@@ -889,6 +908,51 @@ where
             choices: choices.clone(),
         };
         let Ok(choice) = self.interpret_handler.interpret(request).await else {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        };
+        let choice = choice.trim();
+        if choice == UNKNOWN_INTERPRETATION || choices.iter().any(|candidate| candidate == choice) {
+            Ok(DaihonValue::String(choice.to_string()))
+        } else {
+            Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()))
+        }
+    }
+
+    async fn call_choice(
+        &mut self,
+        function: &FunctionCall,
+        positional: Vec<DaihonValue>,
+        named: BTreeMap<String, DaihonValue>,
+    ) -> Result<DaihonValue, DaihonRuntimeError> {
+        if positional.is_empty() || named.keys().any(|key| key != "秒数") {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        if self.choice_count >= self.options.max_choices_per_dispatch {
+            self.diagnostics.push(DaihonDiagnostic::warning(
+                "W-DHN-RUN-056",
+                "`選択` の呼び出し回数が上限を超えました。",
+                function.span,
+            ));
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        self.choice_count += 1;
+
+        let choices = positional
+            .iter()
+            .flat_map(|value| parse_interpret_choices(&value.to_display_string()))
+            .collect::<Vec<_>>();
+        if !(2..=6).contains(&choices.len()) {
+            return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
+        }
+        let timeout_seconds = named
+            .get("秒数")
+            .and_then(choice_timeout_seconds)
+            .unwrap_or(30);
+        let request = ChoiceRequest {
+            choices: choices.clone(),
+            timeout_seconds,
+        };
+        let Ok(choice) = self.interpret_handler.choose(request).await else {
             return Ok(DaihonValue::String(UNKNOWN_INTERPRETATION.to_string()));
         };
         let choice = choice.trim();
@@ -1012,6 +1076,17 @@ pub fn parse_interpret_choices(text: &str) -> Vec<String> {
         .filter(|choice| !choice.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn choice_timeout_seconds(value: &DaihonValue) -> Option<u64> {
+    let DaihonValue::Number(number) = value else {
+        return None;
+    };
+    let seconds = number.as_f64();
+    if !seconds.is_finite() {
+        return Some(30);
+    }
+    Some(seconds.floor().clamp(5.0, 600.0) as u64)
 }
 
 pub fn normalize_extract_value(text: &str) -> &str {

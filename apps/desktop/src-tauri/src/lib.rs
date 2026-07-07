@@ -281,6 +281,30 @@ async fn send_conversation_text(
 }
 
 #[tauri::command]
+async fn send_conversation_choice(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    choice_id: String,
+    choice: String,
+    index: usize,
+) -> Result<Vec<RuntimeCommand>, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let commands = match runtime
+        .send_conversation_choice(TAURI_SURFACE_ID, &choice_id, &choice, index)
+        .await
+    {
+        Ok(commands) => commands,
+        Err(error) => {
+            emit_world_pack_status(&app, &runtime.world_pack_status())?;
+            return Err(to_message(error));
+        }
+    };
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
 async fn send_avatar_gesture_poke(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -490,6 +514,7 @@ pub fn run() {
             dismiss_stage_bubble,
             open_settings_window,
             send_conversation_text,
+            send_conversation_choice,
             send_avatar_gesture_poke,
             select_world_pack_directory,
             reset_world_pack_to_default,

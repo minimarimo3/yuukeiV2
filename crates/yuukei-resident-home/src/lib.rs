@@ -9,7 +9,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
-use tokio::{sync::broadcast, time::timeout};
+use tokio::{
+    sync::{broadcast, oneshot},
+    time::timeout,
+};
 use yuukei_capability::{
     CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
     StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
@@ -35,9 +38,9 @@ use yuukei_protocol::{
     RuntimeCommand, RuntimeEvent, SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
-    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonExtractRequest,
-    DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler, DaihonInterpretRequest,
-    WorldError, WorldPack, YuukeiDaihonAdapter,
+    DaihonAdapter, DaihonChoiceRequest, DaihonDiagnosticEntry, DaihonDiagnosticReport,
+    DaihonExtractRequest, DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler,
+    DaihonInterpretRequest, WorldError, WorldPack, YuukeiDaihonAdapter,
 };
 
 #[derive(Debug, Error)]
@@ -103,7 +106,7 @@ pub struct ResidentHome {
     command_tx: broadcast::Sender<RuntimeCommand>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct HomeState {
     resident_id: String,
     active_surface_id: Option<String>,
@@ -128,10 +131,17 @@ struct DailyBudgetCounter {
     used: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct InterpretationState {
     in_flight: bool,
     queued_events: VecDeque<(RuntimeEvent, EventLogRecord)>,
+    pending_choice: Option<PendingChoice>,
+}
+
+#[derive(Debug)]
+struct PendingChoice {
+    choice_id: String,
+    sender: oneshot::Sender<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -512,6 +522,9 @@ impl ResidentHome {
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
         self.set_cursor(appended_event.sequence)?;
+        if self.resolve_pending_choice_event(&event)? {
+            return Ok(Vec::new());
+        }
         if self.defer_event_while_interpreting(event.clone(), appended_event.clone())? {
             return Ok(Vec::new());
         }
@@ -520,6 +533,42 @@ impl ResidentHome {
             .await?;
         emitted.extend(self.drain_interpretation_queue().await?);
         Ok(emitted)
+    }
+
+    fn resolve_pending_choice_event(&self, event: &RuntimeEvent) -> Result<bool> {
+        if event.kind != "conversation.choice" {
+            return Ok(false);
+        }
+        let Some(choice_id) = event.payload.get("choiceId").and_then(Value::as_str) else {
+            return Ok(true);
+        };
+        let Some(choice) = event.payload.get("choice").and_then(Value::as_str) else {
+            return Ok(true);
+        };
+        let sender = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            let matches_pending = state
+                .interpretation
+                .pending_choice
+                .as_ref()
+                .is_some_and(|pending| pending.choice_id == choice_id);
+            if matches_pending {
+                state
+                    .interpretation
+                    .pending_choice
+                    .take()
+                    .map(|pending| pending.sender)
+            } else {
+                None
+            }
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(choice.to_string());
+        }
+        Ok(true)
     }
 
     pub async fn list_memories(
@@ -2133,6 +2182,123 @@ impl ResidentHome {
         }
     }
 
+    async fn choose_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonChoiceRequest,
+    ) -> Result<String> {
+        let result = self
+            .invoke_choice_for_daihon(source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string());
+        self.set_interpretation_in_flight(false)?;
+        Ok(result)
+    }
+
+    async fn invoke_choice_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonChoiceRequest,
+    ) -> Result<String> {
+        let choice_id = new_id("choice");
+        let timeout_seconds = request.timeout_seconds;
+        let mut command = RuntimeCommand::new(
+            "dialogue.choices",
+            "daihon",
+            source_event.resident_id.clone(),
+        );
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event.id.clone()),
+            source_command_id: None,
+            trace_id: source_event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        command.target = Some(CommandTarget {
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+        });
+        command.payload = JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("choices".to_string(), json!(request.choices)),
+            ("timeoutSeconds".to_string(), json!(timeout_seconds)),
+        ]);
+        self.emit_command_for_event(command, source_event).await?;
+
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.interpretation.pending_choice = Some(PendingChoice {
+                choice_id: choice_id.clone(),
+                sender,
+            });
+        }
+        self.set_interpretation_in_flight(true)?;
+
+        match timeout(Duration::from_secs(timeout_seconds), receiver).await {
+            Ok(Ok(choice)) => Ok(choice),
+            Ok(Err(_)) | Err(_) => {
+                self.clear_pending_choice(&choice_id)?;
+                self.emit_choice_clear(source_event, &choice_id, "timeout")
+                    .await?;
+                Ok(UNKNOWN_INTERPRETATION.to_string())
+            }
+        }
+    }
+
+    fn clear_pending_choice(&self, choice_id: &str) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        if state
+            .interpretation
+            .pending_choice
+            .as_ref()
+            .is_some_and(|pending| pending.choice_id == choice_id)
+        {
+            state.interpretation.pending_choice = None;
+        }
+        Ok(())
+    }
+
+    async fn emit_choice_clear(
+        &self,
+        source_event: &RuntimeEvent,
+        choice_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let mut command = RuntimeCommand::new(
+            "dialogue.choices.clear",
+            "daihon",
+            source_event.resident_id.clone(),
+        );
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event.id.clone()),
+            source_command_id: None,
+            trace_id: source_event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        command.target = Some(CommandTarget {
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+        });
+        command.payload = JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("reason".to_string(), json!(reason)),
+        ]);
+        self.emit_command_for_event(command, source_event).await?;
+        Ok(())
+    }
+
     fn set_interpretation_in_flight(&self, in_flight: bool) -> Result<()> {
         let mut state = self
             .state
@@ -2313,6 +2479,20 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
             .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
 
+    async fn flush_commands_before_choice(&mut self, commands: Vec<RuntimeCommand>) -> bool {
+        for command in commands {
+            if self
+                .home
+                .emit_command_for_event(command, &self.source_event)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn generate(&mut self, request: DaihonGenerateRequest) -> Option<DaihonGenerateResponse> {
         self.home
             .generate_dialogue_for_daihon(&self.source_event, request)
@@ -2323,6 +2503,13 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
     async fn extract(&mut self, request: DaihonExtractRequest) -> String {
         self.home
             .extract_dialogue(&self.source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
+    }
+
+    async fn choose(&mut self, request: DaihonChoiceRequest) -> String {
+        self.home
+            .choose_for_daihon(&self.source_event, request)
             .await
             .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
@@ -3173,6 +3360,69 @@ mod tests {
         .to_string();
         world.signals.allow.push("device.wake".to_string());
         world
+    }
+
+    fn choice_world(timeout_seconds: u64) -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = format!(
+            r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「見る？」
+返事=＜選択 「見る」 「あとで」 秒数={timeout_seconds}＞
+※（返事 = 「見る」）なら:
+「見る枝」
+※あるいは（返事 = 「不明」）なら:
+「不明枝」
+※それ以外:
+「あとで枝」
+おわり
+"#
+        );
+        world
+    }
+
+    fn choice_queue_world() -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### choice
+合図: ＠conversation.text
+条件:（入力#ユーザー発言 = 「start」）
+話者: yuukei
+返事=＜選択 「見る」 「あとで」 秒数=30＞
+※（返事 = 「見る」）なら:
+「見る枝」
+※あるいは（返事 = 「不明」）なら:
+「不明枝」
+※それ以外:
+「あとで枝」
+おわり
+### queued
+合図: ＠conversation.text
+条件:（入力#ユーザー発言 = 「queued」）
+話者: yuukei
+「queued handled」
+"#
+        .to_string();
+        world
+    }
+
+    async fn next_command_of_kind(
+        receiver: &mut broadcast::Receiver<RuntimeCommand>,
+        kind: &str,
+    ) -> RuntimeCommand {
+        loop {
+            let command = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+                .await
+                .expect("command broadcast timed out")
+                .expect("command broadcast closed");
+            if command.kind == kind {
+                return command;
+            }
+        }
     }
 
     fn generate_world(script: &str) -> WorldPack {
@@ -4383,6 +4633,178 @@ mod tests {
         assert!(records.contains(&"surface.attach".to_string()));
         assert!(records.contains(&"daihon.dispatch.result".to_string()));
         assert!(records.contains(&"dialogue.say".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn choice_event_resolves_pending_daihon_choice() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", choice_world(30), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_start".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(event).await });
+
+        let prompt_command = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(prompt_command.payload["text"], json!("見る？"));
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+        assert_eq!(
+            choices_command.payload["choices"],
+            json!(["見る", "あとで"])
+        );
+
+        let mut choice_event =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        choice_event
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        choice_event
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        choice_event.payload.insert("index".to_string(), json!(0));
+        assert!(home.ingest_event(choice_event).await?.is_empty());
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn choice_timeout_returns_unknown_and_clears_choices() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", choice_world(5), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_timeout".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let commands = home.ingest_event(event).await?;
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let clear_command = next_command_of_kind(&mut receiver, "dialogue.choices.clear").await;
+        assert_eq!(
+            clear_command.payload["choiceId"],
+            choices_command.payload["choiceId"]
+        );
+        assert_eq!(clear_command.payload["reason"], json!("timeout"));
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("不明枝")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_choice_id_is_recorded_but_does_not_resolve_pending_choice() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", choice_world(30), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_mismatch_start".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(event).await });
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+
+        let mut wrong_choice =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        wrong_choice
+            .payload
+            .insert("choiceId".to_string(), json!("choice_wrong"));
+        wrong_choice
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        wrong_choice.payload.insert("index".to_string(), json!(0));
+        assert!(home.ingest_event(wrong_choice).await?.is_empty());
+        assert!(!ingest.is_finished());
+
+        let mut right_choice =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        right_choice
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        right_choice
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        right_choice.payload.insert("index".to_string(), json!(0));
+        home.ingest_event(right_choice).await?;
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| {
+            record.kind == "conversation.choice"
+                && record.payload["choiceId"] == json!("choice_wrong")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_text_is_queued_while_choice_is_pending() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            choice_queue_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut start_event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        start_event.id = "evt_choice_queue_start".to_string();
+        start_event
+            .payload
+            .insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(start_event).await });
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+
+        let mut queued_event =
+            RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        queued_event.id = "evt_choice_queue_text".to_string();
+        queued_event
+            .payload
+            .insert("text".to_string(), json!("queued"));
+        assert!(home.ingest_event(queued_event).await?.is_empty());
+
+        let mut choice_event =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        choice_event
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        choice_event
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        choice_event.payload.insert("index".to_string(), json!(0));
+        home.ingest_event(choice_event).await?;
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        assert!(commands.iter().any(|command| command.kind == "dialogue.say"
+            && command.payload["text"] == json!("queued handled")));
         Ok(())
     }
 

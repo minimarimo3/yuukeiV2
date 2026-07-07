@@ -114,6 +114,34 @@ input {
   white-space: pre-wrap;
 }
 
+.actor-bubble-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.actor-bubble-choice {
+  width: 100%;
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(239, 246, 255, 0.72);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.actor-bubble-choice:hover,
+.actor-bubble-choice:focus-visible {
+  border-color: rgba(37, 99, 235, 0.48);
+  background: rgba(219, 234, 254, 0.92);
+  outline: none;
+}
+
 .actor-bubble-tail {
   position: absolute;
   top: var(--actor-bubble-tail-top, 50%);

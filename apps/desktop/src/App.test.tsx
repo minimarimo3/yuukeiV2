@@ -208,6 +208,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
     sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
+    sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(async () => [command("つつかれました", "cmd_4")]),
     openWorldPackDirectory: vi.fn(async () => null),
     openExtensionDirectory: vi.fn(async () => null),
