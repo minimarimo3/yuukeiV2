@@ -198,6 +198,39 @@ export type MemoryForgetResult = {
   removedEpisodes: number;
 };
 
+export type EventLogPrivacyCategoryFilter =
+  | "all"
+  | "desktopObservation"
+  | "none";
+
+export type EventLogRecord = {
+  sequence: number;
+  id: string;
+  kind: string;
+  timestamp: string;
+  residentId: string;
+  source: string;
+  deviceId?: string | null;
+  surfaceId?: string | null;
+  actorId?: string | null;
+  payload: Record<string, unknown>;
+  privacy?: {
+    category: string;
+    retention: string;
+    extensionReadable: boolean;
+  } | null;
+};
+
+export type EventLogPage = {
+  records: EventLogRecord[];
+  nextCursor?: number | null;
+  total: number;
+};
+
+export type EventLogDeleteResult = {
+  deleted: number;
+};
+
 export type ActorSurfaceAssetCatalog = {
   worldPackId: string;
   actors: ActorSurfaceAsset[];
@@ -318,6 +351,18 @@ export type YuukeiClient = {
     entries?: MemoryForgetEntry[],
     all?: boolean
   ): Promise<MemoryForgetResult>;
+  readEventLogPage(
+    kindPrefix?: string,
+    privacyCategory?: EventLogPrivacyCategoryFilter,
+    beforeSequence?: number,
+    limit?: number
+  ): Promise<EventLogPage>;
+  countEventLogDeleteBefore(timestamp: string): Promise<number>;
+  countEventLogDeleteByKindPrefix(prefix: string): Promise<number>;
+  countEventLogDeleteAll(): Promise<number>;
+  deleteEventLogBefore(timestamp: string): Promise<EventLogDeleteResult>;
+  deleteEventLogByKindPrefix(prefix: string): Promise<EventLogDeleteResult>;
+  deleteEventLogAll(): Promise<EventLogDeleteResult>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
   setStageOverlayClickThrough(passthrough: boolean): Promise<void>;
@@ -399,6 +444,28 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<MemoryUpdateResult>("update_resident_memory", { kind, id, text }),
   forgetResidentMemories: (entries?: MemoryForgetEntry[], all?: boolean) =>
     invoke<MemoryForgetResult>("forget_resident_memories", { entries, all }),
+  readEventLogPage: (
+    kindPrefix?: string,
+    privacyCategory: EventLogPrivacyCategoryFilter = "all",
+    beforeSequence?: number,
+    limit?: number
+  ) =>
+    invoke<EventLogPage>("read_event_log_page", {
+      kindPrefix,
+      privacyCategory,
+      beforeSequence,
+      limit
+    }),
+  countEventLogDeleteBefore: (timestamp: string) =>
+    invoke<number>("count_event_log_delete_before", { timestamp }),
+  countEventLogDeleteByKindPrefix: (prefix: string) =>
+    invoke<number>("count_event_log_delete_by_kind_prefix", { prefix }),
+  countEventLogDeleteAll: () => invoke<number>("count_event_log_delete_all"),
+  deleteEventLogBefore: (timestamp: string) =>
+    invoke<EventLogDeleteResult>("delete_event_log_before", { timestamp }),
+  deleteEventLogByKindPrefix: (prefix: string) =>
+    invoke<EventLogDeleteResult>("delete_event_log_by_kind_prefix", { prefix }),
+  deleteEventLogAll: () => invoke<EventLogDeleteResult>("delete_event_log_all"),
   getActorSurfaceAssets: () =>
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
   setActorWindowClickThrough: (passthrough: boolean) =>

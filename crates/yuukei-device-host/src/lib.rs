@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use yuukei_capability::CapabilityRouter;
-use yuukei_event_log::{EventLog, EventLogQuery};
+use yuukei_event_log::{DeleteSummary, EventLog, EventLogPrivacyFilter, EventLogQuery};
 use yuukei_extension::ProcessHookExtension;
 use yuukei_protocol::{
     new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
@@ -21,7 +21,8 @@ use yuukei_protocol::{
     ResidentSnapshot, RetentionPolicy, RuntimeCommand, RuntimeEvent, SurfaceKind,
     SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
-use yuukei_resident_home::{ResidentHome, ResidentHomeError};
+pub use yuukei_resident_home::ResidentEventLogPage;
+use yuukei_resident_home::{ResidentEventLogReadOptions, ResidentHome, ResidentHomeError};
 use yuukei_world::{
     ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, DaihonDiagnosticEntry, WorldError,
     WorldPack, YuukeiDaihonAdapter,
@@ -404,6 +405,40 @@ impl OnboardingRegistry {
             serde_json::to_vec_pretty(&self.stored)?,
         )?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EventLogPrivacyCategoryFilter {
+    All,
+    DesktopObservation,
+    None,
+}
+
+impl From<EventLogPrivacyCategoryFilter> for EventLogPrivacyFilter {
+    fn from(value: EventLogPrivacyCategoryFilter) -> Self {
+        match value {
+            EventLogPrivacyCategoryFilter::All => EventLogPrivacyFilter::All,
+            EventLogPrivacyCategoryFilter::DesktopObservation => {
+                EventLogPrivacyFilter::Category("desktop-observation".to_string())
+            }
+            EventLogPrivacyCategoryFilter::None => EventLogPrivacyFilter::None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventLogDeleteResult {
+    pub deleted: usize,
+}
+
+impl From<DeleteSummary> for EventLogDeleteResult {
+    fn from(value: DeleteSummary) -> Self {
+        Self {
+            deleted: value.deleted,
+        }
     }
 }
 
@@ -2176,6 +2211,69 @@ impl LocalYuukeiRuntime {
         self.home
             .forget_memories(entries, all)
             .await
+            .map_err(Into::into)
+    }
+
+    pub fn read_event_log_page(
+        &self,
+        kind_prefix: Option<String>,
+        privacy_category: EventLogPrivacyCategoryFilter,
+        before_sequence: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<ResidentEventLogPage> {
+        self.home
+            .read_event_log_page(ResidentEventLogReadOptions {
+                kind_prefix,
+                privacy_category: privacy_category.into(),
+                before_sequence,
+                limit,
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_before(&self, timestamp: impl Into<String>) -> Result<usize> {
+        self.home
+            .count_event_log_delete_before(timestamp)
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<usize> {
+        self.home
+            .count_event_log_delete_by_kind_prefix(prefix)
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_all(&self) -> Result<usize> {
+        self.home.count_event_log_delete_all().map_err(Into::into)
+    }
+
+    pub fn delete_event_log_before(
+        &self,
+        timestamp: impl Into<String>,
+    ) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_before(timestamp)
+            .map(EventLogDeleteResult::from)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_by_kind_prefix(prefix)
+            .map(EventLogDeleteResult::from)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_all(&self) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_all()
+            .map(EventLogDeleteResult::from)
             .map_err(Into::into)
     }
 

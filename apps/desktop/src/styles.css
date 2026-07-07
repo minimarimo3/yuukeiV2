@@ -894,6 +894,64 @@ input {
   align-items: flex-start;
 }
 
+.event-log-copy {
+  gap: 16px;
+}
+
+.event-log-filters,
+.event-log-delete label {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.3fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.event-log-filters label,
+.event-log-delete label {
+  display: contents;
+}
+
+.event-log-filters span,
+.event-log-delete span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.event-log-filters input,
+.event-log-filters select,
+.event-log-delete input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  padding: 0 9px;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.event-log-filters button,
+.event-log-delete button {
+  min-width: 96px;
+  height: 34px;
+  border: 1px solid #d0d5dd;
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: #344054;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.event-log-delete {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.event-log-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .extension-list {
   display: grid;
   gap: 10px;

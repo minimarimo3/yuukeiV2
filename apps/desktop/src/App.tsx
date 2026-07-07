@@ -7,6 +7,9 @@ import {
   type CapabilityUsageState,
   type ExtensionCapabilityUsage,
   type DaihonDiagnosticEntry,
+  type EventLogPage,
+  type EventLogPrivacyCategoryFilter,
+  type EventLogRecord,
   type ExtensionSettingsChangeResult,
   type ExtensionSettingsState,
   type InstalledExtension,
@@ -28,9 +31,11 @@ type SettingsCategoryId =
   | "app"
   | "worldPack"
   | "observations"
+  | "eventLog"
   | "memories"
   | "extensions";
 const MEMORY_PAGE_SIZE = 50;
+const EVENT_LOG_PAGE_SIZE = 50;
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -66,6 +71,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(null);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [loadingMemories, setLoadingMemories] = useState(false);
+  const [eventLogPage, setEventLogPage] = useState<EventLogPage | null>(null);
+  const [eventLogError, setEventLogError] = useState<string | null>(null);
+  const [loadingEventLog, setLoadingEventLog] = useState(false);
+  const [eventLogKindPrefix, setEventLogKindPrefix] = useState("");
+  const [eventLogPrivacyFilter, setEventLogPrivacyFilter] =
+    useState<EventLogPrivacyCategoryFilter>("all");
+  const [eventLogDeleteBefore, setEventLogDeleteBefore] = useState("");
+  const [eventLogDeletePrefix, setEventLogDeletePrefix] = useState("");
   const [editingFactId, setEditingFactId] = useState<string | null>(null);
   const [editingFactText, setEditingFactText] = useState("");
   const [switchingPack, setSwitchingPack] = useState(false);
@@ -84,6 +97,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         unlisteners.push(await client.onAssetsChanged(() => {
           void refreshSettings();
           void loadMemories();
+          void loadEventLog();
         }));
         unlisteners.push(
           await client.onWorldPackStatus((nextWorldPackStatus) => {
@@ -91,6 +105,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               setWorldPackStatus(nextWorldPackStatus);
             }
             void loadMemories();
+            void loadEventLog();
           })
         );
         unlisteners.push(
@@ -102,6 +117,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         );
         await refreshSettings();
         await loadMemories();
+        await loadEventLog();
         if (!disposed) {
           setStatus("ready");
         }
@@ -182,6 +198,34 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       }
     } finally {
       setLoadingMemories(false);
+    }
+  }
+
+  async function loadEventLog(beforeSequence?: number, append = false) {
+    setLoadingEventLog(true);
+    try {
+      const next = await client.readEventLogPage(
+        eventLogKindPrefix.trim() || undefined,
+        eventLogPrivacyFilter,
+        beforeSequence,
+        EVENT_LOG_PAGE_SIZE
+      );
+      setEventLogError(null);
+      setEventLogPage((current) =>
+        append && current
+          ? {
+              ...next,
+              records: [...current.records, ...next.records]
+            }
+          : next
+      );
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+      if (!append) {
+        setEventLogPage(null);
+      }
+    } finally {
+      setLoadingEventLog(false);
     }
   }
 
@@ -448,6 +492,66 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     await loadMemories(memoryState?.episodes.length ?? 0, true);
   }
 
+  async function deleteEventLogBefore() {
+    if (!eventLogDeleteBefore) {
+      setEventLogError("日時を指定してください。");
+      return;
+    }
+    const timestamp = new Date(eventLogDeleteBefore).toISOString();
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteBefore(timestamp);
+      if (!confirmEventLogDeletion(`${timestamp}より前`, count)) return;
+      await client.deleteEventLogBefore(timestamp);
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  async function deleteEventLogByKindPrefix() {
+    const prefix = eventLogDeletePrefix.trim();
+    if (!prefix) {
+      setEventLogError("種類の前方一致を入力してください。");
+      return;
+    }
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteByKindPrefix(prefix);
+      if (!confirmEventLogDeletion(`種類が「${prefix}」で始まる記録`, count)) {
+        return;
+      }
+      await client.deleteEventLogByKindPrefix(prefix);
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  async function deleteAllEventLog() {
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteAll();
+      if (!confirmEventLogDeletion("すべての生活の記録", count)) return;
+      await client.deleteEventLogAll();
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  function confirmEventLogDeletion(label: string, count: number) {
+    return window.confirm(
+      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\n住人の記憶(要約)には残っている場合があります。記憶は『記憶』タブから個別に忘れさせられます。\n\n続けますか？`
+    );
+  }
+
   const settingsCategories: SettingsCategory[] = [
     {
       id: "app",
@@ -585,6 +689,36 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             }
           />
         </div>
+      )
+    },
+    {
+      id: "eventLog",
+      label: "生活の記録",
+      ariaLabel: "生活の記録 settings",
+      panelId: "settings-event-log-panel",
+      panelClassName: "memory-panel",
+      content: (
+        <EventLogSettingsPanel
+          page={eventLogPage}
+          error={eventLogError}
+          loading={loadingEventLog}
+          kindPrefix={eventLogKindPrefix}
+          privacyFilter={eventLogPrivacyFilter}
+          deleteBefore={eventLogDeleteBefore}
+          deletePrefix={eventLogDeletePrefix}
+          onKindPrefixChange={setEventLogKindPrefix}
+          onPrivacyFilterChange={setEventLogPrivacyFilter}
+          onDeleteBeforeChange={setEventLogDeleteBefore}
+          onDeletePrefixChange={setEventLogDeletePrefix}
+          onApplyFilters={() => void loadEventLog()}
+          onLoadMore={() =>
+            void loadEventLog(eventLogPage?.nextCursor ?? undefined, true)
+          }
+          onRefresh={() => void loadEventLog()}
+          onDeleteBefore={() => void deleteEventLogBefore()}
+          onDeletePrefix={() => void deleteEventLogByKindPrefix()}
+          onDeleteAll={() => void deleteAllEventLog()}
+        />
       )
     },
     {
@@ -1112,6 +1246,167 @@ function ObservationToggle({
         <small>{description}</small>
       </span>
     </label>
+  );
+}
+
+type EventLogSettingsPanelProps = {
+  page: EventLogPage | null;
+  error: string | null;
+  loading: boolean;
+  kindPrefix: string;
+  privacyFilter: EventLogPrivacyCategoryFilter;
+  deleteBefore: string;
+  deletePrefix: string;
+  onKindPrefixChange: (value: string) => void;
+  onPrivacyFilterChange: (value: EventLogPrivacyCategoryFilter) => void;
+  onDeleteBeforeChange: (value: string) => void;
+  onDeletePrefixChange: (value: string) => void;
+  onApplyFilters: () => void;
+  onLoadMore: () => void;
+  onRefresh: () => void;
+  onDeleteBefore: () => void;
+  onDeletePrefix: () => void;
+  onDeleteAll: () => void;
+};
+
+function EventLogSettingsPanel({
+  page,
+  error,
+  loading,
+  kindPrefix,
+  privacyFilter,
+  deleteBefore,
+  deletePrefix,
+  onKindPrefixChange,
+  onPrivacyFilterChange,
+  onDeleteBeforeChange,
+  onDeletePrefixChange,
+  onApplyFilters,
+  onLoadMore,
+  onRefresh,
+  onDeleteBefore,
+  onDeletePrefix,
+  onDeleteAll
+}: EventLogSettingsPanelProps) {
+  const records = page?.records ?? [];
+  return (
+    <>
+      <div className="memory-copy event-log-copy">
+        <section className="memory-section">
+          <div className="memory-section-head">
+            <div>
+              <h3>生活の記録</h3>
+              <p className="settings-note">
+                保存されているイベントの種類と内容を確認できます。
+              </p>
+            </div>
+            <span>{page ? `${records.length} / ${page.total}` : "loading"}</span>
+          </div>
+          {error ? <p className="settings-error">{error}</p> : null}
+          <div className="event-log-filters">
+            <label>
+              <span>種類</span>
+              <input
+                type="text"
+                value={kindPrefix}
+                placeholder="desktop."
+                onChange={(event) => onKindPrefixChange(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              <span>privacy</span>
+              <select
+                value={privacyFilter}
+                onChange={(event) =>
+                  onPrivacyFilterChange(
+                    event.currentTarget.value as EventLogPrivacyCategoryFilter
+                  )
+                }
+              >
+                <option value="all">すべて</option>
+                <option value="desktopObservation">desktop-observation</option>
+                <option value="none">なし</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className="secondary-button compact-button"
+              disabled={loading}
+              onClick={onApplyFilters}
+            >
+              適用
+            </button>
+          </div>
+          <div className="memory-list event-log-list">
+            {records.map((record) => (
+              <article className="memory-row event-log-row" key={record.id}>
+                <div className="memory-text">
+                  <p>{eventLogSummary(record)}</p>
+                  <small>
+                    {formatEventLogTimestamp(record.timestamp)} / {record.kind} /{" "}
+                    {record.privacy?.category ?? "privacyなし"}
+                  </small>
+                </div>
+              </article>
+            ))}
+            {records.length === 0 ? (
+              <p className="settings-note">表示できる記録はありません。</p>
+            ) : null}
+          </div>
+          {page?.nextCursor ? (
+            <button
+              type="button"
+              className="secondary-button memory-more-button"
+              disabled={loading}
+              onClick={onLoadMore}
+            >
+              もっと見る
+            </button>
+          ) : null}
+        </section>
+        <section className="memory-section event-log-delete">
+          <div className="memory-section-head">
+            <h3>削除</h3>
+          </div>
+          <label>
+            <span>この日時より前</span>
+            <input
+              type="datetime-local"
+              value={deleteBefore}
+              onChange={(event) => onDeleteBeforeChange(event.currentTarget.value)}
+            />
+            <button type="button" disabled={loading} onClick={onDeleteBefore}>
+              期間指定で削除
+            </button>
+          </label>
+          <label>
+            <span>種類の前方一致</span>
+            <input
+              type="text"
+              value={deletePrefix}
+              placeholder="desktop."
+              onChange={(event) => onDeletePrefixChange(event.currentTarget.value)}
+            />
+            <button type="button" disabled={loading} onClick={onDeletePrefix}>
+              種類指定で削除
+            </button>
+          </label>
+        </section>
+      </div>
+      <div className="settings-actions memory-panel-actions">
+        <button type="button" onClick={onRefresh} disabled={loading}>
+          更新
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onDeleteAll}
+          disabled={loading}
+        >
+          全削除
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -1763,6 +2058,38 @@ function formatMemoryTimestamp(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function formatEventLogTimestamp(value: string): string {
+  return formatMemoryTimestamp(value);
+}
+
+function eventLogSummary(record: EventLogRecord): string {
+  const payload = record.payload ?? {};
+  const preferredKeys = [
+    "text",
+    "fileName",
+    "choice",
+    "category",
+    "app",
+    "windowKey",
+    "reason",
+    "deleted"
+  ];
+  for (const key of preferredKeys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return `${key}: ${value}`;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return `${key}: ${String(value)}`;
+    }
+  }
+  const json = JSON.stringify(payload);
+  if (!json || json === "{}") {
+    return "(payloadなし)";
+  }
+  return json.length > 120 ? `${json.slice(0, 117)}...` : json;
 }
 
 type ExtensionPermissionRow = {

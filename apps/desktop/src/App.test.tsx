@@ -7,6 +7,8 @@ import type {
   AppSettingsState,
   CapabilityUsageState,
   DaihonDiagnosticEntry,
+  EventLogPage,
+  EventLogRecord,
   ExtensionSettingsState,
   ObservationSettingsState,
   OnboardingState,
@@ -174,6 +176,44 @@ function residentMemories(): ResidentMemoryState {
   };
 }
 
+function eventLogRecord(
+  sequence: number,
+  kind: string,
+  payload: Record<string, unknown> = { text: "こんにちは" }
+): EventLogRecord {
+  return {
+    sequence,
+    id: `evt_${sequence}`,
+    kind,
+    timestamp: `2026-07-0${sequence}T00:00:00.000Z`,
+    residentId: "resident-default",
+    source: "test",
+    payload,
+    privacy: kind.startsWith("desktop.")
+      ? {
+          category: "desktop-observation",
+          retention: "short",
+          extensionReadable: false
+        }
+      : null
+  };
+}
+
+function eventLogPage(records: EventLogRecord[] = [
+  eventLogRecord(3, "desktop.download.completed", {
+    fileName: "photo.png",
+    fileCategory: "image"
+  }),
+  eventLogRecord(2, "dialogue.say", { text: "おはよう" }),
+  eventLogRecord(1, "conversation.text", { text: "hello" })
+]): EventLogPage {
+  return {
+    records,
+    nextCursor: null,
+    total: records.length
+  };
+}
+
 function installedExtension(
   extensionId: string,
   displayName = extensionId,
@@ -224,6 +264,13 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       removedFacts: 1,
       removedEpisodes: 0
     })),
+    readEventLogPage: vi.fn(async () => eventLogPage()),
+    countEventLogDeleteBefore: vi.fn(async () => 2),
+    countEventLogDeleteByKindPrefix: vi.fn(async () => 1),
+    countEventLogDeleteAll: vi.fn(async () => 3),
+    deleteEventLogBefore: vi.fn(async () => ({ deleted: 2 })),
+    deleteEventLogByKindPrefix: vi.fn(async () => ({ deleted: 1 })),
+    deleteEventLogAll: vi.fn(async () => ({ deleted: 3 })),
     getActorSurfaceAssets: vi.fn(async () => ({
       worldPackId: "default-yuukei",
       actors: []
@@ -484,6 +531,62 @@ describe("App", () => {
         downloads: false
       });
     });
+  });
+
+  it("lists event log records with payload summaries", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+
+    expect(await screen.findByText("fileName: photo.png")).toBeInTheDocument();
+    expect(screen.getByText(/desktop.download.completed/)).toBeInTheDocument();
+    expect(screen.getAllByText(/desktop-observation/).length).toBeGreaterThan(1);
+    expect(screen.getByText("text: おはよう")).toBeInTheDocument();
+  });
+
+  it("confirms and deletes event log records before a timestamp", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    const input = await screen.findByLabelText("この日時より前");
+    await userEvent.type(input, "2026-07-08T12:00");
+    await userEvent.click(screen.getByRole("button", { name: "期間指定で削除" }));
+
+    await waitFor(() =>
+      expect(client.countEventLogDeleteBefore).toHaveBeenCalledWith(
+        "2026-07-08T03:00:00.000Z"
+      )
+    );
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 2件"));
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("住人の記憶(要約)には残っている場合があります。")
+    );
+    await waitFor(() =>
+      expect(client.deleteEventLogBefore).toHaveBeenCalledWith(
+        "2026-07-08T03:00:00.000Z"
+      )
+    );
+    confirm.mockRestore();
+  });
+
+  it("confirms and deletes all event log records", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    await userEvent.click(screen.getByRole("button", { name: "全削除" }));
+
+    await waitFor(() => expect(client.countEventLogDeleteAll).toHaveBeenCalled());
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 3件"));
+    await waitFor(() => expect(client.deleteEventLogAll).toHaveBeenCalled());
+    confirm.mockRestore();
   });
 
   it("ignores a canceled World Pack directory dialog", async () => {

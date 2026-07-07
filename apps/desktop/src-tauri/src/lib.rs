@@ -20,10 +20,11 @@ use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
     AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
-    DesktopWindowObservationState, ExtensionSettingsChangeResult, ExtensionSettingsState,
-    LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
-    ObservationSettingsUpdate, OnboardingState, WorldPackSelectionState, WorldPackSwitchResult,
-    WorldPackZipInspection, TAURI_SURFACE_ID,
+    DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
+    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
+    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
+    ResidentEventLogPage, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -242,6 +243,76 @@ async fn forget_resident_memories(
         .forget_resident_memories(entries.unwrap_or_default(), all.unwrap_or(false))
         .await
         .map_err(to_message)
+}
+
+#[tauri::command]
+async fn read_event_log_page(
+    state: State<'_, AppState>,
+    kind_prefix: Option<String>,
+    privacy_category: EventLogPrivacyCategoryFilter,
+    before_sequence: Option<i64>,
+    limit: Option<usize>,
+) -> Result<ResidentEventLogPage, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .read_event_log_page(kind_prefix, privacy_category, before_sequence, limit)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_before(
+    state: State<'_, AppState>,
+    timestamp: String,
+) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .count_event_log_delete_before(timestamp)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_by_kind_prefix(
+    state: State<'_, AppState>,
+    prefix: String,
+) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .count_event_log_delete_by_kind_prefix(prefix)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_all(state: State<'_, AppState>) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.count_event_log_delete_all().map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_before(
+    state: State<'_, AppState>,
+    timestamp: String,
+) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .delete_event_log_before(timestamp)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_by_kind_prefix(
+    state: State<'_, AppState>,
+    prefix: String,
+) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .delete_event_log_by_kind_prefix(prefix)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_all(state: State<'_, AppState>) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.delete_event_log_all().map_err(to_message)
 }
 
 #[tauri::command]
@@ -605,6 +676,13 @@ pub fn run() {
             list_resident_memories,
             update_resident_memory,
             forget_resident_memories,
+            read_event_log_page,
+            count_event_log_delete_before,
+            count_event_log_delete_by_kind_prefix,
+            count_event_log_delete_all,
+            delete_event_log_before,
+            delete_event_log_by_kind_prefix,
+            delete_event_log_all,
             get_actor_surface_assets,
             set_actor_window_click_through,
             set_stage_overlay_click_through,

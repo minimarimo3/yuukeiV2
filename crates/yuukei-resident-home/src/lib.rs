@@ -20,7 +20,10 @@ use yuukei_capability::{
     MEMORY_RETRIEVE_CAPABILITY, MEMORY_UPDATE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
     SPEECH_SYNTHESIS_CAPABILITY,
 };
-use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
+use yuukei_event_log::{
+    DeleteSummary, EventLog, EventLogAdminQuery, EventLogDeleteSelector, EventLogError,
+    EventLogPage, EventLogPrivacyFilter, EventLogQuery,
+};
 use yuukei_extension::{
     event_type_matches, ExtensionCommandContext, ExtensionError, ExtensionEventContext,
     ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, YuukeiExtension,
@@ -42,6 +45,22 @@ use yuukei_world::{
     DaihonExtractRequest, DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler,
     DaihonInterpretRequest, WorldError, WorldPack, YuukeiDaihonAdapter,
 };
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentEventLogPage {
+    pub records: Vec<EventLogRecord>,
+    pub next_cursor: Option<i64>,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResidentEventLogReadOptions {
+    pub kind_prefix: Option<String>,
+    pub privacy_category: EventLogPrivacyFilter,
+    pub before_sequence: Option<i64>,
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Error)]
 pub enum ResidentHomeError {
@@ -433,6 +452,112 @@ impl ResidentHome {
             records,
             next_cursor,
         })
+    }
+
+    pub fn read_event_log_page(
+        &self,
+        options: ResidentEventLogReadOptions,
+    ) -> Result<ResidentEventLogPage> {
+        let query = EventLogAdminQuery {
+            kind_prefix: options
+                .kind_prefix
+                .filter(|prefix| !prefix.trim().is_empty()),
+            privacy_category: options.privacy_category,
+            before_sequence: options.before_sequence,
+            limit: options.limit,
+        };
+        let total = self
+            .event_log
+            .read_newest(EventLogAdminQuery {
+                limit: None,
+                ..query.clone()
+            })?
+            .records
+            .len();
+        let page = self.event_log.read_newest(query)?;
+        Ok(ResidentEventLogPage {
+            records: page.records,
+            next_cursor: page.next_cursor,
+            total,
+        })
+    }
+
+    pub fn count_event_log_delete_before(&self, timestamp: impl Into<String>) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::BeforeTimestamp(timestamp.into()))
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::KindPrefix(prefix.into()))
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_all(&self) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::All)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_before(&self, timestamp: impl Into<String>) -> Result<DeleteSummary> {
+        let timestamp = timestamp.into();
+        self.delete_event_log_with_audit(
+            EventLogDeleteSelector::BeforeTimestamp(timestamp.clone()),
+            json!({ "condition": "before", "timestamp": timestamp }),
+        )
+    }
+
+    pub fn delete_event_log_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<DeleteSummary> {
+        let prefix = prefix.into();
+        self.delete_event_log_with_audit(
+            EventLogDeleteSelector::KindPrefix(prefix.clone()),
+            json!({ "condition": "kindPrefix", "kindPrefix": prefix }),
+        )
+    }
+
+    pub fn delete_event_log_all(&self) -> Result<DeleteSummary> {
+        self.delete_event_log_with_audit(EventLogDeleteSelector::All, json!({ "condition": "all" }))
+    }
+
+    fn delete_event_log_with_audit(
+        &self,
+        selector: EventLogDeleteSelector,
+        mut payload: Value,
+    ) -> Result<DeleteSummary> {
+        let resident_id = self.resident_id()?;
+        let deleted = self.event_log.count_delete(selector.clone())?;
+        if let Value::Object(map) = &mut payload {
+            map.insert("deleted".to_string(), Value::Number(deleted.into()));
+        }
+        let audit = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "event_log.deleted".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id,
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: json_map_from_value(payload),
+            causality: None,
+            privacy: None,
+        };
+        let summary = self.event_log.delete_with_audit(selector, audit)?;
+        let page = self.event_log.read_newest(EventLogAdminQuery {
+            limit: Some(1),
+            ..Default::default()
+        })?;
+        if let Some(record) = page.records.first() {
+            self.set_cursor(record.sequence)?;
+        }
+        Ok(summary)
     }
 
     fn validate_event_log_read_grant(
