@@ -23,7 +23,7 @@ use yuukei_device_host::{
     DesktopWindowObservationState, ExtensionSettingsChangeResult, ExtensionSettingsState,
     LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
     ObservationSettingsUpdate, OnboardingState, WorldPackSelectionState, WorldPackSwitchResult,
-    TAURI_SURFACE_ID,
+    WorldPackZipInspection, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -387,6 +387,30 @@ async fn select_world_pack_directory(
 }
 
 #[tauri::command]
+async fn inspect_world_pack_zip(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorldPackZipInspection, String> {
+    LocalYuukeiRuntime::inspect_world_pack_zip_in(state.env.clone(), &path).map_err(to_message)
+}
+
+#[tauri::command]
+async fn import_world_pack_zip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorldPackSwitchResult, String> {
+    match LocalYuukeiRuntime::import_world_pack_zip_in(state.env.clone(), &path).await {
+        Ok(runtime) => replace_runtime(app, state, runtime).await,
+        Err(error) => {
+            let current = state.runtime.lock().await.clone();
+            emit_world_pack_status(&app, &current.world_pack_status())?;
+            Err(to_message(error))
+        }
+    }
+}
+
+#[tauri::command]
 async fn reset_world_pack_to_default(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -592,6 +616,8 @@ pub fn run() {
             send_conversation_choice,
             send_avatar_gesture_poke,
             select_world_pack_directory,
+            inspect_world_pack_zip,
+            import_world_pack_zip,
             reset_world_pack_to_default,
             install_extension_directory,
             uninstall_extension,

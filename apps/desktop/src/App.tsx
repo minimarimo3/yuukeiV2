@@ -207,6 +207,39 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function importWorldPackZip() {
+    setWorldPackError(null);
+    setSwitchingPack(true);
+    try {
+      const path = await client.openWorldPackZip();
+      if (!path) return;
+      const inspection = await client.inspectWorldPackZip(path);
+      const licenseText =
+        inspection.licenseText?.trim() ||
+        "ライセンス表記が見つかりませんでした。配布元の条件を確認してください。";
+      const replaceNotice = inspection.replacesExisting
+        ? "\n\n同じpackIdのインポート済みPackがあります。続行すると置き換えます。"
+        : "";
+      const confirmed = window.confirm(
+        `このWorld Packの配布条件\n\n${inspection.displayName} (${inspection.packId})\n${inspection.licenseSource ?? "ライセンス表記なし"}\n\n${licenseText}${replaceNotice}\n\nこのWorld Packを読み込みますか？`
+      );
+      if (!confirmed) return;
+      const result = await client.importWorldPackZip(path);
+      setWorldPackStatus(result.status);
+      setStatus("ready");
+      void loadMemories();
+    } catch (error) {
+      setWorldPackError(error instanceof Error ? error.message : String(error));
+      try {
+        setWorldPackStatus(await client.getWorldPackStatus());
+      } catch {
+        // The Tauri event path normally refreshes this; the direct refresh is best effort.
+      }
+    } finally {
+      setSwitchingPack(false);
+    }
+  }
+
   async function resetWorldPack() {
     setWorldPackError(null);
     setSwitchingPack(true);
@@ -492,6 +525,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               disabled={switchingPack}
             >
               フォルダを選択
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={importWorldPackZip}
+              disabled={switchingPack}
+            >
+              zipから読み込む
             </button>
             <button
               type="button"

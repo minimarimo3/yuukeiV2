@@ -68,6 +68,15 @@ export type WorldPackSwitchResult = {
   snapshot: ResidentSnapshot;
 };
 
+export type WorldPackZipInspection = {
+  packId: string;
+  displayName: string;
+  licenseText?: string | null;
+  licenseSource?: string | null;
+  importedRoot: string;
+  replacesExisting: boolean;
+};
+
 export type InstalledExtension = {
   extensionId: string;
   displayName: string;
@@ -326,8 +335,11 @@ export type YuukeiClient = {
     gesture: AvatarGesturePokeInput
   ): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
+  openWorldPackZip(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
   selectWorldPackDirectory(path: string): Promise<WorldPackSwitchResult>;
+  inspectWorldPackZip(path: string): Promise<WorldPackZipInspection>;
+  importWorldPackZip(path: string): Promise<WorldPackSwitchResult>;
   resetWorldPackToDefault(): Promise<WorldPackSwitchResult>;
   installExtensionDirectory(
     path: string
@@ -417,12 +429,24 @@ export const tauriYuukeiClient: YuukeiClient = {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
   },
+  openWorldPackZip: async () => {
+    const selected = await openDialog({
+      directory: false,
+      multiple: false,
+      filters: [{ name: "World Pack zip", extensions: ["zip"] }]
+    });
+    return typeof selected === "string" ? selected : null;
+  },
   openExtensionDirectory: async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
   },
   selectWorldPackDirectory: (path: string) =>
     invoke<WorldPackSwitchResult>("select_world_pack_directory", { path }),
+  inspectWorldPackZip: (path: string) =>
+    invoke<WorldPackZipInspection>("inspect_world_pack_zip", { path }),
+  importWorldPackZip: (path: string) =>
+    invoke<WorldPackSwitchResult>("import_world_pack_zip", { path }),
   resetWorldPackToDefault: () =>
     invoke<WorldPackSwitchResult>("reset_world_pack_to_default"),
   installExtensionDirectory: (path: string) =>

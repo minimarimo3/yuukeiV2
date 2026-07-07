@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -71,6 +71,8 @@ pub enum DeviceHostError {
     ObservationSettings(String),
     #[error("onboarding settings error: {0}")]
     OnboardingSettings(String),
+    #[error("world pack import error: {0}")]
+    WorldPackImport(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
     #[error("Daihon diagnostic state lock is poisoned")]
@@ -92,6 +94,7 @@ impl DeviceHostError {
             | Self::AppSettings(_)
             | Self::ObservationSettings(_)
             | Self::OnboardingSettings(_)
+            | Self::WorldPackImport(_)
             | Self::PresenceState
             | Self::DaihonDiagnosticState => None,
         }
@@ -402,6 +405,351 @@ impl OnboardingRegistry {
         )?;
         Ok(())
     }
+}
+
+const WORLD_PACK_IMPORT_MAX_BYTES: u64 = 500 * 1024 * 1024;
+const WORLD_PACK_IMPORT_MAX_ENTRIES: usize = 5000;
+const WORLD_PACK_LICENSE_TEXT_LIMIT: usize = 4000;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldPackZipInspection {
+    pub pack_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_source: Option<String>,
+    pub imported_root: PathBuf,
+    pub replaces_existing: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InspectedWorldPackZip {
+    root_prefix: Option<PathBuf>,
+    pack_id: String,
+    display_name: String,
+    license_text: Option<String>,
+    license_source: Option<String>,
+    imported_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LicenseCandidate {
+    license_index: Option<usize>,
+    license_txt_index: Option<usize>,
+    readme_index: Option<usize>,
+}
+
+impl LicenseCandidate {
+    fn set_file(&mut self, name: &str, index: usize) {
+        if name == "LICENSE" {
+            self.license_index.get_or_insert(index);
+        } else if name == "LICENSE.txt" {
+            self.license_txt_index.get_or_insert(index);
+        } else if name == "README.md" {
+            self.readme_index.get_or_insert(index);
+        }
+    }
+
+    fn selected(&self) -> Option<(usize, &'static str)> {
+        self.license_index
+            .map(|index| (index, "LICENSE"))
+            .or_else(|| self.license_txt_index.map(|index| (index, "LICENSE.txt")))
+            .or_else(|| self.readme_index.map(|index| (index, "README.md")))
+    }
+}
+
+fn inspect_world_pack_zip_at(
+    data_dir: &Path,
+    path: impl AsRef<Path>,
+) -> Result<WorldPackZipInspection> {
+    let zip_path = path.as_ref();
+    let file = File::open(zip_path).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを開けませんでした: {}", error))
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
+    })?;
+    let inspected = inspect_world_pack_zip_archive(data_dir, &mut archive)?;
+    Ok(WorldPackZipInspection {
+        pack_id: inspected.pack_id,
+        display_name: inspected.display_name,
+        license_text: inspected.license_text,
+        license_source: inspected.license_source,
+        replaces_existing: inspected.imported_root.exists(),
+        imported_root: inspected.imported_root,
+    })
+}
+
+fn inspect_world_pack_zip_archive<R: Read + Seek>(
+    data_dir: &Path,
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<InspectedWorldPackZip> {
+    if archive.len() > WORLD_PACK_IMPORT_MAX_ENTRIES {
+        return Err(DeviceHostError::WorldPackImport(format!(
+            "zip内のファイル数が多すぎます。上限は{}件です。",
+            WORLD_PACK_IMPORT_MAX_ENTRIES
+        )));
+    }
+
+    let mut total_size = 0_u64;
+    let mut safe_paths: Vec<(usize, PathBuf)> = Vec::new();
+    let mut pack_json_candidates: Vec<(usize, PathBuf)> = Vec::new();
+
+    for index in 0..archive.len() {
+        let file = archive.by_index(index).map_err(world_pack_zip_error)?;
+        if file.is_symlink() {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内にシンボリックリンクがあります: {}",
+                file.name()
+            )));
+        }
+        let Some(enclosed_name) = file.enclosed_name() else {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内に安全でないパスがあります: {}",
+                file.name()
+            )));
+        };
+        total_size = total_size.saturating_add(file.size());
+        if total_size > WORLD_PACK_IMPORT_MAX_BYTES {
+            return Err(DeviceHostError::WorldPackImport(
+                "World Packが大きすぎます。展開後の合計サイズは500MBまでです。".to_string(),
+            ));
+        }
+        if file.is_dir() {
+            safe_paths.push((index, enclosed_name));
+            continue;
+        }
+        if enclosed_name.file_name().and_then(|name| name.to_str()) == Some("pack.json") {
+            let depth = enclosed_name.components().count();
+            if depth == 1 || depth == 2 {
+                pack_json_candidates.push((index, enclosed_name.clone()));
+            }
+        }
+        safe_paths.push((index, enclosed_name));
+    }
+
+    let (pack_json_index, pack_json_path) = match pack_json_candidates.as_slice() {
+        [(index, path)] => (*index, path.clone()),
+        [] => {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonが見つかりません。zipのルート直下、または単一のトップディレクトリ内に置いてください。"
+                    .to_string(),
+            ))
+        }
+        _ => {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonが複数見つかりました。World Packは1つだけ含めてください。".to_string(),
+            ))
+        }
+    };
+    let root_prefix = pack_root_prefix(&pack_json_path);
+
+    let mut license_candidates = LicenseCandidate::default();
+    for (index, path) in &safe_paths {
+        let Some(relative_path) = strip_pack_root(path, root_prefix.as_deref()) else {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonの外に別のファイルがあります。zipにはWorld Pack本体だけを入れてください。"
+                    .to_string(),
+            ));
+        };
+        if relative_path.components().count() == 1 {
+            if let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) {
+                license_candidates.set_file(name, *index);
+            }
+        }
+    }
+
+    let pack_json_text = read_zip_text(archive, pack_json_index, None)?;
+    let pack_json: Value = serde_json::from_str(&pack_json_text).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("pack.jsonが壊れています: {}", error))
+    })?;
+    let pack_id = pack_json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| DeviceHostError::WorldPackImport("pack.jsonのidが空です。".to_string()))?
+        .to_string();
+    let display_name = pack_json
+        .get("displayName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&pack_id)
+        .to_string();
+    let mut license_text = None;
+    let mut license_source = None;
+    if let Some((index, source)) = license_candidates.selected() {
+        license_text = Some(read_zip_text(
+            archive,
+            index,
+            Some(WORLD_PACK_LICENSE_TEXT_LIMIT as u64),
+        )?);
+        license_source = Some(source.to_string());
+    } else if let Some(license) = pack_json.get("license").and_then(Value::as_str) {
+        let trimmed = license.trim();
+        if !trimmed.is_empty() {
+            license_text = Some(truncate_text(trimmed, WORLD_PACK_LICENSE_TEXT_LIMIT));
+            license_source = Some("pack.json license".to_string());
+        }
+    }
+
+    Ok(InspectedWorldPackZip {
+        root_prefix,
+        pack_id: pack_id.clone(),
+        display_name,
+        license_text,
+        license_source,
+        imported_root: data_dir
+            .join("packs-imported")
+            .join(imported_pack_dir_name(&pack_id)),
+    })
+}
+
+fn import_world_pack_zip_to_dir(data_dir: &Path, zip_path: impl AsRef<Path>) -> Result<PathBuf> {
+    let zip_path = zip_path.as_ref();
+    let file = File::open(zip_path).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを開けませんでした: {}", error))
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
+    })?;
+    let inspected = inspect_world_pack_zip_archive(data_dir, &mut archive)?;
+    let imported_parent = data_dir.join("packs-imported");
+    fs::create_dir_all(&imported_parent)?;
+    let staging_root = imported_parent.join(format!(
+        ".importing-{}-{}",
+        imported_pack_dir_name(&inspected.pack_id),
+        now_timestamp()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+    ));
+    if staging_root.exists() {
+        fs::remove_dir_all(&staging_root)?;
+    }
+    fs::create_dir_all(&staging_root)?;
+
+    let extract_result = extract_world_pack_zip_archive(&mut archive, &inspected, &staging_root)
+        .and_then(|_| {
+            WorldPack::load_from_dir(&staging_root).map_err(|error| {
+                DeviceHostError::WorldPackImport(format!(
+                    "World Packの検証に失敗しました: {}",
+                    error
+                ))
+            })
+        });
+    if let Err(error) = extract_result {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+
+    if inspected.imported_root.exists() {
+        fs::remove_dir_all(&inspected.imported_root)?;
+    }
+    fs::rename(&staging_root, &inspected.imported_root)?;
+    Ok(inspected.imported_root)
+}
+
+fn extract_world_pack_zip_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    inspected: &InspectedWorldPackZip,
+    destination: &Path,
+) -> Result<()> {
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(world_pack_zip_error)?;
+        if file.is_symlink() {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内にシンボリックリンクがあります: {}",
+                file.name()
+            )));
+        }
+        let path = file.enclosed_name().ok_or_else(|| {
+            DeviceHostError::WorldPackImport(format!(
+                "zip内に安全でないパスがあります: {}",
+                file.name()
+            ))
+        })?;
+        let Some(relative_path) = strip_pack_root(&path, inspected.root_prefix.as_deref()) else {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonの外に別のファイルがあります。zipにはWorld Pack本体だけを入れてください。"
+                    .to_string(),
+            ));
+        };
+        let output_path = destination.join(relative_path);
+        if file.is_dir() {
+            fs::create_dir_all(&output_path)?;
+            continue;
+        }
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut output = File::create(&output_path)?;
+        io::copy(&mut file, &mut output)?;
+    }
+    Ok(())
+}
+
+fn pack_root_prefix(pack_json_path: &Path) -> Option<PathBuf> {
+    let mut components = pack_json_path.components();
+    let first = components.next()?.as_os_str().to_owned();
+    if components.next().is_some() {
+        Some(PathBuf::from(first))
+    } else {
+        None
+    }
+}
+
+fn strip_pack_root(path: &Path, root_prefix: Option<&Path>) -> Option<PathBuf> {
+    match root_prefix {
+        Some(prefix) => path.strip_prefix(prefix).ok().map(Path::to_path_buf),
+        None => Some(path.to_path_buf()),
+    }
+}
+
+fn read_zip_text<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    index: usize,
+    limit: Option<u64>,
+) -> Result<String> {
+    let mut file = archive.by_index(index).map_err(world_pack_zip_error)?;
+    let mut bytes = Vec::new();
+    match limit {
+        Some(limit) => {
+            let mut limited = (&mut file).take(limit);
+            limited.read_to_end(&mut bytes)?;
+        }
+        None => {
+            file.read_to_end(&mut bytes)?;
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn imported_pack_dir_name(pack_id: &str) -> String {
+    let sanitized: String = pack_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "imported-pack".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn world_pack_zip_error(error: zip::result::ZipError) -> DeviceHostError {
+    DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1298,6 +1646,29 @@ impl LocalYuukeiRuntime {
         let runtime = Self::open_with_status(registry.config_for_install(&install), status).await?;
         registry.save()?;
         Ok(runtime)
+    }
+
+    pub fn inspect_world_pack_zip(path: impl AsRef<Path>) -> Result<WorldPackZipInspection> {
+        Self::inspect_world_pack_zip_in(LocalRuntimeEnvironment::default_local(), path)
+    }
+
+    pub fn inspect_world_pack_zip_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<WorldPackZipInspection> {
+        inspect_world_pack_zip_at(&env.data_dir, path)
+    }
+
+    pub async fn import_world_pack_zip(path: impl AsRef<Path>) -> Result<Self> {
+        Self::import_world_pack_zip_in(LocalRuntimeEnvironment::default_local(), path).await
+    }
+
+    pub async fn import_world_pack_zip_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let imported_root = import_world_pack_zip_to_dir(&env.data_dir, path)?;
+        Self::select_world_pack_directory_in(env, imported_root).await
     }
 
     pub async fn reset_world_pack_to_default() -> Result<Self> {
@@ -4150,6 +4521,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn world_pack_zip_import_extracts_and_selects_pack() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let zip_path = data.path().join("zip-yuukei.zip");
+        write_world_pack_zip(&zip_path, None, "zip-yuukei", "Zip Yuukei", &[])?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::import_world_pack_zip_in(env, &zip_path).await?;
+
+        assert_eq!(runtime.snapshot()?.world_pack_id, "zip-yuukei");
+        assert_eq!(
+            runtime.world_pack_status().active_install.canonical_root,
+            fs::canonicalize(data.path().join("packs-imported").join("zip-yuukei"))?
+        );
+        assert!(data
+            .path()
+            .join("packs-imported")
+            .join("zip-yuukei")
+            .join("pack.json")
+            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn world_pack_zip_import_accepts_single_top_directory() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let zip_path = data.path().join("top-dir-yuukei.zip");
+        write_world_pack_zip(
+            &zip_path,
+            Some("top-dir"),
+            "top-dir-yuukei",
+            "Top Dir Yuukei",
+            &[],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::import_world_pack_zip_in(env, &zip_path).await?;
+
+        assert_eq!(runtime.snapshot()?.world_pack_id, "top-dir-yuukei");
+        assert!(data
+            .path()
+            .join("packs-imported")
+            .join("top-dir-yuukei")
+            .join("scripts")
+            .join("desktop_reactions.daihon")
+            .exists());
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_zip_slip() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("evil.zip");
+        write_zip_entries(
+            &zip_path,
+            vec![
+                ("../evil", "nope".to_string()),
+                ("pack.json", "{}".to_string()),
+            ],
+        )?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("安全でないパス"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_missing_pack_json() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("missing.zip");
+        write_zip_entries(&zip_path, vec![("README.md", "hello".to_string())])?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("pack.jsonが見つかりません"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_entry_limit() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("too-many.zip");
+        let mut entries = Vec::new();
+        for index in 0..=WORLD_PACK_IMPORT_MAX_ENTRIES {
+            entries.push((format!("files/{index}.txt"), String::new()));
+        }
+        write_zip_owned_entries(&zip_path, entries)?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ファイル数が多すぎます"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_license_text_prefers_license_then_readme_then_none() -> Result<()> {
+        let data = tempdir()?;
+        let with_license = data.path().join("with-license.zip");
+        write_world_pack_zip(
+            &with_license,
+            None,
+            "license-yuukei",
+            "License Yuukei",
+            &[("README.md", "readme text"), ("LICENSE", "license text")],
+        )?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &with_license,
+        )?;
+        assert_eq!(inspection.license_source.as_deref(), Some("LICENSE"));
+        assert_eq!(inspection.license_text.as_deref(), Some("license text"));
+
+        let with_readme = data.path().join("with-readme.zip");
+        write_world_pack_zip(
+            &with_readme,
+            None,
+            "readme-yuukei",
+            "Readme Yuukei",
+            &[("README.md", "readme only")],
+        )?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &with_readme,
+        )?;
+        assert_eq!(inspection.license_source.as_deref(), Some("README.md"));
+        assert_eq!(inspection.license_text.as_deref(), Some("readme only"));
+
+        let without_license = data.path().join("without-license.zip");
+        write_world_pack_zip(&without_license, None, "plain-yuukei", "Plain Yuukei", &[])?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &without_license,
+        )?;
+        assert!(inspection.license_text.is_none());
+        assert!(inspection.license_source.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invalid_saved_external_pack_falls_back_to_default() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;
@@ -5212,6 +5748,101 @@ mod tests {
                 "uiSpace": {}
             }))?,
         )?;
+        Ok(())
+    }
+
+    fn world_pack_zip_entries(
+        top_dir: Option<&str>,
+        id: &str,
+        display_name: &str,
+        extra_root_files: &[(&str, &str)],
+    ) -> Vec<(String, String)> {
+        let prefix = top_dir
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| format!("{dir}/"))
+            .unwrap_or_default();
+        let mut entries = vec![
+            (
+                format!("{prefix}pack.json"),
+                serde_json::to_string_pretty(&json!({
+                    "schemaVersion": 1,
+                    "id": id,
+                    "displayName": display_name,
+                    "defaultActorId": "yuukei",
+                    "actors": [
+                        {
+                            "id": "yuukei",
+                            "displayName": display_name,
+                            "profile": {}
+                        }
+                    ],
+                    "signals": {
+                        "allow": ["conversation.text", "surface.attach"]
+                    },
+                    "capabilities": {
+                        "required": [],
+                        "optional": []
+                    },
+                    "daihon": {
+                        "scripts": ["scripts/desktop_reactions.daihon"]
+                    },
+                    "initialVariables": {},
+                    "uiSpace": {}
+                }))
+                .expect("pack json"),
+            ),
+            (
+                format!("{prefix}scripts/desktop_reactions.daihon"),
+                r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「zipから来ました。」
+"#
+                .to_string(),
+            ),
+        ];
+        for (path, text) in extra_root_files {
+            entries.push((format!("{prefix}{path}"), (*text).to_string()));
+        }
+        entries
+    }
+
+    fn write_world_pack_zip(
+        path: &Path,
+        top_dir: Option<&str>,
+        id: &str,
+        display_name: &str,
+        extra_root_files: &[(&str, &str)],
+    ) -> Result<()> {
+        write_zip_owned_entries(
+            path,
+            world_pack_zip_entries(top_dir, id, display_name, extra_root_files),
+        )
+    }
+
+    fn write_zip_entries(path: &Path, entries: Vec<(&str, String)>) -> Result<()> {
+        write_zip_owned_entries(
+            path,
+            entries
+                .into_iter()
+                .map(|(name, contents)| (name.to_string(), contents))
+                .collect(),
+        )
+    }
+
+    fn write_zip_owned_entries(path: &Path, entries: Vec<(String, String)>) -> Result<()> {
+        let file = File::create(path)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in entries {
+            zip.start_file(name, options)
+                .map_err(world_pack_zip_error)?;
+            zip.write_all(contents.as_bytes())?;
+        }
+        zip.finish().map_err(world_pack_zip_error)?;
         Ok(())
     }
 

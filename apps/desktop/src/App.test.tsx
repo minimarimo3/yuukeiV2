@@ -242,8 +242,21 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(async () => [command("つつかれました", "cmd_4")]),
     openWorldPackDirectory: vi.fn(async () => null),
+    openWorldPackZip: vi.fn(async () => null),
     openExtensionDirectory: vi.fn(async () => null),
     selectWorldPackDirectory: vi.fn(),
+    inspectWorldPackZip: vi.fn(async () => ({
+      packId: "zip-yuukei",
+      displayName: "Zip Yuukei",
+      licenseText: "配布条件です。",
+      licenseSource: "LICENSE",
+      importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
+      replacesExisting: false
+    })),
+    importWorldPackZip: vi.fn(async () => ({
+      status: worldPackStatus("zip-yuukei"),
+      snapshot: snapshot("zipです")
+    })),
     resetWorldPackToDefault: vi.fn(async () => ({
       status: worldPackStatus(),
       snapshot: snapshot("ただいま")
@@ -514,6 +527,49 @@ describe("App", () => {
       );
     });
     expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
+  });
+
+  it("imports a World Pack from zip after license confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture({
+      openWorldPackZip: vi.fn(async () => "/Users/example/zip-yuukei.zip"),
+      inspectWorldPackZip: vi.fn(async () => ({
+        packId: "zip-yuukei",
+        displayName: "Zip Yuukei",
+        licenseText: "このPackの配布条件です。",
+        licenseSource: "LICENSE",
+        importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
+        replacesExisting: true
+      })),
+      importWorldPackZip: vi.fn(async () => ({
+        status: worldPackStatus("zip-yuukei"),
+        snapshot: snapshot("zipです")
+      }))
+    });
+
+    render(<App client={client} />);
+
+    await screen.findByText("Default Yuukei");
+    await userEvent.click(screen.getByRole("button", { name: "zipから読み込む" }));
+
+    await waitFor(() =>
+      expect(client.inspectWorldPackZip).toHaveBeenCalledWith(
+        "/Users/example/zip-yuukei.zip"
+      )
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("このPackの配布条件です。")
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("続行すると置き換えます。")
+    );
+    await waitFor(() =>
+      expect(client.importWorldPackZip).toHaveBeenCalledWith(
+        "/Users/example/zip-yuukei.zip"
+      )
+    );
+    expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("shows World Pack selection errors without replacing the current snapshot", async () => {

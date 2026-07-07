@@ -17,8 +17,8 @@ yuukei-extension = { path = "../yuukei-extension" }
 yuukei-protocol = { path = "../yuukei-protocol" }
 yuukei-resident-home = { path = "../yuukei-resident-home" }
 yuukei-world = { path = "../yuukei-world" }
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 notify.workspace = true
-zip.workspace = true
