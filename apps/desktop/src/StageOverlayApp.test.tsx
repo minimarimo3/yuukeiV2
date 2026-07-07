@@ -176,7 +176,8 @@ describe("StageOverlayApp", () => {
 });
 
 function clientFixture(stage: DesktopStageState): YuukeiClient {
-  return {
+  // StageOverlayが使わないAPIはstub省略し、型はunknown経由でYuukeiClientへ寄せる。
+  const partial: Partial<YuukeiClient> = {
     attachSurface: vi.fn(),
     getSnapshot: vi.fn(),
     getWorldPackStatus: vi.fn(),
@@ -216,6 +217,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined)
   };
+  return partial as unknown as YuukeiClient;
 }
 
 type StageActorFixture = Partial<
