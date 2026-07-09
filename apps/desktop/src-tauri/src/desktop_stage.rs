@@ -700,6 +700,7 @@ fn create_stage_overlay_window(app: &AppHandle, monitor: &StageMonitor) -> Resul
         .focused(false)
         .build()
         .map_err(to_message)?;
+    enforce_borderless(&window);
     window.set_ignore_cursor_events(true).map_err(to_message)?;
     Ok(())
 }
@@ -709,7 +710,7 @@ fn create_actor_window(
     spec: &ActorWindowSpec,
     bounds: &StageRect,
 ) -> Result<(), String> {
-    WebviewWindowBuilder::new(app, &spec.label, actor_window_url(&spec.actor_id))
+    let window = WebviewWindowBuilder::new(app, &spec.label, actor_window_url(&spec.actor_id))
         .title(format!("Yuukei - {}", spec.display_name))
         .inner_size(bounds.width, bounds.height)
         .position(bounds.x, bounds.y)
@@ -722,7 +723,29 @@ fn create_actor_window(
         .focused(false)
         .build()
         .map_err(to_message)?;
+    enforce_borderless(&window);
     Ok(())
+}
+
+/// Drop the native window caption on Windows.
+///
+/// The builder's `decorations(false)` above does not reliably remove the caption
+/// for these runtime-created transparent windows on Windows 11: tao always keeps
+/// the `WS_CAPTION` style and only hides the caption via `WM_NCCALCSIZE` when its
+/// internal decorations flag is off — and for these windows that flag ends up on,
+/// leaving a visible "Yuukei" title bar. Re-asserting `set_decorations(false)` at
+/// runtime flips the flag off and forces a frame recompute, so the bar disappears
+/// and stays gone across later cursor-passthrough / always-on-top updates.
+/// No-op on platforms where the builder already produced a borderless window.
+fn enforce_borderless(window: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        let _ = window.set_decorations(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+    }
 }
 
 fn reconcile_actor_windows(
