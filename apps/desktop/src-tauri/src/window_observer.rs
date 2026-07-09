@@ -218,9 +218,9 @@ mod platform {
 mod platform {
     use std::{ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt};
 
-    use windows::core::Interface;
+    use windows::core::{BOOL, Interface};
     use windows::Win32::{
-        Foundation::{BOOL, HWND, LPARAM, RECT},
+        Foundation::{HWND, LPARAM, RECT},
         Graphics::{
             Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
             Gdi::IsRectEmpty,
