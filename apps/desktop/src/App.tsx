@@ -7,11 +7,17 @@ import {
   type CapabilityUsageState,
   type ExtensionCapabilityUsage,
   type DaihonDiagnosticEntry,
+  type EventLogPage,
+  type EventLogPrivacyCategoryFilter,
+  type EventLogRecord,
   type ExtensionSettingsChangeResult,
   type ExtensionSettingsState,
   type InstalledExtension,
   type MemoryEntryKind,
   type MemoryForgetEntry,
+  type ObservationSettingsState,
+  type ObservationSettingsUpdate,
+  type OnboardingState,
   type ResidentMemoryState,
   type WorldPackSelectionState,
   type YuukeiClient
@@ -21,8 +27,15 @@ type AppProps = {
   client?: YuukeiClient;
 };
 
-type SettingsCategoryId = "app" | "worldPack" | "memories" | "extensions";
+type SettingsCategoryId =
+  | "app"
+  | "worldPack"
+  | "observations"
+  | "eventLog"
+  | "memories"
+  | "extensions";
 const MEMORY_PAGE_SIZE = 50;
+const EVENT_LOG_PAGE_SIZE = 50;
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -40,19 +53,37 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [worldPackStatus, setWorldPackStatus] =
     useState<WorldPackSelectionState | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
+  const [observationSettings, setObservationSettings] =
+    useState<ObservationSettingsState | null>(null);
+  const [onboardingState, setOnboardingState] =
+    useState<OnboardingState | null>(null);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
   const [extensionState, setExtensionState] =
     useState<ExtensionSettingsState | null>(null);
   const [capabilityUsage, setCapabilityUsage] =
     useState<CapabilityUsageState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
+  const [observationSettingsError, setObservationSettingsError] =
+    useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
   const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(null);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [loadingMemories, setLoadingMemories] = useState(false);
+  const [eventLogPage, setEventLogPage] = useState<EventLogPage | null>(null);
+  const [eventLogError, setEventLogError] = useState<string | null>(null);
+  const [loadingEventLog, setLoadingEventLog] = useState(false);
+  const [eventLogKindPrefix, setEventLogKindPrefix] = useState("");
+  const [eventLogPrivacyFilter, setEventLogPrivacyFilter] =
+    useState<EventLogPrivacyCategoryFilter>("all");
+  const [eventLogDeleteBefore, setEventLogDeleteBefore] = useState("");
+  const [eventLogDeletePrefix, setEventLogDeletePrefix] = useState("");
   const [editingFactId, setEditingFactId] = useState<string | null>(null);
   const [editingFactText, setEditingFactText] = useState("");
   const [switchingPack, setSwitchingPack] = useState(false);
+  const [changingObservationSettings, setChangingObservationSettings] =
+    useState(false);
   const [changingExtensions, setChangingExtensions] = useState(false);
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
     useState(false);
@@ -66,6 +97,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         unlisteners.push(await client.onAssetsChanged(() => {
           void refreshSettings();
           void loadMemories();
+          void loadEventLog();
         }));
         unlisteners.push(
           await client.onWorldPackStatus((nextWorldPackStatus) => {
@@ -73,10 +105,19 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               setWorldPackStatus(nextWorldPackStatus);
             }
             void loadMemories();
+            void loadEventLog();
+          })
+        );
+        unlisteners.push(
+          await client.onOnboardingDismissed(() => {
+            if (!disposed) {
+              setOnboardingDismissed(true);
+            }
           })
         );
         await refreshSettings();
         await loadMemories();
+        await loadEventLog();
         if (!disposed) {
           setStatus("ready");
         }
@@ -91,18 +132,24 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const [
         nextWorldPackStatus,
         nextAppSettings,
+        nextObservationSettings,
+        nextOnboardingState,
         nextExtensionState,
         nextCapabilityUsage
       ] =
         await Promise.all([
           client.getWorldPackStatus(),
           client.getAppSettings(),
+          client.getObservationSettings(),
+          client.getOnboardingState(),
           client.getExtensionSettings(),
           client.getCapabilityUsage()
         ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
         setAppSettings(nextAppSettings);
+        setObservationSettings(nextObservationSettings);
+        setOnboardingState(nextOnboardingState);
         setExtensionState(nextExtensionState);
         setCapabilityUsage(nextCapabilityUsage);
       }
@@ -154,6 +201,34 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function loadEventLog(beforeSequence?: number, append = false) {
+    setLoadingEventLog(true);
+    try {
+      const next = await client.readEventLogPage(
+        eventLogKindPrefix.trim() || undefined,
+        eventLogPrivacyFilter,
+        beforeSequence,
+        EVENT_LOG_PAGE_SIZE
+      );
+      setEventLogError(null);
+      setEventLogPage((current) =>
+        append && current
+          ? {
+              ...next,
+              records: [...current.records, ...next.records]
+            }
+          : next
+      );
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+      if (!append) {
+        setEventLogPage(null);
+      }
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
   async function chooseWorldPack() {
     setWorldPackError(null);
     setSwitchingPack(true);
@@ -161,6 +236,39 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const path = await client.openWorldPackDirectory();
       if (!path) return;
       const result = await client.selectWorldPackDirectory(path);
+      setWorldPackStatus(result.status);
+      setStatus("ready");
+      void loadMemories();
+    } catch (error) {
+      setWorldPackError(error instanceof Error ? error.message : String(error));
+      try {
+        setWorldPackStatus(await client.getWorldPackStatus());
+      } catch {
+        // The Tauri event path normally refreshes this; the direct refresh is best effort.
+      }
+    } finally {
+      setSwitchingPack(false);
+    }
+  }
+
+  async function importWorldPackZip() {
+    setWorldPackError(null);
+    setSwitchingPack(true);
+    try {
+      const path = await client.openWorldPackZip();
+      if (!path) return;
+      const inspection = await client.inspectWorldPackZip(path);
+      const licenseText =
+        inspection.licenseText?.trim() ||
+        "ライセンス表記が見つかりませんでした。配布元の条件を確認してください。";
+      const replaceNotice = inspection.replacesExisting
+        ? "\n\n同じpackIdのインポート済みPackがあります。続行すると置き換えます。"
+        : "";
+      const confirmed = window.confirm(
+        `このWorld Packの配布条件\n\n${inspection.displayName} (${inspection.packId})\n${inspection.licenseSource ?? "ライセンス表記なし"}\n\n${licenseText}${replaceNotice}\n\nこのWorld Packを読み込みますか？`
+      );
+      if (!confirmed) return;
+      const result = await client.importWorldPackZip(path);
       setWorldPackStatus(result.status);
       setStatus("ready");
       void loadMemories();
@@ -235,6 +343,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function restartExtensionProcess(extensionId: string) {
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      setExtensionState(await client.restartExtensionProcess(extensionId));
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
   async function moveExtension(extensionId: string, direction: -1 | 1) {
     if (!extensionState) return;
     const currentOrder = orderedBeforeCommandEmitExtensions.map(
@@ -281,6 +401,42 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     } catch (error) {
       setAppSettingsError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function toggleObservationSetting(
+    key: keyof ObservationSettingsUpdate,
+    enabled: boolean
+  ) {
+    const current =
+      observationSettings ??
+      ({
+        windows: false,
+        folders: false,
+        downloads: false
+      } satisfies ObservationSettingsUpdate);
+    const next: ObservationSettingsUpdate = {
+      windows: current.windows,
+      folders: current.folders,
+      downloads: current.downloads,
+      [key]: enabled
+    };
+    setObservationSettingsError(null);
+    setChangingObservationSettings(true);
+    try {
+      setObservationSettings(await client.setObservationSettings(next));
+    } catch (error) {
+      setObservationSettingsError(
+        error instanceof Error ? error.message : String(error)
+      );
+    } finally {
+      setChangingObservationSettings(false);
+    }
+  }
+
+  async function completeOnboarding() {
+    setOnboardingState(await client.completeOnboarding());
+    setOnboardingStep(0);
+    setActiveSettingsCategoryId("worldPack");
   }
 
   function beginFactEdit(id: string, text: string) {
@@ -346,6 +502,66 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   async function loadMoreEpisodes() {
     await loadMemories(memoryState?.episodes.length ?? 0, true);
+  }
+
+  async function deleteEventLogBefore() {
+    if (!eventLogDeleteBefore) {
+      setEventLogError("日時を指定してください。");
+      return;
+    }
+    const timestamp = new Date(eventLogDeleteBefore).toISOString();
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteBefore(timestamp);
+      if (!confirmEventLogDeletion(`${timestamp}より前`, count)) return;
+      await client.deleteEventLogBefore(timestamp);
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  async function deleteEventLogByKindPrefix() {
+    const prefix = eventLogDeletePrefix.trim();
+    if (!prefix) {
+      setEventLogError("種類の前方一致を入力してください。");
+      return;
+    }
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteByKindPrefix(prefix);
+      if (!confirmEventLogDeletion(`種類が「${prefix}」で始まる記録`, count)) {
+        return;
+      }
+      await client.deleteEventLogByKindPrefix(prefix);
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  async function deleteAllEventLog() {
+    setLoadingEventLog(true);
+    try {
+      const count = await client.countEventLogDeleteAll();
+      if (!confirmEventLogDeletion("すべての生活の記録", count)) return;
+      await client.deleteEventLogAll();
+      await loadEventLog();
+    } catch (error) {
+      setEventLogError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingEventLog(false);
+    }
+  }
+
+  function confirmEventLogDeletion(label: string, count: number) {
+    return window.confirm(
+      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\n住人の記憶(要約)には残っている場合があります。記憶は『記憶』タブから個別に忘れさせられます。\n\n続けますか？`
+    );
   }
 
   const settingsCategories: SettingsCategory[] = [
@@ -429,6 +645,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <button
               type="button"
               className="secondary-button"
+              onClick={importWorldPackZip}
+              disabled={switchingPack}
+            >
+              zipから読み込む
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
               onClick={resetWorldPack}
               disabled={switchingPack}
             >
@@ -436,6 +660,77 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
+      )
+    },
+    {
+      id: "observations",
+      label: "観測",
+      ariaLabel: "Observation and privacy settings",
+      panelId: "settings-observations-panel",
+      content: (
+        <div className="settings-copy observation-settings">
+          <h2>観測とプライバシー</h2>
+          <p className="settings-title">Desktop Terrain Observation</p>
+          <p className="settings-path">
+            {observationSettings?.settingsPath ?? ""}
+          </p>
+          {observationSettingsError ? (
+            <p className="settings-error">{observationSettingsError}</p>
+          ) : null}
+          <ObservationToggle
+            label="ウィンドウ"
+            description="アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+            checked={observationSettings?.windows ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) => toggleObservationSetting("windows", checked)}
+          />
+          <ObservationToggle
+            label="フォルダ"
+            description="開いた場所の種類だけを記録します(パスは記録しません)"
+            checked={observationSettings?.folders ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) => toggleObservationSetting("folders", checked)}
+          />
+          <ObservationToggle
+            label="ダウンロード"
+            description="ファイル名と種類を記録します(場所は記録しません)"
+            checked={observationSettings?.downloads ?? false}
+            disabled={changingObservationSettings}
+            onChange={(checked) =>
+              toggleObservationSetting("downloads", checked)
+            }
+          />
+        </div>
+      )
+    },
+    {
+      id: "eventLog",
+      label: "生活の記録",
+      ariaLabel: "生活の記録 settings",
+      panelId: "settings-event-log-panel",
+      panelClassName: "memory-panel",
+      content: (
+        <EventLogSettingsPanel
+          page={eventLogPage}
+          error={eventLogError}
+          loading={loadingEventLog}
+          kindPrefix={eventLogKindPrefix}
+          privacyFilter={eventLogPrivacyFilter}
+          deleteBefore={eventLogDeleteBefore}
+          deletePrefix={eventLogDeletePrefix}
+          onKindPrefixChange={setEventLogKindPrefix}
+          onPrivacyFilterChange={setEventLogPrivacyFilter}
+          onDeleteBeforeChange={setEventLogDeleteBefore}
+          onDeletePrefixChange={setEventLogDeletePrefix}
+          onApplyFilters={() => void loadEventLog()}
+          onLoadMore={() =>
+            void loadEventLog(eventLogPage?.nextCursor ?? undefined, true)
+          }
+          onRefresh={() => void loadEventLog()}
+          onDeleteBefore={() => void deleteEventLogBefore()}
+          onDeletePrefix={() => void deleteEventLogByKindPrefix()}
+          onDeleteAll={() => void deleteAllEventLog()}
+        />
       )
     },
     {
@@ -523,6 +818,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         <span>
                           <strong>{extension.displayName}</strong>
                           <small>{extension.extensionId}</small>
+                          <small
+                            className={[
+                              "extension-runtime-status",
+                              extension.runtimeStatus?.suspended
+                                ? "is-suspended"
+                                : ""
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                          >
+                            {extensionRuntimeStatusLabel(extension)}
+                          </small>
                         </span>
                       </label>
                       {permissionRows.length > 0 ? (
@@ -586,6 +893,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         type="button"
                         className="secondary-button compact-button"
                         disabled={changingExtensions}
+                        onClick={() =>
+                          restartExtensionProcess(extension.extensionId)
+                        }
+                      >
+                        再起動
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button compact-button"
+                        disabled={changingExtensions}
                         onClick={() => uninstallExtension(extension.extensionId)}
                       >
                         削除
@@ -621,6 +938,39 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     settingsCategories.find(
       (category) => category.id === activeSettingsCategoryId
     ) ?? settingsCategories[0];
+  const intelligenceExtension = orderedExtensions.find(
+    (extension) => extension.extensionId === "yuukei-intelligence"
+  );
+  const showOnboarding =
+    !!onboardingState && !onboardingState.completed && !onboardingDismissed;
+
+  if (showOnboarding) {
+    return (
+      <main
+        className="surface-shell settings-shell onboarding-shell"
+        data-status={status}
+      >
+        <OnboardingFlow
+          step={onboardingStep}
+          worldPackStatus={worldPackStatus}
+          worldPackError={worldPackError}
+          switchingPack={switchingPack}
+          onChooseWorldPack={chooseWorldPack}
+          extension={intelligenceExtension}
+          client={client}
+          changingExtensions={changingExtensions}
+          onExtensionResult={applyExtensionResult}
+          observationSettings={observationSettings}
+          observationSettingsError={observationSettingsError}
+          changingObservationSettings={changingObservationSettings}
+          onToggleObservation={toggleObservationSetting}
+          onStepChange={setOnboardingStep}
+          onDismiss={() => setOnboardingDismissed(true)}
+          onComplete={() => void completeOnboarding()}
+        />
+      </main>
+    );
+  }
 
   return (
     <main className="surface-shell settings-shell" data-status={status}>
@@ -677,6 +1027,420 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         </div>
       </section>
     </main>
+  );
+}
+
+type OnboardingFlowProps = {
+  step: number;
+  worldPackStatus: WorldPackSelectionState | null;
+  worldPackError: string | null;
+  switchingPack: boolean;
+  onChooseWorldPack: () => void;
+  extension?: InstalledExtension;
+  client: YuukeiClient;
+  changingExtensions: boolean;
+  onExtensionResult: (result: ExtensionSettingsChangeResult) => void;
+  observationSettings: ObservationSettingsState | null;
+  observationSettingsError: string | null;
+  changingObservationSettings: boolean;
+  onToggleObservation: (
+    key: keyof ObservationSettingsUpdate,
+    enabled: boolean
+  ) => void;
+  onStepChange: (step: number) => void;
+  onDismiss: () => void;
+  onComplete: () => void;
+};
+
+function OnboardingFlow({
+  step,
+  worldPackStatus,
+  worldPackError,
+  switchingPack,
+  onChooseWorldPack,
+  extension,
+  client,
+  changingExtensions,
+  onExtensionResult,
+  observationSettings,
+  observationSettingsError,
+  changingObservationSettings,
+  onToggleObservation,
+  onStepChange,
+  onDismiss,
+  onComplete
+}: OnboardingFlowProps) {
+  const clampedStep = Math.max(0, Math.min(step, 3));
+  return (
+    <section className="onboarding-flow" aria-label="初回設定">
+      <header className="onboarding-header">
+        <div>
+          <p className="settings-eyebrow">はじめまして</p>
+          <h1>Yuukeiを始める</h1>
+        </div>
+        <button type="button" className="secondary-button" onClick={onDismiss}>
+          あとで
+        </button>
+      </header>
+      <div className="onboarding-progress" aria-label="オンボーディングの進行">
+        {["ようこそ", "AI", "観測", "完了"].map((label, index) => (
+          <span
+            className={[
+              "onboarding-progress-step",
+              index === clampedStep ? "is-active" : ""
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            key={label}
+          >
+            {label}
+          </span>
+        ))}
+      </div>
+      <div className="onboarding-panel">
+        {clampedStep === 0 ? (
+          <>
+            <div className="settings-copy">
+              <h2>ようこそ</h2>
+              <p className="settings-title">
+                この子はあなたのデバイスに住みます。
+              </p>
+              <p className="settings-note">
+                World Packが、住人の世界観や台本、暮らし方を決めます。
+              </p>
+              <p className="settings-title">
+                {worldPackStatus?.activeInstall.displayName ?? "読み込み中"}
+              </p>
+              <p className="settings-path">
+                {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
+              </p>
+              {worldPackError ? (
+                <p className="settings-error">{worldPackError}</p>
+              ) : null}
+            </div>
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onChooseWorldPack}
+                disabled={switchingPack}
+              >
+                別のWorld Packを選ぶ
+              </button>
+              <button type="button" onClick={() => onStepChange(1)}>
+                次へ
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {clampedStep === 1 ? (
+          <>
+            <div className="settings-copy onboarding-ai-step">
+              <h2>AI(ことば)の設定</h2>
+              <p className="settings-title">
+                AIがなくても、台本で毎日の生活は動きます。あとから設定画面で変えられます。
+              </p>
+              {extension?.settingsSchema ? (
+                <ExtensionSettingsForm
+                  extension={extension}
+                  client={client}
+                  disabled={changingExtensions}
+                  onResult={onExtensionResult}
+                />
+              ) : (
+                <p className="settings-note">
+                  yuukei-intelligence拡張が見つからないため、このまま進めます。
+                </p>
+              )}
+            </div>
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onStepChange(0)}
+              >
+                戻る
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onStepChange(2)}
+              >
+                AIなしで始める
+              </button>
+              <button type="button" onClick={() => onStepChange(2)}>
+                次へ
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {clampedStep === 2 ? (
+          <>
+            <div className="settings-copy observation-settings">
+              <h2>観測とプライバシー</h2>
+              <p className="settings-title">
+                ONにした観測だけを記録します。どれもあとから設定で変えられます。
+              </p>
+              {observationSettingsError ? (
+                <p className="settings-error">{observationSettingsError}</p>
+              ) : null}
+              <ObservationToggle
+                label="ウィンドウ"
+                description="アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+                checked={observationSettings?.windows ?? false}
+                disabled={changingObservationSettings}
+                onChange={(checked) => onToggleObservation("windows", checked)}
+              />
+              <ObservationToggle
+                label="フォルダ"
+                description="開いた場所の種類だけを記録します(パスは記録しません)"
+                checked={observationSettings?.folders ?? false}
+                disabled={changingObservationSettings}
+                onChange={(checked) => onToggleObservation("folders", checked)}
+              />
+              <ObservationToggle
+                label="ダウンロード"
+                description="ファイル名と種類を記録します(場所は記録しません)"
+                checked={observationSettings?.downloads ?? false}
+                disabled={changingObservationSettings}
+                onChange={(checked) => onToggleObservation("downloads", checked)}
+              />
+            </div>
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onStepChange(1)}
+              >
+                戻る
+              </button>
+              <button type="button" onClick={() => onStepChange(3)}>
+                次へ
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {clampedStep === 3 ? (
+          <>
+            <div className="settings-copy">
+              <h2>完了</h2>
+              <p className="settings-title">いってらっしゃい。</p>
+              <p className="settings-note">
+                今日から、このデバイスで一緒の生活が始まります。
+              </p>
+            </div>
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => onStepChange(2)}
+              >
+                戻る
+              </button>
+              <button type="button" onClick={onComplete}>
+                完了して始める
+              </button>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+type ObservationToggleProps = {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+};
+
+function ObservationToggle({
+  label,
+  description,
+  checked,
+  disabled,
+  onChange
+}: ObservationToggleProps) {
+  return (
+    <label className="extension-toggle observation-toggle">
+      <input
+        type="checkbox"
+        aria-label={label}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+    </label>
+  );
+}
+
+type EventLogSettingsPanelProps = {
+  page: EventLogPage | null;
+  error: string | null;
+  loading: boolean;
+  kindPrefix: string;
+  privacyFilter: EventLogPrivacyCategoryFilter;
+  deleteBefore: string;
+  deletePrefix: string;
+  onKindPrefixChange: (value: string) => void;
+  onPrivacyFilterChange: (value: EventLogPrivacyCategoryFilter) => void;
+  onDeleteBeforeChange: (value: string) => void;
+  onDeletePrefixChange: (value: string) => void;
+  onApplyFilters: () => void;
+  onLoadMore: () => void;
+  onRefresh: () => void;
+  onDeleteBefore: () => void;
+  onDeletePrefix: () => void;
+  onDeleteAll: () => void;
+};
+
+function EventLogSettingsPanel({
+  page,
+  error,
+  loading,
+  kindPrefix,
+  privacyFilter,
+  deleteBefore,
+  deletePrefix,
+  onKindPrefixChange,
+  onPrivacyFilterChange,
+  onDeleteBeforeChange,
+  onDeletePrefixChange,
+  onApplyFilters,
+  onLoadMore,
+  onRefresh,
+  onDeleteBefore,
+  onDeletePrefix,
+  onDeleteAll
+}: EventLogSettingsPanelProps) {
+  const records = page?.records ?? [];
+  return (
+    <>
+      <div className="memory-copy event-log-copy">
+        <section className="memory-section">
+          <div className="memory-section-head">
+            <div>
+              <h3>生活の記録</h3>
+              <p className="settings-note">
+                保存されているイベントの種類と内容を確認できます。
+              </p>
+            </div>
+            <span>{page ? `${records.length} / ${page.total}` : "loading"}</span>
+          </div>
+          {error ? <p className="settings-error">{error}</p> : null}
+          <div className="event-log-filters">
+            <label>
+              <span>種類</span>
+              <input
+                type="text"
+                value={kindPrefix}
+                placeholder="desktop."
+                onChange={(event) => onKindPrefixChange(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              <span>privacy</span>
+              <select
+                value={privacyFilter}
+                onChange={(event) =>
+                  onPrivacyFilterChange(
+                    event.currentTarget.value as EventLogPrivacyCategoryFilter
+                  )
+                }
+              >
+                <option value="all">すべて</option>
+                <option value="desktopObservation">desktop-observation</option>
+                <option value="none">なし</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              className="secondary-button compact-button"
+              disabled={loading}
+              onClick={onApplyFilters}
+            >
+              適用
+            </button>
+          </div>
+          <div className="memory-list event-log-list">
+            {records.map((record) => (
+              <article className="memory-row event-log-row" key={record.id}>
+                <div className="memory-text">
+                  <p>{eventLogSummary(record)}</p>
+                  <small>
+                    {formatEventLogTimestamp(record.timestamp)} / {record.kind} /{" "}
+                    {record.privacy?.category ?? "privacyなし"}
+                  </small>
+                </div>
+              </article>
+            ))}
+            {records.length === 0 ? (
+              <p className="settings-note">表示できる記録はありません。</p>
+            ) : null}
+          </div>
+          {page?.nextCursor ? (
+            <button
+              type="button"
+              className="secondary-button memory-more-button"
+              disabled={loading}
+              onClick={onLoadMore}
+            >
+              もっと見る
+            </button>
+          ) : null}
+        </section>
+        <section className="memory-section event-log-delete">
+          <div className="memory-section-head">
+            <h3>削除</h3>
+          </div>
+          <label>
+            <span>この日時より前</span>
+            <input
+              type="datetime-local"
+              value={deleteBefore}
+              onChange={(event) => onDeleteBeforeChange(event.currentTarget.value)}
+            />
+            <button type="button" disabled={loading} onClick={onDeleteBefore}>
+              期間指定で削除
+            </button>
+          </label>
+          <label>
+            <span>種類の前方一致</span>
+            <input
+              type="text"
+              value={deletePrefix}
+              placeholder="desktop."
+              onChange={(event) => onDeletePrefixChange(event.currentTarget.value)}
+            />
+            <button type="button" disabled={loading} onClick={onDeletePrefix}>
+              種類指定で削除
+            </button>
+          </label>
+        </section>
+      </div>
+      <div className="settings-actions memory-panel-actions">
+        <button type="button" onClick={onRefresh} disabled={loading}>
+          更新
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onDeleteAll}
+          disabled={loading}
+        >
+          全削除
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -1307,6 +2071,17 @@ function subscribesToBeforeCommandEmit(extension: InstalledExtension): boolean {
   return extension.hooks.some((hook) => hook.hookPoint === "beforeCommandEmit");
 }
 
+function extensionRuntimeStatusLabel(extension: InstalledExtension): string {
+  if (!extension.enabled) return "状態: 無効";
+  const status = extension.runtimeStatus;
+  if (!status) return "状態: 正常";
+  if (status.suspended) return "状態: 休止";
+  if (status.health === "degraded") {
+    return `状態: 注意 (${status.failureCount})`;
+  }
+  return "状態: 正常";
+}
+
 function memoryErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/memory\.|capability|extension|provider/i.test(message)) {
@@ -1328,6 +2103,38 @@ function formatMemoryTimestamp(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function formatEventLogTimestamp(value: string): string {
+  return formatMemoryTimestamp(value);
+}
+
+function eventLogSummary(record: EventLogRecord): string {
+  const payload = record.payload ?? {};
+  const preferredKeys = [
+    "text",
+    "fileName",
+    "choice",
+    "category",
+    "app",
+    "windowKey",
+    "reason",
+    "deleted"
+  ];
+  for (const key of preferredKeys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return `${key}: ${value}`;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      return `${key}: ${String(value)}`;
+    }
+  }
+  const json = JSON.stringify(payload);
+  if (!json || json === "{}") {
+    return "(payloadなし)";
+  }
+  return json.length > 120 ? `${json.slice(0, 117)}...` : json;
 }
 
 type ExtensionPermissionRow = {

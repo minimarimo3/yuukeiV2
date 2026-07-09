@@ -51,6 +51,9 @@ export function StageOverlayApp({
   const [interactingBubbleIds, setInteractingBubbleIds] = useState<Set<string>>(
     () => new Set()
   );
+  const [hiddenChoiceIds, setHiddenChoiceIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [deferUntil, setDeferUntil] = useState<Record<string, number>>({});
   const [, setTimerTick] = useState(0);
 
@@ -141,6 +144,13 @@ export function StageOverlayApp({
           <StageBubbleView
             item={item}
             key={item.bubble.bubbleId}
+            hiddenChoiceIds={hiddenChoiceIds}
+            onChoiceSelect={(choiceId, choice, index) => {
+              setHiddenChoiceIds((current) => new Set(current).add(choiceId));
+              void client.sendConversationChoice(choiceId, choice, index).catch((error) => {
+                console.warn("Failed to send conversation choice", error);
+              });
+            }}
             onBlur={() => {
               setBubbleInteracting(item.bubble.bubbleId, false);
               deferBubble(item.bubble.bubbleId, 1200);
@@ -169,8 +179,10 @@ export function stageOverlayIdFromLocation(
 }
 
 function StageBubbleView({
+  hiddenChoiceIds,
   item,
   onBlur,
+  onChoiceSelect,
   onFocus,
   onMouseEnter,
   onMouseLeave,
@@ -178,8 +190,10 @@ function StageBubbleView({
   onSizeChange,
   onWheel
 }: {
+  hiddenChoiceIds: Set<string>;
   item: StageBubbleRenderItem;
   onBlur(): void;
+  onChoiceSelect(choiceId: string, choice: string, index: number): void;
   onFocus(): void;
   onMouseEnter(): void;
   onMouseLeave(): void;
@@ -188,6 +202,9 @@ function StageBubbleView({
   onWheel(): void;
 }) {
   const { ref } = useMeasuredBubbleSize(item.bubble.bubbleId, onSizeChange);
+  const choice = item.bubble.choice;
+  const visibleChoices =
+    choice && !hiddenChoiceIds.has(choice.choiceId) ? choice.choices : [];
   const sideClass =
     item.placement.side === "left"
       ? "actor-bubble--left"
@@ -211,7 +228,7 @@ function StageBubbleView({
   } as CSSProperties;
 
   return (
-    <p
+    <div
       className={className}
       data-actor-id={item.actor.actorId}
       data-stage-solid="true"
@@ -226,8 +243,27 @@ function StageBubbleView({
       tabIndex={0}
     >
       <span className="actor-bubble-tail" aria-hidden="true" />
-      <span className="actor-bubble-content">{item.bubble.text}</span>
-    </p>
+      {item.bubble.text ? (
+        <span className="actor-bubble-content">{item.bubble.text}</span>
+      ) : null}
+      {choice && visibleChoices.length > 0 ? (
+        <span className="actor-bubble-choices">
+          {visibleChoices.map((label, index) => (
+            <button
+              className="actor-bubble-choice"
+              key={`${choice.choiceId}:${index}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onChoiceSelect(choice.choiceId, label, index);
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
@@ -235,7 +271,7 @@ function useMeasuredBubbleSize(
   bubbleId: string,
   onSizeChange: (bubbleId: string, size: StageBubbleSize) => void
 ) {
-  const ref = useRef<HTMLParagraphElement | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
     const element = ref.current;

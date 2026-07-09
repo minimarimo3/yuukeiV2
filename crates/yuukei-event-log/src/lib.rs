@@ -9,6 +9,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use yuukei_protocol::{EventLogRecord, NewEventLogRecord, Privacy};
 
+pub const DEFAULT_MAX_EVENT_LOG_RECORDS: usize = 1_000_000;
+pub const DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR: usize = 10;
+
 #[derive(Debug, Error)]
 pub enum EventLogError {
     #[error("event log record already exists: {0}")]
@@ -39,6 +42,22 @@ pub struct EventLogQuery {
     pub extension_readable_only: bool,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EventLogAdminQuery {
+    pub kind_prefix: Option<String>,
+    pub privacy_category: EventLogPrivacyFilter,
+    pub before_sequence: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum EventLogPrivacyFilter {
+    #[default]
+    All,
+    Category(String),
+    None,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventLogPage {
     pub records: Vec<EventLogRecord>,
@@ -56,6 +75,20 @@ pub struct DeleteSelector {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteSummary {
     pub deleted: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrimSummary {
+    pub deleted: usize,
+    pub oldest_timestamp: Option<String>,
+    pub newest_timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EventLogDeleteSelector {
+    BeforeTimestamp(String),
+    KindPrefix(String),
+    All,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,6 +251,30 @@ impl EventLog {
         })
     }
 
+    pub fn read_newest(&self, query: EventLogAdminQuery) -> Result<EventLogPage> {
+        let mut records = self.read(EventLogQuery::default())?.records;
+        records.retain(|record| matches_admin_query(record, &query));
+        records.reverse();
+        let next_cursor = if let Some(limit) = query.limit {
+            if records.len() > limit {
+                records
+                    .get(limit.saturating_sub(1))
+                    .map(|record| record.sequence)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(limit) = query.limit {
+            records.truncate(limit);
+        }
+        Ok(EventLogPage {
+            records,
+            next_cursor,
+        })
+    }
+
     pub fn export_jsonl(
         &self,
         query: EventLogQuery,
@@ -264,6 +321,104 @@ impl EventLog {
             )?;
         }
         Ok(DeleteSummary { deleted })
+    }
+
+    pub fn count_delete(&self, selector: EventLogDeleteSelector) -> Result<usize> {
+        Ok(self.records_matching_delete(selector)?.len())
+    }
+
+    pub fn delete_before(&self, timestamp: impl AsRef<str>) -> Result<DeleteSummary> {
+        self.delete_matching(EventLogDeleteSelector::BeforeTimestamp(
+            timestamp.as_ref().to_string(),
+        ))
+    }
+
+    pub fn delete_by_kind_prefix(&self, prefix: impl AsRef<str>) -> Result<DeleteSummary> {
+        self.delete_matching(EventLogDeleteSelector::KindPrefix(
+            prefix.as_ref().to_string(),
+        ))
+    }
+
+    pub fn delete_all(&self) -> Result<DeleteSummary> {
+        self.delete_matching(EventLogDeleteSelector::All)
+    }
+
+    pub fn delete_with_audit(
+        &self,
+        selector: EventLogDeleteSelector,
+        audit_record: NewEventLogRecord,
+    ) -> Result<DeleteSummary> {
+        let summary = self.delete_matching(selector)?;
+        self.append(audit_record)?;
+        Ok(summary)
+    }
+
+    pub fn trim_to_record_limit(
+        &self,
+        max_records: usize,
+        fraction_divisor: usize,
+    ) -> Result<TrimSummary> {
+        let records = self.read(EventLogQuery::default())?.records;
+        if records.len() <= max_records {
+            return Ok(TrimSummary {
+                deleted: 0,
+                oldest_timestamp: None,
+                newest_timestamp: None,
+            });
+        }
+        let delete_count = (max_records / fraction_divisor.max(1)).max(1);
+        let matching = records.into_iter().take(delete_count).collect::<Vec<_>>();
+        let oldest_timestamp = matching.first().map(|record| record.timestamp.clone());
+        let newest_timestamp = matching.last().map(|record| record.timestamp.clone());
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let mut deleted = 0;
+        for record in matching {
+            deleted += connection.execute(
+                "DELETE FROM event_log_records WHERE sequence = ?1",
+                params![record.sequence],
+            )?;
+        }
+        Ok(TrimSummary {
+            deleted,
+            oldest_timestamp,
+            newest_timestamp,
+        })
+    }
+
+    fn delete_matching(&self, selector: EventLogDeleteSelector) -> Result<DeleteSummary> {
+        let matching = self.records_matching_delete(selector)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let mut deleted = 0;
+        for record in matching {
+            deleted += connection.execute(
+                "DELETE FROM event_log_records WHERE sequence = ?1",
+                params![record.sequence],
+            )?;
+        }
+        Ok(DeleteSummary { deleted })
+    }
+
+    fn records_matching_delete(
+        &self,
+        selector: EventLogDeleteSelector,
+    ) -> Result<Vec<EventLogRecord>> {
+        let records = self.read(EventLogQuery::default())?.records;
+        Ok(records
+            .into_iter()
+            .filter(|record| match &selector {
+                EventLogDeleteSelector::BeforeTimestamp(timestamp) => {
+                    record.timestamp.as_str() < timestamp.as_str()
+                }
+                EventLogDeleteSelector::KindPrefix(prefix) => record.kind.starts_with(prefix),
+                EventLogDeleteSelector::All => true,
+            })
+            .collect())
     }
 }
 
@@ -329,6 +484,40 @@ fn matches_query(record: &EventLogRecord, query: &EventLogQuery) -> bool {
     }
     if query.extension_readable_only && !extension_readable(record.privacy.as_ref()) {
         return false;
+    }
+    true
+}
+
+fn matches_admin_query(record: &EventLogRecord, query: &EventLogAdminQuery) -> bool {
+    if query
+        .kind_prefix
+        .as_ref()
+        .is_some_and(|prefix| !record.kind.starts_with(prefix))
+    {
+        return false;
+    }
+    if query
+        .before_sequence
+        .is_some_and(|sequence| record.sequence >= sequence)
+    {
+        return false;
+    }
+    match &query.privacy_category {
+        EventLogPrivacyFilter::All => {}
+        EventLogPrivacyFilter::Category(category) => {
+            if record
+                .privacy
+                .as_ref()
+                .is_none_or(|privacy| privacy.category != *category)
+            {
+                return false;
+            }
+        }
+        EventLogPrivacyFilter::None => {
+            if record.privacy.is_some() {
+                return false;
+            }
+        }
     }
     true
 }
@@ -439,6 +628,128 @@ mod tests {
         })?;
         assert_eq!(deleted.deleted, 1);
         assert_eq!(log.read(EventLogQuery::default())?.records.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn read_newest_pages_and_filters_by_kind_prefix_and_privacy() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_1", "conversation.text"))?;
+        let mut observed = record("evt_2", "desktop.window.appeared");
+        observed.privacy = Some(Privacy {
+            category: "desktop-observation".to_string(),
+            retention: RetentionPolicy::Short,
+            extension_readable: false,
+        });
+        log.append(observed)?;
+        log.append(record("evt_3", "desktop.download.completed"))?;
+
+        let page = log.read_newest(EventLogAdminQuery {
+            kind_prefix: Some("desktop.".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        })?;
+        assert_eq!(page.records[0].id, "evt_3");
+        assert_eq!(page.next_cursor, Some(3));
+
+        let next = log.read_newest(EventLogAdminQuery {
+            kind_prefix: Some("desktop.".to_string()),
+            before_sequence: page.next_cursor,
+            limit: Some(10),
+            ..Default::default()
+        })?;
+        assert_eq!(next.records[0].id, "evt_2");
+
+        let private = log.read_newest(EventLogAdminQuery {
+            privacy_category: EventLogPrivacyFilter::Category("desktop-observation".to_string()),
+            ..Default::default()
+        })?;
+        assert_eq!(private.records.len(), 1);
+        assert_eq!(private.records[0].id, "evt_2");
+
+        let none = log.read_newest(EventLogAdminQuery {
+            privacy_category: EventLogPrivacyFilter::None,
+            ..Default::default()
+        })?;
+        assert_eq!(
+            none.records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_3", "evt_1"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_before_kind_prefix_all_and_audit_keep_sequence_increasing() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        let mut old = record("evt_old", "conversation.text");
+        old.timestamp = "2026-07-01T00:00:00.000Z".to_string();
+        log.append(old)?;
+        let mut recent = record("evt_recent", "desktop.window.appeared");
+        recent.timestamp = "2026-07-08T00:00:00.000Z".to_string();
+        log.append(recent)?;
+        log.append(record("evt_dialogue", "dialogue.say"))?;
+
+        assert_eq!(
+            log.count_delete(EventLogDeleteSelector::BeforeTimestamp(
+                "2026-07-02T00:00:00.000Z".to_string()
+            ))?,
+            1
+        );
+        assert_eq!(
+            log.delete_before("2026-07-02T00:00:00.000Z")?,
+            DeleteSummary { deleted: 1 }
+        );
+        assert_eq!(
+            log.delete_by_kind_prefix("desktop.")?,
+            DeleteSummary { deleted: 1 }
+        );
+        let mut audit = record("evt_audit", "event_log.deleted");
+        audit.payload = JsonMap::from([("deleted".to_string(), json!(1))]);
+        assert_eq!(
+            log.delete_with_audit(EventLogDeleteSelector::All, audit)?,
+            DeleteSummary { deleted: 1 }
+        );
+
+        let appended = log.append(record("evt_after_delete", "conversation.text"))?;
+        assert_eq!(appended.sequence, 5);
+        let records = log.read(EventLogQuery::default())?.records;
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event_log.deleted", "conversation.text"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trim_to_record_limit_removes_oldest_fraction() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        for index in 0..12 {
+            let mut event = record(&format!("evt_{index}"), "conversation.text");
+            event.timestamp = format!("2026-07-{day:02}T00:00:00.000Z", day = index + 1);
+            log.append(event)?;
+        }
+
+        let summary = log.trim_to_record_limit(10, 10)?;
+
+        assert_eq!(summary.deleted, 1);
+        assert_eq!(
+            summary.oldest_timestamp.as_deref(),
+            Some("2026-07-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            summary.newest_timestamp.as_deref(),
+            Some("2026-07-01T00:00:00.000Z")
+        );
+        let records = log.read(EventLogQuery::default())?.records;
+        assert_eq!(records.len(), 11);
+        assert_eq!(records[0].id, "evt_1");
+        assert_eq!(records.last().map(|record| record.sequence), Some(12));
         Ok(())
     }
 }

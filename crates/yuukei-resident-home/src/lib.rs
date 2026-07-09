@@ -9,18 +9,25 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
-use tokio::{sync::broadcast, time::timeout};
+use tokio::{
+    sync::{broadcast, oneshot},
+    time::timeout,
+};
 use yuukei_capability::{
-    CapabilityError, CapabilityProvider, CapabilityRouter, EventLogReadGrant,
-    StubSpeechSynthesisProvider, DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID,
+    CapabilityError, CapabilityProvider, CapabilityResult, CapabilityRouter, EventLogReadGrant,
     DIALOGUE_EXTRACT_CAPABILITY, DIALOGUE_GENERATE_CAPABILITY, DIALOGUE_INTERPRET_CAPABILITY,
     MEMORY_FORGET_CAPABILITY, MEMORY_INDEX_CAPABILITY, MEMORY_LIST_CAPABILITY,
     MEMORY_RETRIEVE_CAPABILITY, MEMORY_UPDATE_CAPABILITY, MOOD_EVALUATE_CAPABILITY,
+    SPEECH_SYNTHESIS_CAPABILITY,
 };
-use yuukei_event_log::{EventLog, EventLogError, EventLogPage, EventLogQuery};
+use yuukei_event_log::{
+    DeleteSummary, EventLog, EventLogAdminQuery, EventLogDeleteSelector, EventLogError,
+    EventLogPage, EventLogPrivacyFilter, EventLogQuery, TrimSummary,
+};
 use yuukei_extension::{
     event_type_matches, ExtensionCommandContext, ExtensionError, ExtensionEventContext,
-    ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, YuukeiExtension,
+    ExtensionEventReport, ExtensionHookReport, ExtensionRegistry, ProcessFailureKind,
+    ProcessFailureReport, YuukeiExtension,
 };
 use yuukei_protocol::{
     new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget, DialogueExtractInput,
@@ -35,10 +42,26 @@ use yuukei_protocol::{
     RuntimeCommand, RuntimeEvent, SignalAliasTable, SurfaceSession,
 };
 use yuukei_world::{
-    DaihonAdapter, DaihonDiagnosticEntry, DaihonDiagnosticReport, DaihonExtractRequest,
-    DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler, DaihonInterpretRequest,
-    WorldError, WorldPack, YuukeiDaihonAdapter,
+    DaihonAdapter, DaihonChoiceRequest, DaihonDiagnosticEntry, DaihonDiagnosticReport,
+    DaihonExtractRequest, DaihonGenerateRequest, DaihonGenerateResponse, DaihonInterpretHandler,
+    DaihonInterpretRequest, WorldError, WorldPack, YuukeiDaihonAdapter,
 };
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentEventLogPage {
+    pub records: Vec<EventLogRecord>,
+    pub next_cursor: Option<i64>,
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ResidentEventLogReadOptions {
+    pub kind_prefix: Option<String>,
+    pub privacy_category: EventLogPrivacyFilter,
+    pub before_sequence: Option<i64>,
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Error)]
 pub enum ResidentHomeError {
@@ -65,6 +88,7 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 const DIALOGUE_INTERPRET_TIMEOUT: Duration = Duration::from_secs(120);
 const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
+const SPEECH_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MOOD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_MEMORY_INDEX_DAYS_PER_TRIGGER: usize = 7;
 const MEMORY_RETRIEVE_FACT_LIMIT: usize = 10;
@@ -103,7 +127,7 @@ pub struct ResidentHome {
     command_tx: broadcast::Sender<RuntimeCommand>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct HomeState {
     resident_id: String,
     active_surface_id: Option<String>,
@@ -128,10 +152,17 @@ struct DailyBudgetCounter {
     used: u32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct InterpretationState {
     in_flight: bool,
     queued_events: VecDeque<(RuntimeEvent, EventLogRecord)>,
+    pending_choice: Option<PendingChoice>,
+}
+
+#[derive(Debug)]
+struct PendingChoice {
+    choice_id: String,
+    sender: oneshot::Sender<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -197,19 +228,13 @@ impl ResidentHome {
         world_pack: WorldPack,
         event_log: EventLog,
         daihon: Arc<dyn DaihonAdapter>,
-        mut capabilities: CapabilityRouter,
+        capabilities: CapabilityRouter,
         extensions: ExtensionRegistry,
     ) -> Result<Self> {
         world_pack.validate()?;
         daihon
             .load_world_with_signal_aliases(&world_pack, &SignalAliasTable::default())
             .await?;
-        if !capabilities
-            .summaries()
-            .contains_key(DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID)
-        {
-            capabilities.register(StubSpeechSynthesisProvider)?;
-        }
         let missing_capabilities = world_pack
             .capabilities
             .required
@@ -267,6 +292,53 @@ impl ResidentHome {
         self.event_log.clone()
     }
 
+    pub fn trim_event_log_to_record_limit(
+        &self,
+        max_records: usize,
+        fraction_divisor: usize,
+    ) -> Result<TrimSummary> {
+        let summary = self
+            .event_log
+            .trim_to_record_limit(max_records, fraction_divisor)?;
+        if summary.deleted == 0 {
+            return Ok(summary);
+        }
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "event_log.trimmed".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: self.resident_id()?,
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                ("deleted".to_string(), json!(summary.deleted)),
+                (
+                    "oldestTimestamp".to_string(),
+                    summary
+                        .oldest_timestamp
+                        .as_ref()
+                        .map(|value| Value::String(value.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "newestTimestamp".to_string(),
+                    summary
+                        .newest_timestamp
+                        .as_ref()
+                        .map(|value| Value::String(value.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+            ]),
+            causality: None,
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(summary)
+    }
+
     pub fn subscribe_commands(&self) -> broadcast::Receiver<RuntimeCommand> {
         self.command_tx.subscribe()
     }
@@ -319,6 +391,7 @@ impl ResidentHome {
             device_id: Some(session.device_id.clone()),
             surface_id: Some(session.surface_id.clone()),
             actor_id: None,
+            privacy: None,
         };
         let appended = self
             .event_log
@@ -429,6 +502,112 @@ impl ResidentHome {
         })
     }
 
+    pub fn read_event_log_page(
+        &self,
+        options: ResidentEventLogReadOptions,
+    ) -> Result<ResidentEventLogPage> {
+        let query = EventLogAdminQuery {
+            kind_prefix: options
+                .kind_prefix
+                .filter(|prefix| !prefix.trim().is_empty()),
+            privacy_category: options.privacy_category,
+            before_sequence: options.before_sequence,
+            limit: options.limit,
+        };
+        let total = self
+            .event_log
+            .read_newest(EventLogAdminQuery {
+                limit: None,
+                ..query.clone()
+            })?
+            .records
+            .len();
+        let page = self.event_log.read_newest(query)?;
+        Ok(ResidentEventLogPage {
+            records: page.records,
+            next_cursor: page.next_cursor,
+            total,
+        })
+    }
+
+    pub fn count_event_log_delete_before(&self, timestamp: impl Into<String>) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::BeforeTimestamp(timestamp.into()))
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::KindPrefix(prefix.into()))
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_all(&self) -> Result<usize> {
+        self.event_log
+            .count_delete(EventLogDeleteSelector::All)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_before(&self, timestamp: impl Into<String>) -> Result<DeleteSummary> {
+        let timestamp = timestamp.into();
+        self.delete_event_log_with_audit(
+            EventLogDeleteSelector::BeforeTimestamp(timestamp.clone()),
+            json!({ "condition": "before", "timestamp": timestamp }),
+        )
+    }
+
+    pub fn delete_event_log_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<DeleteSummary> {
+        let prefix = prefix.into();
+        self.delete_event_log_with_audit(
+            EventLogDeleteSelector::KindPrefix(prefix.clone()),
+            json!({ "condition": "kindPrefix", "kindPrefix": prefix }),
+        )
+    }
+
+    pub fn delete_event_log_all(&self) -> Result<DeleteSummary> {
+        self.delete_event_log_with_audit(EventLogDeleteSelector::All, json!({ "condition": "all" }))
+    }
+
+    fn delete_event_log_with_audit(
+        &self,
+        selector: EventLogDeleteSelector,
+        mut payload: Value,
+    ) -> Result<DeleteSummary> {
+        let resident_id = self.resident_id()?;
+        let deleted = self.event_log.count_delete(selector.clone())?;
+        if let Value::Object(map) = &mut payload {
+            map.insert("deleted".to_string(), Value::Number(deleted.into()));
+        }
+        let audit = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: "event_log.deleted".to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id,
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: json_map_from_value(payload),
+            causality: None,
+            privacy: None,
+        };
+        let summary = self.event_log.delete_with_audit(selector, audit)?;
+        let page = self.event_log.read_newest(EventLogAdminQuery {
+            limit: Some(1),
+            ..Default::default()
+        })?;
+        if let Some(record) = page.records.first() {
+            self.set_cursor(record.sequence)?;
+        }
+        Ok(summary)
+    }
+
     fn validate_event_log_read_grant(
         &self,
         grant: &EventLogReadGrant,
@@ -512,6 +691,9 @@ impl ResidentHome {
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
         self.set_cursor(appended_event.sequence)?;
+        if self.resolve_pending_choice_event(&event)? {
+            return Ok(Vec::new());
+        }
         if self.defer_event_while_interpreting(event.clone(), appended_event.clone())? {
             return Ok(Vec::new());
         }
@@ -520,6 +702,42 @@ impl ResidentHome {
             .await?;
         emitted.extend(self.drain_interpretation_queue().await?);
         Ok(emitted)
+    }
+
+    fn resolve_pending_choice_event(&self, event: &RuntimeEvent) -> Result<bool> {
+        if event.kind != "conversation.choice" {
+            return Ok(false);
+        }
+        let Some(choice_id) = event.payload.get("choiceId").and_then(Value::as_str) else {
+            return Ok(true);
+        };
+        let Some(choice) = event.payload.get("choice").and_then(Value::as_str) else {
+            return Ok(true);
+        };
+        let sender = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            let matches_pending = state
+                .interpretation
+                .pending_choice
+                .as_ref()
+                .is_some_and(|pending| pending.choice_id == choice_id);
+            if matches_pending {
+                state
+                    .interpretation
+                    .pending_choice
+                    .take()
+                    .map(|pending| pending.sender)
+            } else {
+                None
+            }
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(choice.to_string());
+        }
+        Ok(true)
     }
 
     pub async fn list_memories(
@@ -724,6 +942,18 @@ impl ResidentHome {
 
         let mut proposed_events = Vec::new();
         for report in result.reports {
+            if let Some(failure) = &report.process_failure {
+                self.handle_process_failure_report(
+                    failure,
+                    &record.id,
+                    &record.resident_id,
+                    record
+                        .causality
+                        .as_ref()
+                        .and_then(|causality| causality.trace_id.clone()),
+                )
+                .await?;
+            }
             for proposed in &report.result.proposed_events {
                 match self.normalize_extension_event(&registry, &report, proposed, record) {
                     Ok(event) => proposed_events.push(event),
@@ -868,6 +1098,7 @@ impl ResidentHome {
         } else {
             event
         };
+        let event = self.enrich_event_for_daihon_dispatch(event)?;
         let aliases = self.extension_signal_alias_table()?;
         if !self
             .world_pack
@@ -937,6 +1168,58 @@ impl ResidentHome {
         })
     }
 
+    fn enrich_event_for_daihon_dispatch(&self, mut event: RuntimeEvent) -> Result<RuntimeEvent> {
+        if event.kind == "desktop.folder.opened" {
+            let (file_name, file_category) = self.recent_download_for_folder_event(&event)?;
+            event.payload.insert(
+                "recentDownloadFileName".to_string(),
+                Value::String(file_name),
+            );
+            event.payload.insert(
+                "recentDownloadCategory".to_string(),
+                Value::String(file_category),
+            );
+        }
+        Ok(event)
+    }
+
+    fn recent_download_for_folder_event(&self, event: &RuntimeEvent) -> Result<(String, String)> {
+        let dispatch_at = event_timestamp_or_now(event);
+        let cutoff = dispatch_at - chrono::Duration::days(7);
+        let records = self
+            .event_log
+            .read(EventLogQuery {
+                resident_id: Some(event.resident_id.clone()),
+                kind: Some("desktop.download.completed".to_string()),
+                after_sequence: None,
+                limit: None,
+                extension_readable_only: false,
+            })?
+            .records;
+        for record in records.into_iter().rev() {
+            let Some(timestamp) = event_record_timestamp(&record.timestamp) else {
+                continue;
+            };
+            if timestamp < cutoff || timestamp > dispatch_at {
+                continue;
+            }
+            let file_name = record
+                .payload
+                .get("fileName")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let file_category = record
+                .payload
+                .get("fileCategory")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return Ok((file_name, file_category));
+        }
+        Ok((String::new(), String::new()))
+    }
+
     async fn maybe_evaluate_mood(
         &self,
         source_event: &RuntimeEvent,
@@ -978,20 +1261,27 @@ impl ResidentHome {
             context: None,
         };
         self.record_capability_request(&invocation, source_event, None)?;
-        let result = timeout(MOOD_EVALUATE_TIMEOUT, router.invoke(invocation.clone())).await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                MOOD_EVALUATE_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id.clone(),
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id.clone(),
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
 
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<MoodEvaluateOutput>(output_value) else {
@@ -1243,10 +1533,23 @@ impl ResidentHome {
         command: RuntimeCommand,
         source_event: &RuntimeEvent,
     ) -> Result<RuntimeCommand> {
-        let mut command = self
+        let command = self
             .apply_extensions_before_command_emit(command, source_event)
             .await?;
-        self.maybe_enrich_speech(&mut command, source_event).await?;
+        let appended_command = self
+            .event_log
+            .append(NewEventLogRecord::from(command.clone()))?;
+        self.set_cursor(appended_command.sequence)?;
+        self.apply_command_to_snapshot(&command)?;
+        let _ = self.command_tx.send(command.clone());
+        self.spawn_speech_synthesis_if_needed(command.clone(), source_event.clone())?;
+        Ok(command)
+    }
+
+    fn emit_internal_command_without_extensions(
+        &self,
+        command: RuntimeCommand,
+    ) -> Result<RuntimeCommand> {
         let appended_command = self
             .event_log
             .append(NewEventLogRecord::from(command.clone()))?;
@@ -1286,15 +1589,20 @@ impl ResidentHome {
         };
         self.record_capability_request(&invocation, event, None)?;
 
-        let result = {
-            let router = self
-                .capabilities
-                .lock()
-                .map_err(|_| ResidentHomeError::PoisonedLock)?
-                .clone();
-            router.invoke(invocation.clone()).await
-        };
-        let Ok(result) = result else {
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                event,
+            )
+            .await?
+        else {
             return Ok(Vec::new());
         };
 
@@ -1302,16 +1610,16 @@ impl ResidentHome {
         let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
             return Ok(Vec::new());
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output,
-            result.metadata,
-            event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output,
+            metadata: result.metadata,
+            source_event: event,
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
         self.commands_from_dialogue_generate_output(output, event)
     }
 
@@ -1627,6 +1935,18 @@ impl ResidentHome {
             .await?;
         for report in &result.reports {
             self.record_extension_hook_result(report, source_event)?;
+            if let Some(failure) = &report.process_failure {
+                self.handle_process_failure_report(
+                    failure,
+                    &source_event.id,
+                    &source_event.resident_id,
+                    source_event
+                        .causality
+                        .as_ref()
+                        .and_then(|causality| causality.trace_id.clone()),
+                )
+                .await?;
+            }
         }
         Ok(result.command)
     }
@@ -1691,6 +2011,152 @@ impl ResidentHome {
                     .causality
                     .as_ref()
                     .and_then(|causality| causality.trace_id.clone()),
+            }),
+            privacy: None,
+        };
+        let appended = self.event_log.append(record)?;
+        self.set_cursor(appended.sequence)?;
+        Ok(())
+    }
+
+    async fn handle_process_failure_report(
+        &self,
+        failure: &ProcessFailureReport,
+        source_event_id: &str,
+        resident_id: &str,
+        trace_id: Option<String>,
+    ) -> Result<()> {
+        self.record_extension_process_failure(
+            "extension.process.failed",
+            failure,
+            source_event_id,
+            resident_id,
+            trace_id.clone(),
+        )?;
+        if !failure.suspension_started {
+            return Ok(());
+        }
+        self.record_extension_process_failure(
+            "extension.process.suspended",
+            failure,
+            source_event_id,
+            resident_id,
+            trace_id.clone(),
+        )?;
+        let mut command = RuntimeCommand::new("ui.notification", "resident-home", resident_id);
+        command.payload = JsonMap::from([
+            (
+                "extensionId".to_string(),
+                Value::String(failure.extension_id.clone()),
+            ),
+            (
+                "text".to_string(),
+                Value::String(format!(
+                    "{}が応答しないため、いったん休止しました。設定画面から再起動できます",
+                    failure.display_name
+                )),
+            ),
+        ]);
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event_id.to_string()),
+            source_command_id: None,
+            trace_id: trace_id.clone(),
+        });
+        self.emit_internal_command_without_extensions(command)?;
+        Ok(())
+    }
+
+    async fn handle_capability_error(
+        &self,
+        error: &CapabilityError,
+        source_event: &RuntimeEvent,
+    ) -> Result<()> {
+        if let CapabilityError::ExtensionProcessSuspended {
+            extension_id,
+            display_name,
+            message,
+            suspension_started,
+        } = error
+        {
+            let failure = ProcessFailureReport {
+                extension_id: extension_id.clone(),
+                display_name: display_name.clone(),
+                kind: ProcessFailureKind::Crash,
+                message: message.clone(),
+                suspended: true,
+                suspension_started: *suspension_started,
+            };
+            self.handle_process_failure_report(
+                &failure,
+                &source_event.id,
+                &source_event.resident_id,
+                source_event
+                    .causality
+                    .as_ref()
+                    .and_then(|causality| causality.trace_id.clone()),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn invoke_capability_with_timeout(
+        &self,
+        router: CapabilityRouter,
+        invocation: CapabilityInvocation,
+        timeout_duration: Duration,
+        source_event: &RuntimeEvent,
+    ) -> Result<Option<CapabilityResult>> {
+        match timeout(timeout_duration, router.invoke(invocation)).await {
+            Ok(Ok(result)) => Ok(Some(result)),
+            Ok(Err(error)) => {
+                self.handle_capability_error(&error, source_event).await?;
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn record_extension_process_failure(
+        &self,
+        kind: &str,
+        failure: &ProcessFailureReport,
+        source_event_id: &str,
+        resident_id: &str,
+        trace_id: Option<String>,
+    ) -> Result<()> {
+        let record = NewEventLogRecord {
+            id: new_id("evt"),
+            kind: kind.to_string(),
+            timestamp: yuukei_protocol::now_timestamp(),
+            resident_id: resident_id.to_string(),
+            source: "resident-home".to_string(),
+            device_id: None,
+            surface_id: None,
+            actor_id: None,
+            payload: JsonMap::from([
+                (
+                    "extensionId".to_string(),
+                    Value::String(failure.extension_id.clone()),
+                ),
+                (
+                    "displayName".to_string(),
+                    Value::String(failure.display_name.clone()),
+                ),
+                (
+                    "failureKind".to_string(),
+                    serde_json::to_value(&failure.kind)?,
+                ),
+                (
+                    "message".to_string(),
+                    Value::String(failure.message.clone()),
+                ),
+                ("suspended".to_string(), Value::Bool(failure.suspended)),
+            ]),
+            causality: Some(Causality {
+                source_event_id: Some(source_event_id.to_string()),
+                source_command_id: None,
+                trace_id,
             }),
             privacy: None,
         };
@@ -1774,24 +2240,27 @@ impl ResidentHome {
                 context: None,
             };
             self.record_capability_request(&invocation, trigger_event, None)?;
-            let result = timeout(
-                DIALOGUE_INTERPRET_TIMEOUT,
-                router.invoke(invocation.clone()),
-            )
-            .await;
-            let Ok(Ok(result)) = result else {
+            let Some(result) = self
+                .invoke_capability_with_timeout(
+                    router.clone(),
+                    invocation.clone(),
+                    DIALOGUE_INTERPRET_TIMEOUT,
+                    trigger_event,
+                )
+                .await?
+            else {
                 return Ok(());
             };
-            self.record_capability_result(
-                result.invocation_id,
-                result.extension_id,
-                result.capability,
-                result.output.clone(),
-                result.metadata,
-                trigger_event,
-                None,
-                None,
-            )?;
+            self.record_capability_result(CapabilityResultRecord {
+                invocation_id: result.invocation_id,
+                extension_id: result.extension_id,
+                capability: result.capability,
+                output: result.output.clone(),
+                metadata: result.metadata,
+                source_event: trigger_event,
+                source_command_id: None,
+                actor_id: None,
+            })?;
             let output_value = Value::Object(result.output.into_iter().collect());
             let Ok(output) = serde_json::from_value::<MemoryIndexOutput>(output_value) else {
                 return Ok(());
@@ -1828,11 +2297,15 @@ impl ResidentHome {
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
         let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation)).await;
-        let result = result.map_err(|_| {
-            ResidentHomeError::Capability(CapabilityError::Extension(format!(
-                "{capability} timed out"
-            )))
-        })??;
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => return Err(ResidentHomeError::Capability(error)),
+            Err(_) => {
+                return Err(ResidentHomeError::Capability(CapabilityError::Extension(
+                    format!("{capability} timed out"),
+                )))
+            }
+        };
         let output_value = Value::Object(result.output.into_iter().collect());
         Ok(serde_json::from_value(output_value)?)
     }
@@ -1876,20 +2349,27 @@ impl ResidentHome {
             context: None,
         };
         self.record_capability_request(&invocation, source_event, None)?;
-        let result = timeout(MEMORY_RETRIEVE_TIMEOUT, router.invoke(invocation.clone())).await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                MEMORY_RETRIEVE_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<MemoryRetrieveOutput>(output_value) else {
             return Ok(None);
@@ -1950,25 +2430,28 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(None);
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            invocation.actor_id.as_deref(),
-        )?;
+            source_command_id: None,
+            actor_id: invocation.actor_id.as_deref(),
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
             return Ok(None);
@@ -2028,25 +2511,28 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueInterpretOutput>(output_value) else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
@@ -2102,25 +2588,28 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?
             .clone();
-        let result = timeout(
-            DIALOGUE_INTERPRET_TIMEOUT,
-            router.invoke(invocation.clone()),
-        )
-        .await;
-        let Ok(Ok(result)) = result else {
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation.clone(),
+                DIALOGUE_INTERPRET_TIMEOUT,
+                source_event,
+            )
+            .await?
+        else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
         };
 
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output.clone(),
-            result.metadata,
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
             source_event,
-            None,
-            None,
-        )?;
+            source_command_id: None,
+            actor_id: None,
+        })?;
         let output_value = Value::Object(result.output.into_iter().collect());
         let Ok(output) = serde_json::from_value::<DialogueExtractOutput>(output_value) else {
             return Ok(UNKNOWN_INTERPRETATION.to_string());
@@ -2133,6 +2622,123 @@ impl ResidentHome {
         }
     }
 
+    async fn choose_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonChoiceRequest,
+    ) -> Result<String> {
+        let result = self
+            .invoke_choice_for_daihon(source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string());
+        self.set_interpretation_in_flight(false)?;
+        Ok(result)
+    }
+
+    async fn invoke_choice_for_daihon(
+        &self,
+        source_event: &RuntimeEvent,
+        request: DaihonChoiceRequest,
+    ) -> Result<String> {
+        let choice_id = new_id("choice");
+        let timeout_seconds = request.timeout_seconds;
+        let mut command = RuntimeCommand::new(
+            "dialogue.choices",
+            "daihon",
+            source_event.resident_id.clone(),
+        );
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event.id.clone()),
+            source_command_id: None,
+            trace_id: source_event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        command.target = Some(CommandTarget {
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+        });
+        command.payload = JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("choices".to_string(), json!(request.choices)),
+            ("timeoutSeconds".to_string(), json!(timeout_seconds)),
+        ]);
+        self.emit_command_for_event(command, source_event).await?;
+
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            state.interpretation.pending_choice = Some(PendingChoice {
+                choice_id: choice_id.clone(),
+                sender,
+            });
+        }
+        self.set_interpretation_in_flight(true)?;
+
+        match timeout(Duration::from_secs(timeout_seconds), receiver).await {
+            Ok(Ok(choice)) => Ok(choice),
+            Ok(Err(_)) | Err(_) => {
+                self.clear_pending_choice(&choice_id)?;
+                self.emit_choice_clear(source_event, &choice_id, "timeout")
+                    .await?;
+                Ok(UNKNOWN_INTERPRETATION.to_string())
+            }
+        }
+    }
+
+    fn clear_pending_choice(&self, choice_id: &str) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        if state
+            .interpretation
+            .pending_choice
+            .as_ref()
+            .is_some_and(|pending| pending.choice_id == choice_id)
+        {
+            state.interpretation.pending_choice = None;
+        }
+        Ok(())
+    }
+
+    async fn emit_choice_clear(
+        &self,
+        source_event: &RuntimeEvent,
+        choice_id: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let mut command = RuntimeCommand::new(
+            "dialogue.choices.clear",
+            "daihon",
+            source_event.resident_id.clone(),
+        );
+        command.causality = Some(Causality {
+            source_event_id: Some(source_event.id.clone()),
+            source_command_id: None,
+            trace_id: source_event
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        command.target = Some(CommandTarget {
+            device_id: source_event.device_id.clone(),
+            surface_id: source_event.surface_id.clone(),
+            actor_id: Some(self.world_pack.default_actor_id.clone()),
+        });
+        command.payload = JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("reason".to_string(), json!(reason)),
+        ]);
+        self.emit_command_for_event(command, source_event).await?;
+        Ok(())
+    }
+
     fn set_interpretation_in_flight(&self, in_flight: bool) -> Result<()> {
         let mut state = self
             .state
@@ -2142,10 +2748,10 @@ impl ResidentHome {
         Ok(())
     }
 
-    async fn maybe_enrich_speech(
+    fn spawn_speech_synthesis_if_needed(
         &self,
-        command: &mut RuntimeCommand,
-        source_event: &RuntimeEvent,
+        command: RuntimeCommand,
+        source_event: RuntimeEvent,
     ) -> Result<()> {
         if command.kind != "dialogue.say" {
             return Ok(());
@@ -2153,10 +2759,42 @@ impl ResidentHome {
         let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
             return Ok(());
         };
+        if text.trim().is_empty() {
+            return Ok(());
+        }
 
+        let has_provider = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .has_healthy_provider(SPEECH_SYNTHESIS_CAPABILITY);
+        if !has_provider {
+            return Ok(());
+        }
+
+        let home = Arc::new(self.clone());
+        tokio::spawn(async move {
+            let _ = home
+                .synthesize_speech_for_dialogue(command, source_event)
+                .await;
+        });
+        Ok(())
+    }
+
+    async fn synthesize_speech_for_dialogue(
+        &self,
+        command: RuntimeCommand,
+        source_event: RuntimeEvent,
+    ) -> Result<()> {
+        let text = command
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
-            capability: "speech.synthesis".to_string(),
+            capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
             method: "synthesize".to_string(),
             resident_id: command.resident_id.clone(),
             actor_id: command
@@ -2164,7 +2802,7 @@ impl ResidentHome {
                 .as_ref()
                 .and_then(|target| target.actor_id.clone()),
             input: JsonMap::from([
-                ("text".to_string(), Value::String(text.to_string())),
+                ("text".to_string(), Value::String(text)),
                 (
                     "speakerId".to_string(),
                     command
@@ -2189,34 +2827,75 @@ impl ResidentHome {
             context: None,
         };
 
-        self.record_capability_request(&invocation, source_event, Some(&command.id))?;
+        self.record_capability_request(&invocation, &source_event, Some(&command.id))?;
 
-        let result = {
-            let router = self
-                .capabilities
-                .lock()
-                .map_err(|_| ResidentHomeError::PoisonedLock)?
-                .clone();
-            router.invoke(invocation).await?
+        let router = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .clone();
+        let Some(result) = self
+            .invoke_capability_with_timeout(
+                router,
+                invocation,
+                SPEECH_SYNTHESIS_TIMEOUT,
+                &source_event,
+            )
+            .await?
+        else {
+            return Ok(());
         };
 
-        if let Some(speech_ref) = result.output.get("speechRef").cloned() {
-            command.payload.insert("speechRef".to_string(), speech_ref);
-        }
-
-        self.record_capability_result(
-            result.invocation_id,
-            result.extension_id,
-            result.capability,
-            result.output,
-            result.metadata,
-            source_event,
-            Some(&command.id),
-            command
+        self.record_capability_result(CapabilityResultRecord {
+            invocation_id: result.invocation_id,
+            extension_id: result.extension_id,
+            capability: result.capability,
+            output: result.output.clone(),
+            metadata: result.metadata,
+            source_event: &source_event,
+            source_command_id: Some(&command.id),
+            actor_id: command
                 .target
                 .as_ref()
                 .and_then(|target| target.actor_id.as_deref()),
-        )?;
+        })?;
+        let Some(audio_path) = result.output.get("audioPath").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if audio_path.trim().is_empty() {
+            return Ok(());
+        }
+        let mut audio_command =
+            RuntimeCommand::new("audio.play", "capability", command.resident_id.clone());
+        audio_command.target = command.target.clone();
+        audio_command.causality = Some(Causality {
+            source_event_id: command
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_event_id.clone())
+                .or_else(|| Some(source_event.id.clone())),
+            source_command_id: Some(command.id.clone()),
+            trace_id: command
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.trace_id.clone()),
+        });
+        audio_command.payload = JsonMap::from([
+            (
+                "audioPath".to_string(),
+                Value::String(audio_path.to_string()),
+            ),
+            (
+                "durationMs".to_string(),
+                result
+                    .output
+                    .get("durationMs")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ),
+        ]);
+        self.emit_command_for_event(audio_command, &source_event)
+            .await?;
         Ok(())
     }
 
@@ -2252,30 +2931,27 @@ impl ResidentHome {
         Ok(())
     }
 
-    fn record_capability_result(
-        &self,
-        invocation_id: String,
-        extension_id: String,
-        capability: String,
-        output: JsonMap,
-        metadata: JsonMap,
-        source_event: &RuntimeEvent,
-        source_command_id: Option<&str>,
-        actor_id: Option<&str>,
-    ) -> Result<()> {
+    fn record_capability_result(&self, record: CapabilityResultRecord<'_>) -> Result<()> {
         let result_payload = JsonMap::from([
-            ("invocationId".to_string(), Value::String(invocation_id)),
-            ("extensionId".to_string(), Value::String(extension_id)),
-            ("capability".to_string(), Value::String(capability)),
+            (
+                "invocationId".to_string(),
+                Value::String(record.invocation_id),
+            ),
+            (
+                "extensionId".to_string(),
+                Value::String(record.extension_id),
+            ),
+            ("capability".to_string(), Value::String(record.capability)),
             (
                 "output".to_string(),
-                Value::Object(output.into_iter().collect()),
+                Value::Object(record.output.into_iter().collect()),
             ),
             (
                 "metadata".to_string(),
-                Value::Object(metadata.into_iter().collect()),
+                Value::Object(record.metadata.into_iter().collect()),
             ),
         ]);
+        let source_event = record.source_event;
         let result_record = NewEventLogRecord {
             id: new_id("evt"),
             kind: "capability.invocation.result".to_string(),
@@ -2284,11 +2960,11 @@ impl ResidentHome {
             source: "capability".to_string(),
             device_id: source_event.device_id.clone(),
             surface_id: source_event.surface_id.clone(),
-            actor_id: actor_id.map(ToOwned::to_owned),
+            actor_id: record.actor_id.map(ToOwned::to_owned),
             payload: result_payload,
             causality: Some(Causality {
                 source_event_id: Some(source_event.id.clone()),
-                source_command_id: source_command_id.map(ToOwned::to_owned),
+                source_command_id: record.source_command_id.map(ToOwned::to_owned),
                 trace_id: source_event
                     .causality
                     .as_ref()
@@ -2316,6 +2992,20 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
             .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
 
+    async fn flush_commands_before_choice(&mut self, commands: Vec<RuntimeCommand>) -> bool {
+        for command in commands {
+            if self
+                .home
+                .emit_command_for_event(command, &self.source_event)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn generate(&mut self, request: DaihonGenerateRequest) -> Option<DaihonGenerateResponse> {
         self.home
             .generate_dialogue_for_daihon(&self.source_event, request)
@@ -2326,6 +3016,13 @@ impl DaihonInterpretHandler for ResidentHomeInterpretHandler {
     async fn extract(&mut self, request: DaihonExtractRequest) -> String {
         self.home
             .extract_dialogue(&self.source_event, request)
+            .await
+            .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
+    }
+
+    async fn choose(&mut self, request: DaihonChoiceRequest) -> String {
+        self.home
+            .choose_for_daihon(&self.source_event, request)
             .await
             .unwrap_or_else(|_| UNKNOWN_INTERPRETATION.to_string())
     }
@@ -2374,6 +3071,17 @@ fn generated_command(
     command
 }
 
+struct CapabilityResultRecord<'a> {
+    invocation_id: String,
+    extension_id: String,
+    capability: String,
+    output: JsonMap,
+    metadata: JsonMap,
+    source_event: &'a RuntimeEvent,
+    source_command_id: Option<&'a str>,
+    actor_id: Option<&'a str>,
+}
+
 fn major_payload(payload: JsonMap) -> JsonMap {
     const KEYS: &[&str] = &[
         "text",
@@ -2385,6 +3093,7 @@ fn major_payload(payload: JsonMap) -> JsonMap {
         "button",
         "hitZoneId",
         "hitZoneLabel",
+        "hitSurface",
         "timePeriod",
         "localHour",
         "localMinute",
@@ -2614,7 +3323,8 @@ mod tests {
     use yuukei_protocol::{
         ExecutionLocation, ExtensionEventInvocation, ExtensionEventLogReadPermission,
         ExtensionEventResult, ExtensionEventSubscription, ExtensionHookAction,
-        ExtensionHookInvocation, ExtensionHookResult, ExtensionPermissions, ExtensionRuntimeKind,
+        ExtensionHookInvocation, ExtensionHookPoint, ExtensionHookResult,
+        ExtensionHookSubscription, ExtensionPermissions, ExtensionRuntimeKind,
         ExtensionSignalAlias, ExtensionSummary, Privacy, RetentionPolicy, SurfaceKind,
         SurfacePresentation, SurfaceRenderer,
     };
@@ -2865,6 +3575,69 @@ mod tests {
                 invocation_id: invocation.id,
                 extension_id: "fake-dialogue".to_string(),
                 capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
+                output: self.output.clone(),
+                metadata: JsonMap::new(),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SpeechSynthesisProvider {
+        output: JsonMap,
+        calls: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        fail: bool,
+    }
+
+    impl SpeechSynthesisProvider {
+        fn new(output: JsonMap) -> Self {
+            Self {
+                output,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                fail: false,
+            }
+        }
+
+        fn failing(mut self) -> Self {
+            self.fail = true;
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CapabilityInvocation>>> {
+            self.calls.clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityProvider for SpeechSynthesisProvider {
+        fn registration(&self) -> ProviderRegistration {
+            ProviderRegistration {
+                extension_id: "fake-speech".to_string(),
+                capabilities: vec![SPEECH_SYNTHESIS_CAPABILITY.to_string()],
+                methods: vec!["synthesize".to_string()],
+                required_permissions: Vec::new(),
+                location: ExecutionLocation::ResidentHome,
+                health: yuukei_protocol::ExtensionHealth::Ready,
+                enabled: true,
+                config_schema: JsonMap::new(),
+                runtime_settings: JsonMap::new(),
+            }
+        }
+
+        async fn invoke(
+            &self,
+            invocation: CapabilityInvocation,
+        ) -> yuukei_capability::Result<CapabilityResult> {
+            self.calls
+                .lock()
+                .expect("speech calls lock")
+                .push(invocation.clone());
+            if self.fail {
+                return Err(CapabilityError::Extension("speech failed".to_string()));
+            }
+            Ok(CapabilityResult {
+                invocation_id: invocation.id,
+                extension_id: "fake-speech".to_string(),
+                capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
                 output: self.output.clone(),
                 metadata: JsonMap::new(),
             })
@@ -3135,6 +3908,27 @@ mod tests {
         world
     }
 
+    fn folder_download_world() -> WorldPack {
+        let mut world = world_pack();
+        world.signals.allow = vec!["desktop.folder.opened".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop folders
+### recent download
+合図: ＠フォルダ_開いた
+条件:（入力#最近のダウンロード = 「photo.png」）
+話者: yuukei
+「さっきのphoto.pngだね。」
+
+### no recent download
+合図: ＠フォルダ_開いた
+条件:（入力#最近のダウンロード = 「」）
+話者: yuukei
+「最近のダウンロードはありません。」
+"#
+        .to_string();
+        world
+    }
+
     fn yuukei_intelligence_events_extension() -> EventEmitterExtension {
         EventEmitterExtension::new("yuukei-intelligence")
             .emits([MOOD_CHANGED_EVENT])
@@ -3164,6 +3958,69 @@ mod tests {
         .to_string();
         world.signals.allow.push("device.wake".to_string());
         world
+    }
+
+    fn choice_world(timeout_seconds: u64) -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = format!(
+            r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「見る？」
+返事=＜選択 「見る」 「あとで」 秒数={timeout_seconds}＞
+※（返事 = 「見る」）なら:
+「見る枝」
+※あるいは（返事 = 「不明」）なら:
+「不明枝」
+※それ以外:
+「あとで枝」
+おわり
+"#
+        );
+        world
+    }
+
+    fn choice_queue_world() -> WorldPack {
+        let mut world = world_pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### choice
+合図: ＠conversation.text
+条件:（入力#ユーザー発言 = 「start」）
+話者: yuukei
+返事=＜選択 「見る」 「あとで」 秒数=30＞
+※（返事 = 「見る」）なら:
+「見る枝」
+※あるいは（返事 = 「不明」）なら:
+「不明枝」
+※それ以外:
+「あとで枝」
+おわり
+### queued
+合図: ＠conversation.text
+条件:（入力#ユーザー発言 = 「queued」）
+話者: yuukei
+「queued handled」
+"#
+        .to_string();
+        world
+    }
+
+    async fn next_command_of_kind(
+        receiver: &mut broadcast::Receiver<RuntimeCommand>,
+        kind: &str,
+    ) -> RuntimeCommand {
+        loop {
+            let command = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+                .await
+                .expect("command broadcast timed out")
+                .expect("command broadcast closed");
+            if command.kind == kind {
+                return command;
+            }
+        }
     }
 
     fn generate_world(script: &str) -> WorldPack {
@@ -3203,10 +4060,7 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].kind, "avatar.expression");
         assert_eq!(commands[1].kind, "dialogue.say");
-        assert_eq!(
-            commands[1].payload["speechRef"],
-            format!("yuukei-default-tts://{}", commands[1].id)
-        );
+        assert!(!commands[1].payload.contains_key("speechRef"));
         let expression = receiver.recv().await.expect("expression broadcast");
         assert_eq!(expression.kind, "avatar.expression");
         let dialogue = receiver.recv().await.expect("dialogue broadcast");
@@ -3223,8 +4077,9 @@ mod tests {
         assert!(records.contains(&"daihon.dispatch.result".to_string()));
         assert!(records.contains(&"avatar.expression".to_string()));
         assert!(records.contains(&"dialogue.say".to_string()));
-        assert!(records.contains(&"capability.invocation.request".to_string()));
-        assert!(records.contains(&"capability.invocation.result".to_string()));
+        assert!(!records.contains(&"audio.play".to_string()));
+        assert!(!records.contains(&"capability.invocation.request".to_string()));
+        assert!(!records.contains(&"capability.invocation.result".to_string()));
 
         let snapshot = home.snapshot()?;
         assert_eq!(snapshot.active_surface_id.as_deref(), Some("surface-main"));
@@ -3233,6 +4088,153 @@ mod tests {
             snapshot.actors["yuukei"].bubble.as_deref(),
             Some("聞こえています。こんにちは")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_success_emits_audio_play_after_dialogue() -> Result<()> {
+        let provider = SpeechSynthesisProvider::new(JsonMap::from([
+            (
+                "audioPath".to_string(),
+                json!("/tmp/yuukei-voicevox/cmd_1.wav"),
+            ),
+            ("durationMs".to_string(), json!(1234)),
+            ("format".to_string(), json!("wav")),
+        ]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_speech".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        let dialogue = commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("dialogue command");
+        assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+        let broadcast_dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(broadcast_dialogue.id, dialogue.id);
+        let audio = next_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.source, "capability");
+        assert_eq!(audio.payload["audioPath"], "/tmp/yuukei-voicevox/cmd_1.wav");
+        assert_eq!(audio.payload["durationMs"], 1234);
+        assert_eq!(
+            audio
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_command_id.as_deref()),
+            Some(dialogue.id.as_str())
+        );
+
+        let calls = calls.lock().expect("speech calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].capability, SPEECH_SYNTHESIS_CAPABILITY);
+        assert_eq!(calls[0].method, "synthesize");
+        assert_eq!(calls[0].input["text"], "聞こえています。こんにちは");
+        assert_eq!(calls[0].input["speakerId"], "yuukei");
+        assert_eq!(calls[0].input["displayCommandId"], dialogue.id);
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| record.kind == "audio.play"));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.result"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_route_absent_keeps_dialogue_without_audio() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        let dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+        let no_audio = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            next_command_of_kind(&mut receiver, "audio.play"),
+        )
+        .await;
+        assert!(no_audio.is_err());
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(!records.iter().any(|record| record.kind == "audio.play"));
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn speech_synthesis_failure_keeps_dialogue_without_audio() -> Result<()> {
+        let provider = SpeechSynthesisProvider::new(JsonMap::new()).failing();
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event
+            .payload
+            .insert("text".to_string(), json!("こんにちは"));
+
+        let commands = home.ingest_event(event).await?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        let _dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        let no_audio = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            next_command_of_kind(&mut receiver, "audio.play"),
+        )
+        .await;
+        assert!(no_audio.is_err());
+        assert_eq!(calls.lock().expect("speech calls lock").len(), 1);
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(!records.iter().any(|record| record.kind == "audio.play"));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.request"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == "capability.invocation.result"
+                && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
         Ok(())
     }
 
@@ -3881,7 +4883,7 @@ mod tests {
             .iter()
             .any(|command| command.payload["text"] == json!("記憶なしでも返します。")));
         let dialogue_calls = dialogue_calls.lock().expect("dialogue calls lock");
-        assert!(dialogue_calls[0].input.get("memories").is_none());
+        assert!(!dialogue_calls[0].input.contains_key("memories"));
         Ok(())
     }
 
@@ -4001,6 +5003,201 @@ mod tests {
         assert_eq!(
             dispatch.payload["commands"][0]["payload"]["text"],
             "ふつうに話します。"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_folder_opened_enriches_recent_download_inputs_and_ignores_old() -> Result<()> {
+        let now = Utc::now();
+        let home = ResidentHome::new(
+            "resident-default",
+            folder_download_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut download =
+            RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+        download.id = "evt_download_recent".to_string();
+        download.timestamp = (now - Duration::days(2)).to_rfc3339();
+        download
+            .payload
+            .insert("fileName".to_string(), json!("photo.png"));
+        download
+            .payload
+            .insert("fileCategory".to_string(), json!("image"));
+        home.event_log().append(NewEventLogRecord::from(download))?;
+
+        let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        folder.id = "evt_folder_recent".to_string();
+        folder.timestamp = now.to_rfc3339();
+        folder
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        folder.payload.insert("app".to_string(), json!("finder"));
+        let commands = home.ingest_event(folder).await?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].payload["text"], "さっきのphoto.pngだね。");
+        let records = home.event_log().read(EventLogQuery {
+            kind: Some("desktop.folder.opened".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        let folder_record = records.records.first().expect("folder record");
+        assert!(!folder_record.payload.contains_key("recentDownloadFileName"));
+        assert!(!folder_record.payload.contains_key("recentDownloadCategory"));
+
+        let old_home = ResidentHome::new(
+            "resident-default",
+            folder_download_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut old_download =
+            RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+        old_download.id = "evt_download_old".to_string();
+        old_download.timestamp = (now - Duration::days(8)).to_rfc3339();
+        old_download
+            .payload
+            .insert("fileName".to_string(), json!("photo.png"));
+        old_download
+            .payload
+            .insert("fileCategory".to_string(), json!("image"));
+        old_home
+            .event_log()
+            .append(NewEventLogRecord::from(old_download))?;
+
+        let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        folder.id = "evt_folder_old".to_string();
+        folder.timestamp = now.to_rfc3339();
+        folder
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        folder.payload.insert("app".to_string(), json!("finder"));
+        let commands = old_home.ingest_event(folder).await?;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].payload["text"],
+            "最近のダウンロードはありません。"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn event_log_trim_records_audit_event() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        for index in 0..12 {
+            let mut event = RuntimeEvent::new("conversation.text", "user", "resident-default");
+            event.id = format!("evt_trim_{index}");
+            event.timestamp = format!("2026-07-{day:02}T00:00:00.000Z", day = index + 1);
+            home.event_log().append(NewEventLogRecord::from(event))?;
+        }
+
+        let summary = home.trim_event_log_to_record_limit(10, 10)?;
+
+        assert_eq!(summary.deleted, 1);
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert_eq!(records.len(), 12);
+        assert_eq!(records[0].id, "evt_trim_1");
+        let audit = records.last().expect("trim audit record");
+        assert_eq!(audit.kind, "event_log.trimmed");
+        assert_eq!(audit.payload["deleted"], json!(1));
+        assert_eq!(
+            audit.payload["oldestTimestamp"],
+            json!("2026-07-01T00:00:00.000Z")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_extension_suspension_records_events_and_notifies_once() -> Result<()> {
+        let dir = tempdir().map_err(ExtensionError::from)?;
+        fs::write(
+            dir.path().join("invalid.js"),
+            r#"process.stdout.write("{bad");"#,
+        )
+        .map_err(ExtensionError::from)?;
+        let manifest = ProcessExtensionManifest {
+            schema_version: 1,
+            id: "bad-process".to_string(),
+            display_name: "Bad Process".to_string(),
+            runtime: None,
+            permissions: ExtensionPermissions::default(),
+            hooks: vec![ExtensionHookSubscription {
+                hook_point: ExtensionHookPoint::BeforeCommandEmit,
+                command_types: vec!["dialogue.say".to_string()],
+            }],
+            event_subscriptions: Vec::new(),
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
+            settings: None,
+            process: ProcessCommandSpec {
+                command: "node".to_string(),
+                args: vec!["invalid.js".to_string()],
+                cwd: None,
+                timeout_ms: Some(1_000),
+            },
+        };
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        home.register_extension(ProcessHookExtension::from_installed_manifest(
+            manifest,
+            dir.path(),
+            true,
+        ))
+        .await?;
+        home.set_extension_hook_order(
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["bad-process".to_string()],
+        )?;
+        let mut receiver = home.subscribe_commands();
+        let source_event = RuntimeEvent::new("conversation.text", "user", "resident-default");
+
+        for _ in 0..3 {
+            let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+            command.payload.insert("text".to_string(), json!("hello"));
+            home.emit_command_for_event(command, &source_event).await?;
+        }
+
+        let mut notifications = Vec::new();
+        for _ in 0..6 {
+            let command =
+                tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok);
+            let Some(command) = command else {
+                break;
+            };
+            if command.kind == "ui.notification" {
+                notifications.push(command);
+            }
+        }
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].payload["extensionId"],
+            json!("bad-process")
+        );
+        assert!(notifications[0].payload["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("いったん休止しました"));
+
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == "extension.process.suspended")
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == "extension.process.failed")
+                .count(),
+            3
         );
         Ok(())
     }
@@ -4378,11 +5575,200 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_can_rewrite_dialogue_before_emit_and_tts() -> Result<()> {
+    async fn choice_event_resolves_pending_daihon_choice() -> Result<()> {
         let home =
-            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+            ResidentHome::new("resident-default", choice_world(30), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_start".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(event).await });
+
+        let prompt_command = next_command_of_kind(&mut receiver, "dialogue.say").await;
+        assert_eq!(prompt_command.payload["text"], json!("見る？"));
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+        assert_eq!(
+            choices_command.payload["choices"],
+            json!(["見る", "あとで"])
+        );
+
+        let mut choice_event =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        choice_event
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        choice_event
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        choice_event.payload.insert("index".to_string(), json!(0));
+        assert!(home.ingest_event(choice_event).await?.is_empty());
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn choice_timeout_returns_unknown_and_clears_choices() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", choice_world(5), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_timeout".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let commands = home.ingest_event(event).await?;
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let clear_command = next_command_of_kind(&mut receiver, "dialogue.choices.clear").await;
+        assert_eq!(
+            clear_command.payload["choiceId"],
+            choices_command.payload["choiceId"]
+        );
+        assert_eq!(clear_command.payload["reason"], json!("timeout"));
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("不明枝")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mismatched_choice_id_is_recorded_but_does_not_resolve_pending_choice() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", choice_world(30), EventLog::in_memory()?).await?;
+        let mut receiver = home.subscribe_commands();
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice_mismatch_start".to_string();
+        event.payload.insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(event).await });
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+
+        let mut wrong_choice =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        wrong_choice
+            .payload
+            .insert("choiceId".to_string(), json!("choice_wrong"));
+        wrong_choice
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        wrong_choice.payload.insert("index".to_string(), json!(0));
+        assert!(home.ingest_event(wrong_choice).await?.is_empty());
+        assert!(!ingest.is_finished());
+
+        let mut right_choice =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        right_choice
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        right_choice
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        right_choice.payload.insert("index".to_string(), json!(0));
+        home.ingest_event(right_choice).await?;
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(records.iter().any(|record| {
+            record.kind == "conversation.choice"
+                && record.payload["choiceId"] == json!("choice_wrong")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_text_is_queued_while_choice_is_pending() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            choice_queue_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+        let mut receiver = home.subscribe_commands();
+        let mut start_event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        start_event.id = "evt_choice_queue_start".to_string();
+        start_event
+            .payload
+            .insert("text".to_string(), json!("start"));
+        let ingest_home = home.clone();
+        let ingest = tokio::spawn(async move { ingest_home.ingest_event(start_event).await });
+
+        let choices_command = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+        let choice_id = choices_command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+
+        let mut queued_event =
+            RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        queued_event.id = "evt_choice_queue_text".to_string();
+        queued_event
+            .payload
+            .insert("text".to_string(), json!("queued"));
+        assert!(home.ingest_event(queued_event).await?.is_empty());
+
+        let mut choice_event =
+            RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+        choice_event
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        choice_event
+            .payload
+            .insert("choice".to_string(), json!("見る"));
+        choice_event.payload.insert("index".to_string(), json!(0));
+        home.ingest_event(choice_event).await?;
+
+        let commands = ingest.await.expect("choice dispatch task")?;
+        assert!(commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"
+                && command.payload["text"] == json!("見る枝")));
+        assert!(commands.iter().any(|command| command.kind == "dialogue.say"
+            && command.payload["text"] == json!("queued handled")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extension_can_rewrite_dialogue_before_emit_and_tts() -> Result<()> {
+        let provider = SpeechSynthesisProvider::new(JsonMap::from([
+            (
+                "audioPath".to_string(),
+                json!("/tmp/yuukei-voicevox/rewrite.wav"),
+            ),
+            ("durationMs".to_string(), json!(500)),
+            ("format".to_string(), json!("wav")),
+        ]));
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            world_pack(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
         home.register_extension(DialogueSuffixExtension::new("nya-suffix", "にゃ"))
             .await?;
+        let mut receiver = home.subscribe_commands();
         home.attach_surface(SurfaceSession {
             surface_id: "surface-main".to_string(),
             device_id: "device-local".to_string(),
@@ -4416,13 +5802,19 @@ mod tests {
             Some("聞こえています。こんにちはにゃ")
         );
 
+        // 合成は非同期に走るので、audio.playの配信を待ってから記録を確認する。
+        let _ = next_command_of_kind(&mut receiver, "audio.play").await;
+
         let records = home.event_log().read(EventLogQuery::default())?.records;
         assert!(records
             .iter()
             .any(|record| record.kind == "extension.hook.result"));
         let speech_request = records
             .iter()
-            .find(|record| record.kind == "capability.invocation.request")
+            .find(|record| {
+                record.kind == "capability.invocation.request"
+                    && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY
+            })
             .expect("speech request");
         assert_eq!(
             speech_request.payload["input"]["text"],

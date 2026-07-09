@@ -40,6 +40,13 @@ pub enum CapabilityError {
     },
     #[error("capability extension invocation failed: {0}")]
     Extension(String),
+    #[error("capability extension process suspended: {message}")]
+    ExtensionProcessSuspended {
+        extension_id: String,
+        display_name: String,
+        message: String,
+        suspension_started: bool,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CapabilityError>;
@@ -299,17 +306,13 @@ impl CapabilityProvider for StubSpeechSynthesisProvider {
             capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
             output: JsonMap::from([
                 (
-                    "speechRef".to_string(),
-                    json!(format!("yuukei-default-tts://{display_command_id}")),
+                    "audioPath".to_string(),
+                    json!(format!("/tmp/yuukei-default-tts/{display_command_id}.wav")),
                 ),
                 ("durationMs".to_string(), json!(duration_ms)),
-                (
-                    "segments".to_string(),
-                    json!([{ "startMs": 0, "endMs": duration_ms, "text": text }]),
-                ),
-                ("visemes".to_string(), json!([])),
+                ("format".to_string(), json!("wav")),
             ]),
-            metadata: JsonMap::from([("binaryAudio".to_string(), json!(false))]),
+            metadata: JsonMap::new(),
         })
     }
 }
@@ -341,7 +344,10 @@ mod tests {
             .await?;
 
         assert_eq!(result.extension_id, "yuukei.default-tts");
-        assert_eq!(result.output["speechRef"], "yuukei-default-tts://cmd_1");
+        assert_eq!(
+            result.output["audioPath"],
+            "/tmp/yuukei-default-tts/cmd_1.wav"
+        );
         Ok(())
     }
 
@@ -439,7 +445,11 @@ mod tests {
                 invocation_id: invocation.id,
                 extension_id: "user.custom-tts".to_string(),
                 capability: "speech.synthesis".to_string(),
-                output: JsonMap::from([("speechRef".to_string(), json!("user-tts://cmd_1"))]),
+                output: JsonMap::from([
+                    ("audioPath".to_string(), json!("/tmp/user-tts/cmd_1.wav")),
+                    ("durationMs".to_string(), json!(1200)),
+                    ("format".to_string(), json!("wav")),
+                ]),
                 metadata: JsonMap::new(),
             })
         }
@@ -466,7 +476,7 @@ mod tests {
         router.set_default_extension("speech.synthesis", "user.custom-tts");
         let user_result = router.invoke(invocation).await?;
         assert_eq!(user_result.extension_id, "user.custom-tts");
-        assert_eq!(user_result.output["speechRef"], "user-tts://cmd_1");
+        assert_eq!(user_result.output["audioPath"], "/tmp/user-tts/cmd_1.wav");
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
+use yuukei_device_host::DesktopWindowObservation;
 use yuukei_protocol::RuntimeCommand;
 
 use crate::DesktopActorSurfaceAssetCatalog;
@@ -35,6 +36,8 @@ struct DesktopStageState {
     monitors: Vec<StageMonitor>,
     actors: BTreeMap<String, StageActor>,
     bubbles: BTreeMap<String, StageBubble>,
+    perches: BTreeMap<String, StagePerch>,
+    window_observation_enabled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -87,8 +90,18 @@ pub struct StageBubble {
     pub bubble_id: String,
     pub actor_id: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<StageBubbleChoice>,
     pub created_at_ms: u64,
     pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageBubbleChoice {
+    pub choice_id: String,
+    pub choices: Vec<String>,
+    pub timeout_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -97,6 +110,18 @@ pub struct DesktopStageSnapshot {
     pub monitors: Vec<StageMonitor>,
     pub actors: Vec<StageActor>,
     pub bubbles: Vec<StageBubble>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagePerchEnded {
+    pub actor_id: String,
+    pub window_key: String,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct StagePerch {
+    window_key: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,8 +214,49 @@ impl DesktopStageManager {
             state
                 .bubbles
                 .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
+            state
+                .perches
+                .retain(|actor_id, _| actor_ids.contains(actor_id));
         }
         self.emit_state(app)
+    }
+
+    pub fn set_window_observation_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        state.window_observation_enabled = enabled;
+        if !enabled {
+            state.perches.clear();
+        }
+        Ok(())
+    }
+
+    pub fn apply_window_terrain(
+        &self,
+        app: &AppHandle,
+        observations: &[DesktopWindowObservation],
+    ) -> Result<Vec<StagePerchEnded>, String> {
+        let (apply_bounds, ended) = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            if !state.window_observation_enabled {
+                return Ok(Vec::new());
+            }
+            apply_window_terrain_to_state(&mut state, observations)
+        };
+        for (label, bounds) in apply_bounds {
+            if let Some(window) = app.get_webview_window(&label) {
+                apply_actor_window_bounds(&window, &bounds)?;
+            }
+        }
+        if !ended.is_empty() || !observations.is_empty() {
+            self.emit_state(app)?;
+        }
+        Ok(ended)
     }
 
     pub fn set_actor_window_visible(
@@ -277,13 +343,147 @@ impl DesktopStageManager {
         app: &AppHandle,
         command: &RuntimeCommand,
     ) -> Result<(), String> {
+        let Some(actor_id) = command_actor_id(command) else {
+            return Ok(());
+        };
+        if command.kind == "stage.perch" {
+            let Some(window_key) = command.payload.get("windowKey").and_then(Value::as_str) else {
+                return Ok(());
+            };
+            {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                if !state.window_observation_enabled {
+                    eprintln!("Yuukei stage.perch ignored: window observation is disabled");
+                    return Ok(());
+                }
+                if !state.actors.contains_key(&actor_id) {
+                    return Ok(());
+                }
+                state.perches.insert(
+                    actor_id,
+                    StagePerch {
+                        window_key: window_key.to_string(),
+                    },
+                );
+            }
+            return self.emit_state(app);
+        }
+        if command.kind == "stage.perch.release" {
+            let apply_bounds = {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                state.perches.remove(&actor_id);
+                restore_actor_to_desktop(&mut state, &actor_id)
+            };
+            if let Some((label, bounds)) = apply_bounds {
+                if let Some(window) = app.get_webview_window(&label) {
+                    apply_actor_window_bounds(&window, &bounds)?;
+                }
+                return self.emit_state(app);
+            }
+            return Ok(());
+        }
+        if command.kind == "dialogue.choices.clear" {
+            let Some(choice_id) = command.payload.get("choiceId").and_then(Value::as_str) else {
+                return Ok(());
+            };
+            {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                for bubble in state.bubbles.values_mut() {
+                    if bubble.actor_id == actor_id
+                        && bubble
+                            .choice
+                            .as_ref()
+                            .is_some_and(|choice| choice.choice_id == choice_id)
+                    {
+                        bubble.choice = None;
+                    }
+                }
+            }
+            return self.emit_state(app);
+        }
+
+        if command.kind == "dialogue.choices" {
+            let Some(choice_id) = command.payload.get("choiceId").and_then(Value::as_str) else {
+                return Ok(());
+            };
+            let Some(choices) = command.payload.get("choices").and_then(Value::as_array) else {
+                return Ok(());
+            };
+            let choices = choices
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if choices.is_empty() {
+                return Ok(());
+            }
+            let timeout_seconds = command
+                .payload
+                .get("timeoutSeconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(30);
+            {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                if !state.actors.contains_key(&actor_id) {
+                    return Ok(());
+                }
+                for bubble in state.bubbles.values_mut() {
+                    if bubble.actor_id == actor_id {
+                        bubble.choice = None;
+                    }
+                }
+                let latest_bubble_id = state
+                    .bubbles
+                    .values()
+                    .filter(|bubble| bubble.actor_id == actor_id)
+                    .max_by_key(|bubble| bubble.created_at_ms)
+                    .map(|bubble| bubble.bubble_id.clone());
+                let choice = StageBubbleChoice {
+                    choice_id: choice_id.to_string(),
+                    choices,
+                    timeout_seconds,
+                };
+                if let Some(bubble_id) = latest_bubble_id {
+                    if let Some(bubble) = state.bubbles.get_mut(&bubble_id) {
+                        bubble.choice = Some(choice);
+                        bubble.duration_ms =
+                            bubble.duration_ms.max(timeout_seconds.saturating_mul(1000));
+                    }
+                } else {
+                    state.bubbles.insert(
+                        command.id.clone(),
+                        StageBubble {
+                            bubble_id: command.id.clone(),
+                            actor_id,
+                            text: String::new(),
+                            choice: Some(choice),
+                            created_at_ms: now_ms(),
+                            duration_ms: timeout_seconds
+                                .saturating_mul(1000)
+                                .clamp(MIN_BUBBLE_DURATION_MS, MAX_BUBBLE_DURATION_MS),
+                        },
+                    );
+                }
+            }
+            return self.emit_state(app);
+        }
+
         if command.kind != "dialogue.say" {
             return Ok(());
         }
         let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let Some(actor_id) = command_actor_id(command) else {
             return Ok(());
         };
         let duration_ms = command
@@ -306,6 +506,7 @@ impl DesktopStageManager {
                     bubble_id: command.id.clone(),
                     actor_id,
                     text: text.to_string(),
+                    choice: None,
                     created_at_ms: now_ms(),
                     duration_ms,
                 },
@@ -646,6 +847,100 @@ fn normalize_actor_window_bounds(bounds: StageRect, monitors: &[StageMonitor]) -
     };
     let monitor = best_monitor_bounds_for_rect(&bounds, monitors);
     clamp_rect_to_bounds(bounds, &monitor, ACTOR_WINDOW_MARGIN)
+}
+
+fn perch_actor_bounds(
+    actor_bounds: &StageRect,
+    target: &yuukei_device_host::DesktopWindowFrame,
+    monitors: &[StageMonitor],
+) -> StageRect {
+    let target = StageRect {
+        x: target.x,
+        y: target.y,
+        width: target.width,
+        height: target.height,
+    };
+    let width = if actor_bounds.width > 0.0 {
+        actor_bounds.width
+    } else {
+        ACTOR_WINDOW_WIDTH
+    };
+    let height = if actor_bounds.height > 0.0 {
+        actor_bounds.height
+    } else {
+        ACTOR_WINDOW_HEIGHT
+    };
+    let desired = StageRect {
+        x: target.x + (target.width / 2.0) - (width / 2.0),
+        y: target.y - height,
+        width,
+        height,
+    };
+    let monitor = best_monitor_bounds_for_rect(&target, monitors);
+    clamp_rect_to_bounds(desired, &monitor, 0.0)
+}
+
+fn apply_window_terrain_to_state(
+    state: &mut DesktopStageState,
+    observations: &[DesktopWindowObservation],
+) -> (Vec<(String, StageRect)>, Vec<StagePerchEnded>) {
+    let windows = observations
+        .iter()
+        .map(|window| (window.window_key.as_str(), &window.frame))
+        .collect::<BTreeMap<_, _>>();
+    let mut apply_bounds = Vec::new();
+    let mut ended = Vec::new();
+    let actor_ids = state.perches.keys().cloned().collect::<Vec<_>>();
+    for actor_id in actor_ids {
+        let Some(perch) = state.perches.get(&actor_id).cloned() else {
+            continue;
+        };
+        if let Some(target) = windows.get(perch.window_key.as_str()) {
+            let monitors = state.monitors.clone();
+            let Some(actor) = state.actors.get_mut(&actor_id) else {
+                state.perches.remove(&actor_id);
+                continue;
+            };
+            let next_bounds = perch_actor_bounds(&actor.bounds, target, &monitors);
+            actor.bounds = next_bounds.clone();
+            actor.anchor = default_actor_anchor(&next_bounds);
+            apply_bounds.push((actor.window_label.clone(), next_bounds));
+        } else {
+            state.perches.remove(&actor_id);
+            if let Some((label, bounds)) = restore_actor_to_desktop(state, &actor_id) {
+                apply_bounds.push((label, bounds));
+            }
+            ended.push(StagePerchEnded {
+                actor_id,
+                window_key: perch.window_key,
+                reason: "window-closed",
+            });
+        }
+    }
+    (apply_bounds, ended)
+}
+
+fn restore_actor_to_desktop(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+) -> Option<(String, StageRect)> {
+    let label = state.actors.get(actor_id)?.window_label.clone();
+    let index = state
+        .actors
+        .keys()
+        .position(|key| key == actor_id)
+        .unwrap_or_default();
+    let occupied = state
+        .actors
+        .iter()
+        .filter(|(other_actor_id, _)| other_actor_id.as_str() != actor_id)
+        .map(|(_, actor)| actor.bounds.clone())
+        .collect::<Vec<_>>();
+    let bounds = place_actor_window(index, &state.monitors, &occupied);
+    let actor = state.actors.get_mut(actor_id)?;
+    actor.bounds = bounds.clone();
+    actor.anchor = default_actor_anchor(&bounds);
+    Some((label, bounds))
 }
 
 fn best_monitor_bounds_for_rect(rect: &StageRect, monitors: &[StageMonitor]) -> StageRect {
@@ -1086,6 +1381,91 @@ mod tests {
             assert_eq!(bounds.width, ACTOR_WINDOW_WIDTH);
             assert_eq!(bounds.height, ACTOR_WINDOW_HEIGHT);
         }
+    }
+
+    #[test]
+    fn perch_actor_bounds_centers_on_top_edge_and_clamps_to_monitor() {
+        let monitors = vec![test_monitor(1000.0, 800.0)];
+        let actor = StageRect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        };
+        let target = yuukei_device_host::DesktopWindowFrame {
+            x: 300.0,
+            y: 300.0,
+            width: 400.0,
+            height: 300.0,
+        };
+
+        let perched = perch_actor_bounds(&actor, &target, &monitors);
+
+        assert_eq!(
+            perched,
+            StageRect {
+                x: 400.0,
+                y: 200.0,
+                width: 200.0,
+                height: 100.0,
+            }
+        );
+
+        let near_edge = yuukei_device_host::DesktopWindowFrame {
+            x: 20.0,
+            y: 40.0,
+            width: 80.0,
+            height: 200.0,
+        };
+        let clamped = perch_actor_bounds(&actor, &near_edge, &monitors);
+        assert_eq!(clamped.x, 0.0);
+        assert_eq!(clamped.y, 0.0);
+    }
+
+    #[test]
+    fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
+        let spec = test_specs(&["yuukei"]).remove(0);
+        let mut state = DesktopStageState {
+            monitors: vec![test_monitor(1000.0, 800.0)],
+            actors: BTreeMap::from([(
+                "yuukei".to_string(),
+                actor_from_spec(
+                    &spec,
+                    StageRect {
+                        x: 400.0,
+                        y: 200.0,
+                        width: 200.0,
+                        height: 100.0,
+                    },
+                    true,
+                ),
+            )]),
+            bubbles: BTreeMap::new(),
+            perches: BTreeMap::from([(
+                "yuukei".to_string(),
+                StagePerch {
+                    window_key: "window-1".to_string(),
+                },
+            )]),
+            window_observation_enabled: true,
+        };
+
+        let (apply_bounds, ended) = apply_window_terrain_to_state(&mut state, &[]);
+
+        assert_eq!(
+            ended,
+            vec![StagePerchEnded {
+                actor_id: "yuukei".to_string(),
+                window_key: "window-1".to_string(),
+                reason: "window-closed",
+            }]
+        );
+        assert!(state.perches.is_empty());
+        assert_eq!(apply_bounds.len(), 1);
+        assert_eq!(
+            state.actors.get("yuukei").expect("actor").bounds.width,
+            ACTOR_WINDOW_WIDTH
+        );
     }
 
     #[test]

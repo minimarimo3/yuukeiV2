@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -13,15 +13,19 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use yuukei_capability::CapabilityRouter;
-use yuukei_event_log::{EventLog, EventLogQuery};
-use yuukei_extension::ProcessHookExtension;
+use yuukei_event_log::{
+    DeleteSummary, EventLog, EventLogPrivacyFilter, EventLogQuery,
+    DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR, DEFAULT_MAX_EVENT_LOG_RECORDS,
+};
+use yuukei_extension::{ProcessHookExtension, ProcessRuntimeSupervisor};
 use yuukei_protocol::{
     new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
-    MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, ResidentSnapshot,
-    RuntimeCommand, RuntimeEvent, SurfaceKind, SurfacePresentation, SurfaceRenderer,
-    SurfaceSession,
+    MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, Privacy,
+    ResidentSnapshot, RetentionPolicy, RuntimeCommand, RuntimeEvent, SurfaceKind,
+    SurfacePresentation, SurfaceRenderer, SurfaceSession,
 };
-use yuukei_resident_home::{ResidentHome, ResidentHomeError};
+pub use yuukei_resident_home::ResidentEventLogPage;
+use yuukei_resident_home::{ResidentEventLogReadOptions, ResidentHome, ResidentHomeError};
 use yuukei_world::{
     ActorHitZoneShape, ActorHitZoneSource, ActorRendererKind, DaihonDiagnosticEntry, WorldError,
     WorldPack, YuukeiDaihonAdapter,
@@ -46,7 +50,9 @@ pub const CLI_SURFACE_ID: &str = "surface-cli";
 pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
 const PRESENCE_LOOP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const PRESENCE_IDLE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 const TALK_IMPULSE_RECENT_ACTIVITY_SUPPRESSION: Duration = Duration::from_secs(60);
+const EVENT_LOG_TRIM_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Error)]
 pub enum DeviceHostError {
@@ -66,6 +72,12 @@ pub enum DeviceHostError {
     ExtensionSettings(String),
     #[error("app settings error: {0}")]
     AppSettings(String),
+    #[error("observation settings error: {0}")]
+    ObservationSettings(String),
+    #[error("onboarding settings error: {0}")]
+    OnboardingSettings(String),
+    #[error("world pack import error: {0}")]
+    WorldPackImport(String),
     #[error("presence state lock is poisoned")]
     PresenceState,
     #[error("Daihon diagnostic state lock is poisoned")]
@@ -85,6 +97,9 @@ impl DeviceHostError {
             | Self::AppLog(_)
             | Self::ExtensionSettings(_)
             | Self::AppSettings(_)
+            | Self::ObservationSettings(_)
+            | Self::OnboardingSettings(_)
+            | Self::WorldPackImport(_)
             | Self::PresenceState
             | Self::DaihonDiagnosticState => None,
         }
@@ -250,6 +265,534 @@ impl AppSettingsRegistry {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ObservationSettingsState {
+    pub windows: bool,
+    pub folders: bool,
+    pub downloads: bool,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ObservationSettingsRegistry {
+    settings_path: PathBuf,
+    stored: StoredObservationSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredObservationSettings {
+    #[serde(default)]
+    windows: bool,
+    #[serde(default)]
+    folders: bool,
+    #[serde(default)]
+    downloads: bool,
+}
+
+impl ObservationSettingsRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("observations.json");
+        let exists = settings_path.exists();
+        let stored = if exists {
+            let raw = fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            StoredObservationSettings::default()
+        };
+        let registry = Self {
+            settings_path,
+            stored,
+        };
+        if !exists {
+            registry.save()?;
+        }
+        Ok(registry)
+    }
+
+    fn state(&self) -> ObservationSettingsState {
+        ObservationSettingsState {
+            windows: self.stored.windows,
+            folders: self.stored.folders,
+            downloads: self.stored.downloads,
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn set(&mut self, next: ObservationSettingsUpdate) -> Result<ObservationSettingsState> {
+        self.stored.windows = next.windows;
+        self.stored.folders = next.folders;
+        self.stored.downloads = next.downloads;
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationSettingsUpdate {
+    pub windows: bool,
+    pub folders: bool,
+    pub downloads: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingState {
+    pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct OnboardingRegistry {
+    settings_path: PathBuf,
+    stored: StoredOnboardingState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredOnboardingState {
+    #[serde(default)]
+    completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+}
+
+impl OnboardingRegistry {
+    fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("onboarding.json");
+        let stored = if settings_path.exists() {
+            let raw = fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&raw)?
+        } else {
+            StoredOnboardingState::default()
+        };
+        Ok(Self {
+            settings_path,
+            stored,
+        })
+    }
+
+    fn state(&self) -> OnboardingState {
+        OnboardingState {
+            completed: self.stored.completed,
+            completed_at: self.stored.completed_at.clone(),
+            settings_path: self.settings_path.clone(),
+        }
+    }
+
+    fn complete(&mut self) -> Result<OnboardingState> {
+        self.stored.completed = true;
+        self.stored.completed_at = Some(now_timestamp());
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EventLogPrivacyCategoryFilter {
+    All,
+    DesktopObservation,
+    None,
+}
+
+impl From<EventLogPrivacyCategoryFilter> for EventLogPrivacyFilter {
+    fn from(value: EventLogPrivacyCategoryFilter) -> Self {
+        match value {
+            EventLogPrivacyCategoryFilter::All => EventLogPrivacyFilter::All,
+            EventLogPrivacyCategoryFilter::DesktopObservation => {
+                EventLogPrivacyFilter::Category("desktop-observation".to_string())
+            }
+            EventLogPrivacyCategoryFilter::None => EventLogPrivacyFilter::None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventLogDeleteResult {
+    pub deleted: usize,
+}
+
+impl From<DeleteSummary> for EventLogDeleteResult {
+    fn from(value: DeleteSummary) -> Self {
+        Self {
+            deleted: value.deleted,
+        }
+    }
+}
+
+const WORLD_PACK_IMPORT_MAX_BYTES: u64 = 500 * 1024 * 1024;
+const WORLD_PACK_IMPORT_MAX_ENTRIES: usize = 5000;
+const WORLD_PACK_LICENSE_TEXT_LIMIT: usize = 4000;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldPackZipInspection {
+    pub pack_id: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_source: Option<String>,
+    pub imported_root: PathBuf,
+    pub replaces_existing: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InspectedWorldPackZip {
+    root_prefix: Option<PathBuf>,
+    pack_id: String,
+    display_name: String,
+    license_text: Option<String>,
+    license_source: Option<String>,
+    imported_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LicenseCandidate {
+    license_index: Option<usize>,
+    license_txt_index: Option<usize>,
+    readme_index: Option<usize>,
+}
+
+impl LicenseCandidate {
+    fn set_file(&mut self, name: &str, index: usize) {
+        if name == "LICENSE" {
+            self.license_index.get_or_insert(index);
+        } else if name == "LICENSE.txt" {
+            self.license_txt_index.get_or_insert(index);
+        } else if name == "README.md" {
+            self.readme_index.get_or_insert(index);
+        }
+    }
+
+    fn selected(&self) -> Option<(usize, &'static str)> {
+        self.license_index
+            .map(|index| (index, "LICENSE"))
+            .or_else(|| self.license_txt_index.map(|index| (index, "LICENSE.txt")))
+            .or_else(|| self.readme_index.map(|index| (index, "README.md")))
+    }
+}
+
+fn inspect_world_pack_zip_at(
+    data_dir: &Path,
+    path: impl AsRef<Path>,
+) -> Result<WorldPackZipInspection> {
+    let zip_path = path.as_ref();
+    let file = File::open(zip_path).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを開けませんでした: {}", error))
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
+    })?;
+    let inspected = inspect_world_pack_zip_archive(data_dir, &mut archive)?;
+    Ok(WorldPackZipInspection {
+        pack_id: inspected.pack_id,
+        display_name: inspected.display_name,
+        license_text: inspected.license_text,
+        license_source: inspected.license_source,
+        replaces_existing: inspected.imported_root.exists(),
+        imported_root: inspected.imported_root,
+    })
+}
+
+fn inspect_world_pack_zip_archive<R: Read + Seek>(
+    data_dir: &Path,
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<InspectedWorldPackZip> {
+    if archive.len() > WORLD_PACK_IMPORT_MAX_ENTRIES {
+        return Err(DeviceHostError::WorldPackImport(format!(
+            "zip内のファイル数が多すぎます。上限は{}件です。",
+            WORLD_PACK_IMPORT_MAX_ENTRIES
+        )));
+    }
+
+    let mut total_size = 0_u64;
+    let mut safe_paths: Vec<(usize, PathBuf)> = Vec::new();
+    let mut pack_json_candidates: Vec<(usize, PathBuf)> = Vec::new();
+
+    for index in 0..archive.len() {
+        let file = archive.by_index(index).map_err(world_pack_zip_error)?;
+        if file.is_symlink() {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内にシンボリックリンクがあります: {}",
+                file.name()
+            )));
+        }
+        let Some(enclosed_name) = file.enclosed_name() else {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内に安全でないパスがあります: {}",
+                file.name()
+            )));
+        };
+        total_size = total_size.saturating_add(file.size());
+        if total_size > WORLD_PACK_IMPORT_MAX_BYTES {
+            return Err(DeviceHostError::WorldPackImport(
+                "World Packが大きすぎます。展開後の合計サイズは500MBまでです。".to_string(),
+            ));
+        }
+        if file.is_dir() {
+            safe_paths.push((index, enclosed_name));
+            continue;
+        }
+        if enclosed_name.file_name().and_then(|name| name.to_str()) == Some("pack.json") {
+            let depth = enclosed_name.components().count();
+            if depth == 1 || depth == 2 {
+                pack_json_candidates.push((index, enclosed_name.clone()));
+            }
+        }
+        safe_paths.push((index, enclosed_name));
+    }
+
+    let (pack_json_index, pack_json_path) = match pack_json_candidates.as_slice() {
+        [(index, path)] => (*index, path.clone()),
+        [] => {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonが見つかりません。zipのルート直下、または単一のトップディレクトリ内に置いてください。"
+                    .to_string(),
+            ))
+        }
+        _ => {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonが複数見つかりました。World Packは1つだけ含めてください。".to_string(),
+            ))
+        }
+    };
+    let root_prefix = pack_root_prefix(&pack_json_path);
+
+    let mut license_candidates = LicenseCandidate::default();
+    for (index, path) in &safe_paths {
+        let Some(relative_path) = strip_pack_root(path, root_prefix.as_deref()) else {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonの外に別のファイルがあります。zipにはWorld Pack本体だけを入れてください。"
+                    .to_string(),
+            ));
+        };
+        if relative_path.components().count() == 1 {
+            if let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) {
+                license_candidates.set_file(name, *index);
+            }
+        }
+    }
+
+    let pack_json_text = read_zip_text(archive, pack_json_index, None)?;
+    let pack_json: Value = serde_json::from_str(&pack_json_text).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("pack.jsonが壊れています: {}", error))
+    })?;
+    let pack_id = pack_json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| DeviceHostError::WorldPackImport("pack.jsonのidが空です。".to_string()))?
+        .to_string();
+    let display_name = pack_json
+        .get("displayName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&pack_id)
+        .to_string();
+    let mut license_text = None;
+    let mut license_source = None;
+    if let Some((index, source)) = license_candidates.selected() {
+        license_text = Some(read_zip_text(
+            archive,
+            index,
+            Some(WORLD_PACK_LICENSE_TEXT_LIMIT as u64),
+        )?);
+        license_source = Some(source.to_string());
+    } else if let Some(license) = pack_json.get("license").and_then(Value::as_str) {
+        let trimmed = license.trim();
+        if !trimmed.is_empty() {
+            license_text = Some(truncate_text(trimmed, WORLD_PACK_LICENSE_TEXT_LIMIT));
+            license_source = Some("pack.json license".to_string());
+        }
+    }
+
+    Ok(InspectedWorldPackZip {
+        root_prefix,
+        pack_id: pack_id.clone(),
+        display_name,
+        license_text,
+        license_source,
+        imported_root: data_dir
+            .join("packs-imported")
+            .join(imported_pack_dir_name(&pack_id)),
+    })
+}
+
+fn import_world_pack_zip_to_dir(data_dir: &Path, zip_path: impl AsRef<Path>) -> Result<PathBuf> {
+    let zip_path = zip_path.as_ref();
+    let file = File::open(zip_path).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを開けませんでした: {}", error))
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
+    })?;
+    let inspected = inspect_world_pack_zip_archive(data_dir, &mut archive)?;
+    let imported_parent = data_dir.join("packs-imported");
+    fs::create_dir_all(&imported_parent)?;
+    let staging_root = imported_parent.join(format!(
+        ".importing-{}-{}",
+        imported_pack_dir_name(&inspected.pack_id),
+        now_timestamp()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+    ));
+    if staging_root.exists() {
+        fs::remove_dir_all(&staging_root)?;
+    }
+    fs::create_dir_all(&staging_root)?;
+
+    let extract_result = extract_world_pack_zip_archive(&mut archive, &inspected, &staging_root)
+        .and_then(|_| {
+            WorldPack::load_from_dir(&staging_root).map_err(|error| {
+                DeviceHostError::WorldPackImport(format!(
+                    "World Packの検証に失敗しました: {}",
+                    error
+                ))
+            })
+        });
+    if let Err(error) = extract_result {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+
+    if inspected.imported_root.exists() {
+        fs::remove_dir_all(&inspected.imported_root)?;
+    }
+    fs::rename(&staging_root, &inspected.imported_root)?;
+    Ok(inspected.imported_root)
+}
+
+fn extract_world_pack_zip_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    inspected: &InspectedWorldPackZip,
+    destination: &Path,
+) -> Result<()> {
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(world_pack_zip_error)?;
+        if file.is_symlink() {
+            return Err(DeviceHostError::WorldPackImport(format!(
+                "zip内にシンボリックリンクがあります: {}",
+                file.name()
+            )));
+        }
+        let path = file.enclosed_name().ok_or_else(|| {
+            DeviceHostError::WorldPackImport(format!(
+                "zip内に安全でないパスがあります: {}",
+                file.name()
+            ))
+        })?;
+        let Some(relative_path) = strip_pack_root(&path, inspected.root_prefix.as_deref()) else {
+            return Err(DeviceHostError::WorldPackImport(
+                "pack.jsonの外に別のファイルがあります。zipにはWorld Pack本体だけを入れてください。"
+                    .to_string(),
+            ));
+        };
+        let output_path = destination.join(relative_path);
+        if file.is_dir() {
+            fs::create_dir_all(&output_path)?;
+            continue;
+        }
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut output = File::create(&output_path)?;
+        io::copy(&mut file, &mut output)?;
+    }
+    Ok(())
+}
+
+fn pack_root_prefix(pack_json_path: &Path) -> Option<PathBuf> {
+    let mut components = pack_json_path.components();
+    let first = components.next()?.as_os_str().to_owned();
+    if components.next().is_some() {
+        Some(PathBuf::from(first))
+    } else {
+        None
+    }
+}
+
+fn strip_pack_root(path: &Path, root_prefix: Option<&Path>) -> Option<PathBuf> {
+    match root_prefix {
+        Some(prefix) => path.strip_prefix(prefix).ok().map(Path::to_path_buf),
+        None => Some(path.to_path_buf()),
+    }
+}
+
+fn read_zip_text<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    index: usize,
+    limit: Option<u64>,
+) -> Result<String> {
+    let mut file = archive.by_index(index).map_err(world_pack_zip_error)?;
+    let mut bytes = Vec::new();
+    match limit {
+        Some(limit) => {
+            let mut limited = (&mut file).take(limit);
+            limited.read_to_end(&mut bytes)?;
+        }
+        None => {
+            file.read_to_end(&mut bytes)?;
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn imported_pack_dir_name(pack_id: &str) -> String {
+    let sanitized: String = pack_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "imported-pack".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn world_pack_zip_error(error: zip::result::ZipError) -> DeviceHostError {
+    DeviceHostError::WorldPackImport(format!("zipファイルを読み込めませんでした: {}", error))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActorSurfaceAssetCatalog {
     pub world_pack_id: String,
     pub actors: Vec<ActorSurfaceAsset>,
@@ -392,6 +935,7 @@ pub struct LocalYuukeiRuntime {
     actor_surface_assets: ActorSurfaceAssetCatalog,
     presence_state: Arc<Mutex<PresenceState>>,
     session_daihon_diagnostics: Arc<Mutex<Vec<DaihonDiagnosticEntry>>>,
+    process_runtime_supervisor: ProcessRuntimeSupervisor,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -403,6 +947,8 @@ struct PresenceState {
     talk_interval_minutes: Option<u64>,
     next_talk_impulse_at: Option<DateTime<Utc>>,
     talk_rng_state: u64,
+    idle_active: bool,
+    last_idle_elapsed_seconds: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -519,12 +1065,443 @@ fn add_usage(totals: &mut TokenUsageTotals, input_tokens: u64, output_tokens: u6
     totals.output_tokens += output_tokens;
 }
 
+const DESKTOP_WINDOW_FOCUS_DEBOUNCE: Duration = Duration::from_secs(1);
+const DESKTOP_OBSERVATION_PRIVACY_CATEGORY: &str = "desktop-observation";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindowFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopWindowObservation {
+    pub window_key: String,
+    pub app: String,
+    pub frame: DesktopWindowFrame,
+    pub focused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DesktopWindowTransitionKind {
+    Appeared,
+    Closed,
+    Focused,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopWindowTransition {
+    pub kind: DesktopWindowTransitionKind,
+    pub window_key: String,
+    pub app: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DesktopFolderCategory {
+    Downloads,
+    Desktop,
+    Documents,
+    Pictures,
+    Trash,
+    Other,
+}
+
+impl DesktopFolderCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Downloads => "downloads",
+            Self::Desktop => "desktop",
+            Self::Documents => "documents",
+            Self::Pictures => "pictures",
+            Self::Trash => "trash",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KnownDesktopFolders {
+    pub downloads: Option<String>,
+    pub desktop: Option<String>,
+    pub documents: Option<String>,
+    pub pictures: Option<String>,
+    pub trash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopFolderObservation {
+    pub folder_key: String,
+    pub category: DesktopFolderCategory,
+    pub app: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopFolderTransition {
+    pub category: DesktopFolderCategory,
+    pub app: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DesktopFolderObservationState {
+    folders: BTreeMap<String, DesktopFolderSeen>,
+}
+
+#[derive(Clone, Debug)]
+struct DesktopFolderSeen {
+    category: DesktopFolderCategory,
+    last_emitted_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DownloadFileCategory {
+    Image,
+    Video,
+    Audio,
+    Document,
+    Archive,
+    App,
+    Other,
+}
+
+impl DownloadFileCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Document => "document",
+            Self::Archive => "archive",
+            Self::App => "app",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesktopDownloadObservation {
+    pub file_name: String,
+    pub file_category: DownloadFileCategory,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DesktopWindowObservationState {
+    windows: BTreeMap<String, DesktopWindowObservation>,
+    focused_key: Option<String>,
+    pending_focus: Option<PendingDesktopWindowFocus>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDesktopWindowFocus {
+    window_key: String,
+    since: DateTime<Utc>,
+}
+
+impl DesktopWindowObservationState {
+    pub fn update(
+        &mut self,
+        now: DateTime<Utc>,
+        observations: Vec<DesktopWindowObservation>,
+    ) -> Vec<DesktopWindowTransition> {
+        let next = observations
+            .into_iter()
+            .map(|observation| (observation.window_key.clone(), observation))
+            .collect::<BTreeMap<_, _>>();
+        let mut transitions = Vec::new();
+
+        for (window_key, observation) in &next {
+            if !self.windows.contains_key(window_key) {
+                transitions.push(DesktopWindowTransition {
+                    kind: DesktopWindowTransitionKind::Appeared,
+                    window_key: window_key.clone(),
+                    app: observation.app.clone(),
+                });
+            }
+        }
+
+        for (window_key, previous) in &self.windows {
+            if !next.contains_key(window_key) {
+                transitions.push(DesktopWindowTransition {
+                    kind: DesktopWindowTransitionKind::Closed,
+                    window_key: window_key.clone(),
+                    app: previous.app.clone(),
+                });
+            }
+        }
+
+        let current_focus = next
+            .values()
+            .find(|observation| observation.focused)
+            .map(|observation| observation.window_key.clone());
+        self.windows = next;
+        self.retain_focus_after_closures();
+
+        if let Some(focused) = self.evaluate_focused_transition(now, current_focus) {
+            transitions.push(focused);
+        }
+
+        transitions
+    }
+
+    fn retain_focus_after_closures(&mut self) {
+        if self
+            .focused_key
+            .as_ref()
+            .is_some_and(|key| !self.windows.contains_key(key))
+        {
+            self.focused_key = None;
+        }
+        if self
+            .pending_focus
+            .as_ref()
+            .is_some_and(|pending| !self.windows.contains_key(&pending.window_key))
+        {
+            self.pending_focus = None;
+        }
+    }
+
+    fn evaluate_focused_transition(
+        &mut self,
+        now: DateTime<Utc>,
+        current_focus: Option<String>,
+    ) -> Option<DesktopWindowTransition> {
+        let Some(current_focus) = current_focus else {
+            self.pending_focus = None;
+            return None;
+        };
+        if self.focused_key.as_deref() == Some(current_focus.as_str()) {
+            self.pending_focus = None;
+            return None;
+        }
+        match &mut self.pending_focus {
+            Some(pending) if pending.window_key == current_focus => {
+                let elapsed = now
+                    .signed_duration_since(pending.since)
+                    .to_std()
+                    .unwrap_or_default();
+                if elapsed < DESKTOP_WINDOW_FOCUS_DEBOUNCE {
+                    return None;
+                }
+            }
+            _ => {
+                self.pending_focus = Some(PendingDesktopWindowFocus {
+                    window_key: current_focus,
+                    since: now,
+                });
+                return None;
+            }
+        }
+        let window_key = self
+            .pending_focus
+            .take()
+            .map(|pending| pending.window_key)
+            .unwrap_or_default();
+        let app = self
+            .windows
+            .get(&window_key)
+            .map(|window| window.app.clone())
+            .unwrap_or_default();
+        self.focused_key = Some(window_key.clone());
+        Some(DesktopWindowTransition {
+            kind: DesktopWindowTransitionKind::Focused,
+            window_key,
+            app,
+        })
+    }
+}
+
+impl DesktopFolderObservationState {
+    pub fn update(
+        &mut self,
+        now: DateTime<Utc>,
+        observations: Vec<DesktopFolderObservation>,
+    ) -> Vec<DesktopFolderTransition> {
+        let mut transitions = Vec::new();
+        let current_keys = observations
+            .iter()
+            .map(|observation| observation.folder_key.clone())
+            .collect::<Vec<_>>();
+        for observation in observations {
+            let emit = match self.folders.get(&observation.folder_key) {
+                Some(seen) if seen.category == observation.category => now
+                    .signed_duration_since(seen.last_emitted_at)
+                    .to_std()
+                    .map(|elapsed| elapsed >= Duration::from_secs(60))
+                    .unwrap_or(false),
+                Some(_) | None => true,
+            };
+            if emit {
+                transitions.push(DesktopFolderTransition {
+                    category: observation.category,
+                    app: observation.app.clone(),
+                });
+                self.folders.insert(
+                    observation.folder_key,
+                    DesktopFolderSeen {
+                        category: observation.category,
+                        last_emitted_at: now,
+                    },
+                );
+            }
+        }
+        self.folders
+            .retain(|folder_key, _| current_keys.contains(folder_key));
+        transitions
+    }
+}
+
+impl DesktopWindowTransition {
+    pub fn signal(&self) -> &'static str {
+        match self.kind {
+            DesktopWindowTransitionKind::Appeared => "desktop.window.appeared",
+            DesktopWindowTransitionKind::Closed => "desktop.window.closed",
+            DesktopWindowTransitionKind::Focused => "desktop.window.focused",
+        }
+    }
+
+    fn payload(&self) -> JsonMap {
+        JsonMap::from([
+            ("windowKey".to_string(), json!(self.window_key)),
+            ("app".to_string(), json!(self.app)),
+        ])
+    }
+}
+
+impl DesktopFolderTransition {
+    pub fn signal(&self) -> &'static str {
+        "desktop.folder.opened"
+    }
+
+    fn payload(&self) -> JsonMap {
+        JsonMap::from([
+            ("category".to_string(), json!(self.category.as_str())),
+            ("app".to_string(), json!(self.app)),
+        ])
+    }
+}
+
+impl DesktopDownloadObservation {
+    pub fn signal(&self) -> &'static str {
+        "desktop.download.completed"
+    }
+
+    fn payload(&self) -> JsonMap {
+        JsonMap::from([
+            ("fileName".to_string(), json!(self.file_name)),
+            (
+                "fileCategory".to_string(),
+                json!(self.file_category.as_str()),
+            ),
+        ])
+    }
+}
+
+pub fn categorize_desktop_folder_path(
+    path: &str,
+    known: &KnownDesktopFolders,
+) -> DesktopFolderCategory {
+    if is_windows_trash_shell_path(path) {
+        return DesktopFolderCategory::Trash;
+    }
+    let normalized = normalize_observed_path(path);
+    for (category, candidate) in [
+        (DesktopFolderCategory::Downloads, known.downloads.as_deref()),
+        (DesktopFolderCategory::Desktop, known.desktop.as_deref()),
+        (DesktopFolderCategory::Documents, known.documents.as_deref()),
+        (DesktopFolderCategory::Pictures, known.pictures.as_deref()),
+        (DesktopFolderCategory::Trash, known.trash.as_deref()),
+    ] {
+        if candidate
+            .map(normalize_observed_path)
+            .is_some_and(|candidate| candidate == normalized)
+        {
+            return category;
+        }
+    }
+    DesktopFolderCategory::Other
+}
+
+pub fn classify_download_file_name(file_name: &str) -> DownloadFileCategory {
+    let extension = file_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tiff" | "svg" => {
+            DownloadFileCategory::Image
+        }
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" | "wmv" => DownloadFileCategory::Video,
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" => DownloadFileCategory::Audio,
+        "pdf" | "txt" | "md" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "rtf" => {
+            DownloadFileCategory::Document
+        }
+        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" => DownloadFileCategory::Archive,
+        "dmg" | "pkg" | "app" | "exe" | "msi" | "deb" | "rpm" | "apk" => DownloadFileCategory::App,
+        _ => DownloadFileCategory::Other,
+    }
+}
+
+pub fn download_file_observation_from_name(file_name: &str) -> Option<DesktopDownloadObservation> {
+    if should_ignore_download_file_name(file_name) {
+        return None;
+    }
+    Some(DesktopDownloadObservation {
+        file_name: file_name.to_string(),
+        file_category: classify_download_file_name(file_name),
+    })
+}
+
+pub fn should_ignore_download_file_name(file_name: &str) -> bool {
+    if file_name.is_empty() || file_name.starts_with('.') {
+        return true;
+    }
+    let lower = file_name.to_ascii_lowercase();
+    [".crdownload", ".part", ".download", ".tmp", ".aria2"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn normalize_observed_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized.to_ascii_lowercase()
+}
+
+fn is_windows_trash_shell_path(path: &str) -> bool {
+    path.to_ascii_uppercase()
+        .contains("645FF040-5081-101B-9F08-00AA002F954E")
+}
+
+fn desktop_observation_privacy() -> Privacy {
+    Privacy {
+        category: DESKTOP_OBSERVATION_PRIVACY_CATEGORY.to_string(),
+        retention: RetentionPolicy::Short,
+        extension_readable: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TalkImpulseDecision {
     Disabled,
     Waiting,
     SkippedRecentActivity,
     Emit,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum IdlePresenceDecision {
+    Start {
+        threshold_seconds: u64,
+    },
+    End {
+        idle_seconds: u64,
+        idle_minutes: u64,
+    },
 }
 
 fn evaluate_life_tick(now: DateTime<Utc>, state: &mut PresenceState) -> bool {
@@ -577,6 +1554,47 @@ fn evaluate_talk_impulse(
         return TalkImpulseDecision::SkippedRecentActivity;
     }
     TalkImpulseDecision::Emit
+}
+
+fn evaluate_idle_presence(
+    idle_seconds_since_last_input: Option<f64>,
+    state: &mut PresenceState,
+) -> Option<IdlePresenceDecision> {
+    let idle_seconds = idle_seconds_since_last_input?;
+    if !idle_seconds.is_finite() || idle_seconds < 0.0 {
+        return None;
+    }
+
+    let threshold_seconds = PRESENCE_IDLE_THRESHOLD.as_secs();
+    if idle_seconds >= threshold_seconds as f64 {
+        state.last_idle_elapsed_seconds = Some(
+            state
+                .last_idle_elapsed_seconds
+                .map_or(idle_seconds, |previous| previous.max(idle_seconds)),
+        );
+        if state.idle_active {
+            return None;
+        }
+        state.idle_active = true;
+        return Some(IdlePresenceDecision::Start { threshold_seconds });
+    }
+
+    if !state.idle_active {
+        state.last_idle_elapsed_seconds = None;
+        return None;
+    }
+
+    state.idle_active = false;
+    let idle_seconds = state
+        .last_idle_elapsed_seconds
+        .take()
+        .unwrap_or(threshold_seconds as f64)
+        .floor()
+        .max(0.0) as u64;
+    Some(IdlePresenceDecision::End {
+        idle_seconds,
+        idle_minutes: idle_seconds / 60,
+    })
 }
 
 fn recently_active(now: DateTime<Utc>, last_user_activity_at: Option<DateTime<Utc>>) -> bool {
@@ -670,6 +1688,29 @@ impl LocalYuukeiRuntime {
         Ok(runtime)
     }
 
+    pub fn inspect_world_pack_zip(path: impl AsRef<Path>) -> Result<WorldPackZipInspection> {
+        Self::inspect_world_pack_zip_in(LocalRuntimeEnvironment::default_local(), path)
+    }
+
+    pub fn inspect_world_pack_zip_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<WorldPackZipInspection> {
+        inspect_world_pack_zip_at(&env.data_dir, path)
+    }
+
+    pub async fn import_world_pack_zip(path: impl AsRef<Path>) -> Result<Self> {
+        Self::import_world_pack_zip_in(LocalRuntimeEnvironment::default_local(), path).await
+    }
+
+    pub async fn import_world_pack_zip_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let imported_root = import_world_pack_zip_to_dir(&env.data_dir, path)?;
+        Self::select_world_pack_directory_in(env, imported_root).await
+    }
+
     pub async fn reset_world_pack_to_default() -> Result<Self> {
         Self::reset_world_pack_to_default_in(LocalRuntimeEnvironment::default_local()).await
     }
@@ -702,6 +1743,49 @@ impl LocalYuukeiRuntime {
     pub fn app_settings_state_in(env: LocalRuntimeEnvironment) -> Result<AppSettingsState> {
         let registry = AppSettingsRegistry::open(&env.data_dir)?;
         Ok(registry.state())
+    }
+
+    pub fn observation_settings_state() -> Result<ObservationSettingsState> {
+        Self::observation_settings_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn observation_settings_state_in(
+        env: LocalRuntimeEnvironment,
+    ) -> Result<ObservationSettingsState> {
+        let registry = ObservationSettingsRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
+    pub fn set_observation_settings(
+        settings: ObservationSettingsUpdate,
+    ) -> Result<ObservationSettingsState> {
+        Self::set_observation_settings_in(LocalRuntimeEnvironment::default_local(), settings)
+    }
+
+    pub fn set_observation_settings_in(
+        env: LocalRuntimeEnvironment,
+        settings: ObservationSettingsUpdate,
+    ) -> Result<ObservationSettingsState> {
+        let mut registry = ObservationSettingsRegistry::open(&env.data_dir)?;
+        registry.set(settings)
+    }
+
+    pub fn onboarding_state() -> Result<OnboardingState> {
+        Self::onboarding_state_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn onboarding_state_in(env: LocalRuntimeEnvironment) -> Result<OnboardingState> {
+        let registry = OnboardingRegistry::open(&env.data_dir)?;
+        Ok(registry.state())
+    }
+
+    pub fn complete_onboarding() -> Result<OnboardingState> {
+        Self::complete_onboarding_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn complete_onboarding_in(env: LocalRuntimeEnvironment) -> Result<OnboardingState> {
+        let mut registry = OnboardingRegistry::open(&env.data_dir)?;
+        registry.complete()
     }
 
     pub fn set_app_talk_interval_minutes(minutes: u64) -> Result<AppSettingsState> {
@@ -942,8 +2026,13 @@ impl LocalYuukeiRuntime {
             }
         };
         let extension_settings = config.extension_settings_registry()?;
-        let capabilities =
-            build_extension_capability_router(&extension_settings, &logger, &config.data_dir)?;
+        let process_runtime_supervisor = ProcessRuntimeSupervisor::new();
+        let capabilities = build_extension_capability_router(
+            &extension_settings,
+            &logger,
+            &config.data_dir,
+            &process_runtime_supervisor,
+        )?;
         let scene_history_logger = {
             let logger = logger.clone();
             Arc::new(move |error: yuukei_world::SceneHistoryPersistenceError| {
@@ -1005,8 +2094,15 @@ impl LocalYuukeiRuntime {
                 return Err(error.into());
             }
         };
-        let loaded_extensions =
-            load_trusted_extensions(&extension_settings, &home, &logger, &config.data_dir).await?;
+        let loaded_extensions = load_trusted_extensions(
+            &extension_settings,
+            &home,
+            &logger,
+            &config.data_dir,
+            &process_runtime_supervisor,
+        )
+        .await?;
+        trim_event_log_if_needed(&home, &logger);
 
         logger.record(
             "runtime.open.ready",
@@ -1045,8 +2141,10 @@ impl LocalYuukeiRuntime {
             actor_surface_assets,
             presence_state: Arc::new(Mutex::new(PresenceState::default())),
             session_daihon_diagnostics: Arc::new(Mutex::new(initial_session_daihon_diagnostics)),
+            process_runtime_supervisor,
         };
         runtime.record_world_pack_activated().await?;
+        runtime.spawn_event_log_trim_loop();
         Ok(runtime)
     }
 
@@ -1056,6 +2154,18 @@ impl LocalYuukeiRuntime {
 
     pub fn logger(&self) -> AppLogger {
         self.logger.clone()
+    }
+
+    fn spawn_event_log_trim_loop(&self) {
+        let home = self.home.clone();
+        let logger = self.logger.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(EVENT_LOG_TRIM_CHECK_INTERVAL);
+            loop {
+                interval.tick().await;
+                trim_event_log_if_needed(&home, &logger);
+            }
+        });
     }
 
     pub fn paths(&self) -> &RuntimePaths {
@@ -1089,12 +2199,32 @@ impl LocalYuukeiRuntime {
     }
 
     pub fn extension_settings(&self) -> Result<ExtensionSettingsState> {
-        ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
-            .map(|registry| registry.state())
+        let mut state =
+            ExtensionSettingsRegistry::open(&self.paths.data_dir, &self.paths.extension_root)
+                .map(|registry| registry.state())?;
+        let statuses = self.process_runtime_supervisor.statuses();
+        for extension in &mut state.installed {
+            extension.runtime_status = statuses.get(&extension.extension_id).cloned();
+        }
+        Ok(state)
+    }
+
+    pub fn restart_extension_process(&self, extension_id: &str) -> Result<ExtensionSettingsState> {
+        self.process_runtime_supervisor.restart(extension_id);
+        self.logger.record(
+            "extension.process.restart",
+            "device-host",
+            JsonMap::from([("extensionId".to_string(), json!(extension_id))]),
+        )?;
+        self.extension_settings()
     }
 
     pub fn app_settings(&self) -> Result<AppSettingsState> {
         AppSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
+    }
+
+    pub fn observation_settings(&self) -> Result<ObservationSettingsState> {
+        ObservationSettingsRegistry::open(&self.paths.data_dir).map(|registry| registry.state())
     }
 
     pub async fn list_resident_memories(
@@ -1128,6 +2258,69 @@ impl LocalYuukeiRuntime {
         self.home
             .forget_memories(entries, all)
             .await
+            .map_err(Into::into)
+    }
+
+    pub fn read_event_log_page(
+        &self,
+        kind_prefix: Option<String>,
+        privacy_category: EventLogPrivacyCategoryFilter,
+        before_sequence: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<ResidentEventLogPage> {
+        self.home
+            .read_event_log_page(ResidentEventLogReadOptions {
+                kind_prefix,
+                privacy_category: privacy_category.into(),
+                before_sequence,
+                limit,
+            })
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_before(&self, timestamp: impl Into<String>) -> Result<usize> {
+        self.home
+            .count_event_log_delete_before(timestamp)
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<usize> {
+        self.home
+            .count_event_log_delete_by_kind_prefix(prefix)
+            .map_err(Into::into)
+    }
+
+    pub fn count_event_log_delete_all(&self) -> Result<usize> {
+        self.home.count_event_log_delete_all().map_err(Into::into)
+    }
+
+    pub fn delete_event_log_before(
+        &self,
+        timestamp: impl Into<String>,
+    ) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_before(timestamp)
+            .map(EventLogDeleteResult::from)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_by_kind_prefix(
+        &self,
+        prefix: impl Into<String>,
+    ) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_by_kind_prefix(prefix)
+            .map(EventLogDeleteResult::from)
+            .map_err(Into::into)
+    }
+
+    pub fn delete_event_log_all(&self) -> Result<EventLogDeleteResult> {
+        self.home
+            .delete_event_log_all()
+            .map(EventLogDeleteResult::from)
             .map_err(Into::into)
     }
 
@@ -1257,6 +2450,72 @@ impl LocalYuukeiRuntime {
                     "runtime.commands.error",
                     "resident-home",
                     error_payload("conversation.text", &error),
+                );
+                Err(error.into())
+            }
+        }
+    }
+
+    pub async fn send_conversation_choice(
+        &self,
+        surface_id: &str,
+        choice_id: &str,
+        choice: &str,
+        index: usize,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.mark_user_activity(Utc::now())?;
+        let event = build_conversation_choice_event(
+            self.resident_id(),
+            self.device_id(),
+            surface_id,
+            choice_id,
+            choice,
+            index,
+        );
+        self.logger.record(
+            "surface.input.conversation_choice",
+            "surface",
+            JsonMap::from([
+                ("eventId".to_string(), json!(event.id)),
+                ("surfaceId".to_string(), json!(surface_id)),
+                ("choiceId".to_string(), json!(choice_id)),
+                ("choice".to_string(), json!(choice)),
+                ("index".to_string(), json!(index)),
+            ]),
+        )?;
+
+        match self.home.ingest_event(event.clone()).await {
+            Ok(commands) => {
+                self.logger.record(
+                    "runtime.commands.emitted",
+                    "resident-home",
+                    JsonMap::from([
+                        ("sourceEventId".to_string(), json!(event.id)),
+                        (
+                            "commandIds".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.id)
+                                .collect::<Vec<_>>()),
+                        ),
+                        (
+                            "commandTypes".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.kind)
+                                .collect::<Vec<_>>()),
+                        ),
+                        ("count".to_string(), json!(commands.len())),
+                    ]),
+                )?;
+                Ok(commands)
+            }
+            Err(error) => {
+                self.record_runtime_daihon_diagnostics("conversation.choice", &error);
+                let _ = self.logger.record(
+                    "runtime.commands.error",
+                    "resident-home",
+                    error_payload("conversation.choice", &error),
                 );
                 Err(error.into())
             }
@@ -1399,12 +2658,81 @@ impl LocalYuukeiRuntime {
             .await
     }
 
+    pub async fn emit_desktop_window_transition(
+        &self,
+        transition: DesktopWindowTransition,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            transition.signal(),
+            transition.payload(),
+            Some(desktop_observation_privacy()),
+            None,
+        )
+        .await
+    }
+
+    pub async fn emit_desktop_folder_transition(
+        &self,
+        transition: DesktopFolderTransition,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            transition.signal(),
+            transition.payload(),
+            Some(desktop_observation_privacy()),
+            None,
+        )
+        .await
+    }
+
+    pub async fn emit_desktop_download_completed(
+        &self,
+        observation: DesktopDownloadObservation,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            observation.signal(),
+            observation.payload(),
+            Some(desktop_observation_privacy()),
+            None,
+        )
+        .await
+    }
+
+    pub async fn emit_stage_perch_ended(
+        &self,
+        actor_id: &str,
+        window_key: &str,
+        reason: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            "stage.perch.ended",
+            JsonMap::from([
+                ("windowKey".to_string(), json!(window_key)),
+                ("reason".to_string(), json!(reason)),
+            ]),
+            None,
+            Some(actor_id.to_string()),
+        )
+        .await
+    }
+
     pub fn spawn_presence_loop(&self) -> JoinHandle<()> {
+        self.spawn_presence_loop_with_idle_sampler(|| None)
+    }
+
+    pub fn spawn_presence_loop_with_idle_sampler<F>(&self, idle_sampler: F) -> JoinHandle<()>
+    where
+        F: Fn() -> Option<f64> + Send + Sync + 'static,
+    {
         let runtime = self.clone();
+        let idle_sampler = Arc::new(idle_sampler);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PRESENCE_LOOP_POLL_INTERVAL).await;
-                if let Err(error) = runtime.run_presence_loop_step(Utc::now()).await {
+                let idle_seconds_since_last_input = idle_sampler();
+                if let Err(error) = runtime
+                    .run_presence_loop_step(Utc::now(), idle_seconds_since_last_input)
+                    .await
+                {
                     let _ = runtime.logger.record(
                         "presence.loop.error",
                         "device-host",
@@ -1415,7 +2743,11 @@ impl LocalYuukeiRuntime {
         })
     }
 
-    async fn run_presence_loop_step(&self, now: DateTime<Utc>) -> Result<()> {
+    async fn run_presence_loop_step(
+        &self,
+        now: DateTime<Utc>,
+        idle_seconds_since_last_input: Option<f64>,
+    ) -> Result<()> {
         let settings = self.app_settings()?;
         let random = {
             let mut state = self
@@ -1425,7 +2757,7 @@ impl LocalYuukeiRuntime {
             next_rng_permyriad(&mut state.talk_rng_state, now)
         };
 
-        let (emit_life_tick, talk_decision) = {
+        let (emit_life_tick, talk_decision, idle_decision) = {
             let mut state = self
                 .presence_state
                 .lock()
@@ -1433,9 +2765,33 @@ impl LocalYuukeiRuntime {
             let emit_life_tick = evaluate_life_tick(now, &mut state);
             let talk_decision =
                 evaluate_talk_impulse(now, settings.talk_interval_minutes, random, &mut state);
-            (emit_life_tick, talk_decision)
+            let idle_decision = evaluate_idle_presence(idle_seconds_since_last_input, &mut state);
+            (emit_life_tick, talk_decision, idle_decision)
         };
 
+        match idle_decision {
+            Some(IdlePresenceDecision::Start { threshold_seconds }) => {
+                self.emit_runtime_event(
+                    "presence.idle.start",
+                    JsonMap::from([("thresholdSeconds".to_string(), json!(threshold_seconds))]),
+                )
+                .await?;
+            }
+            Some(IdlePresenceDecision::End {
+                idle_seconds,
+                idle_minutes,
+            }) => {
+                self.emit_runtime_event(
+                    "presence.idle.end",
+                    JsonMap::from([
+                        ("idleMinutes".to_string(), json!(idle_minutes)),
+                        ("idleSeconds".to_string(), json!(idle_seconds)),
+                    ]),
+                )
+                .await?;
+            }
+            None => {}
+        }
         if emit_life_tick {
             self.emit_presence_tick().await?;
         }
@@ -1469,6 +2825,17 @@ impl LocalYuukeiRuntime {
         kind: &str,
         payload: JsonMap,
     ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(kind, payload, None, None)
+            .await
+    }
+
+    async fn emit_runtime_event_with_options(
+        &self,
+        kind: &str,
+        payload: JsonMap,
+        privacy: Option<Privacy>,
+        actor_id: Option<String>,
+    ) -> Result<Vec<RuntimeCommand>> {
         let active_surface_id = self.home.snapshot()?.active_surface_id;
         let event = RuntimeEvent {
             id: new_id("evt"),
@@ -1480,7 +2847,8 @@ impl LocalYuukeiRuntime {
             causality: None,
             device_id: Some(self.device_id.clone()),
             surface_id: active_surface_id,
-            actor_id: None,
+            actor_id,
+            privacy,
         };
         self.logger.record(
             "runtime.event.emit",
@@ -1620,6 +2988,7 @@ impl LocalYuukeiRuntime {
             device_id: Some(self.device_id.clone()),
             surface_id: None,
             actor_id: None,
+            privacy: None,
         };
         self.home.ingest_event(event).await?;
         self.logger.record(
@@ -1659,6 +3028,8 @@ pub enum AppLogError {
 pub struct AppLogger {
     path: PathBuf,
     file: Arc<Mutex<File>>,
+    max_bytes: u64,
+    max_generations: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1673,7 +3044,18 @@ pub struct AppLogRecord {
 }
 
 impl AppLogger {
+    const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
+    const DEFAULT_MAX_GENERATIONS: usize = 3;
+
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, AppLogError> {
+        Self::open_with_rotation(path, Self::DEFAULT_MAX_BYTES, Self::DEFAULT_MAX_GENERATIONS)
+    }
+
+    fn open_with_rotation(
+        path: impl AsRef<Path>,
+        max_bytes: u64,
+        max_generations: usize,
+    ) -> std::result::Result<Self, AppLogError> {
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1681,6 +3063,8 @@ impl AppLogger {
         Ok(Self {
             path: path.as_ref().to_path_buf(),
             file: Arc::new(Mutex::new(file)),
+            max_bytes,
+            max_generations,
         })
     }
 
@@ -1702,11 +3086,57 @@ impl AppLogger {
             payload,
         };
         let mut file = self.file.lock().map_err(|_| AppLogError::PoisonedLock)?;
+        if let Err(error) = self.rotate_if_needed(&mut file) {
+            eprintln!(
+                "failed to rotate app activity log {}: {error}",
+                self.path.display()
+            );
+        }
         serde_json::to_writer(&mut *file, &record)?;
         file.write_all(b"\n")?;
         file.flush()?;
         Ok(record)
     }
+
+    fn rotate_if_needed(&self, file: &mut File) -> std::result::Result<(), AppLogError> {
+        if self.max_generations == 0 {
+            return Ok(());
+        }
+        let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        if size <= self.max_bytes {
+            return Ok(());
+        }
+        file.flush()?;
+        let oldest = rotated_app_log_path(&self.path, self.max_generations);
+        if oldest.exists() {
+            fs::remove_file(&oldest)?;
+        }
+        for generation in (1..self.max_generations).rev() {
+            let from = rotated_app_log_path(&self.path, generation);
+            if from.exists() {
+                fs::rename(&from, rotated_app_log_path(&self.path, generation + 1))?;
+            }
+        }
+        if self.path.exists() {
+            fs::rename(&self.path, rotated_app_log_path(&self.path, 1))?;
+        }
+        *file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        Ok(())
+    }
+}
+
+fn rotated_app_log_path(path: &Path, generation: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("app-activity.jsonl");
+    path.with_file_name(format!(
+        "{stem}.{generation}.jsonl",
+        stem = file_name.trim_end_matches(".jsonl")
+    ))
 }
 
 pub fn tauri_surface_session(device_id: &str) -> SurfaceSession {
@@ -1770,6 +3200,34 @@ pub fn build_conversation_text_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: None,
+        privacy: None,
+    }
+}
+
+pub fn build_conversation_choice_event(
+    resident_id: &str,
+    device_id: &str,
+    surface_id: &str,
+    choice_id: &str,
+    choice: &str,
+    index: usize,
+) -> RuntimeEvent {
+    RuntimeEvent {
+        id: new_id("evt"),
+        kind: "conversation.choice".to_string(),
+        timestamp: now_timestamp(),
+        source: "surface".to_string(),
+        resident_id: resident_id.to_string(),
+        payload: JsonMap::from([
+            ("choiceId".to_string(), json!(choice_id)),
+            ("choice".to_string(), json!(choice)),
+            ("index".to_string(), json!(index)),
+        ]),
+        causality: None,
+        device_id: Some(device_id.to_string()),
+        surface_id: Some(surface_id.to_string()),
+        actor_id: None,
+        privacy: None,
     }
 }
 
@@ -1827,6 +3285,7 @@ pub fn build_avatar_gesture_poke_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: Some(actor_id),
+        privacy: None,
     }
 }
 
@@ -2108,6 +3567,7 @@ async fn load_trusted_extensions(
     home: &ResidentHome,
     logger: &AppLogger,
     data_dir: &Path,
+    process_runtime_supervisor: &ProcessRuntimeSupervisor,
 ) -> Result<usize> {
     let mut loaded = 0;
     let hook_order = extension_settings.hook_order(&ExtensionHookPoint::BeforeCommandEmit);
@@ -2124,6 +3584,7 @@ async fn load_trusted_extensions(
                     install.enabled,
                     extension_data_dir,
                     install.settings_json,
+                    process_runtime_supervisor.clone(),
                 ))
                 .await?;
                 loaded += 1;
@@ -2164,6 +3625,7 @@ fn build_extension_capability_router(
     extension_settings: &ExtensionSettingsRegistry,
     logger: &AppLogger,
     data_dir: &Path,
+    process_runtime_supervisor: &ProcessRuntimeSupervisor,
 ) -> Result<CapabilityRouter> {
     let mut router = CapabilityRouter::new();
     for entry in extension_settings.runtime_entries() {
@@ -2181,6 +3643,7 @@ fn build_extension_capability_router(
                         install.enabled,
                         extension_data_dir,
                         install.settings_json,
+                        process_runtime_supervisor.clone(),
                     ))
                     .map_err(|error| DeviceHostError::ExtensionSettings(error.to_string()))?;
             }
@@ -2212,13 +3675,54 @@ fn extension_with_runtime_environment(
     enabled: bool,
     data_dir: impl Into<PathBuf>,
     settings_json: Option<String>,
+    process_runtime_supervisor: ProcessRuntimeSupervisor,
 ) -> ProcessHookExtension {
     let extension = ProcessHookExtension::from_installed_manifest(manifest, install_dir, enabled)
-        .with_data_dir(data_dir);
+        .with_data_dir(data_dir)
+        .with_runtime_supervisor(process_runtime_supervisor);
     if let Some(settings_json) = settings_json {
         extension.with_settings_json(settings_json)
     } else {
         extension
+    }
+}
+
+fn trim_event_log_if_needed(home: &ResidentHome, logger: &AppLogger) {
+    match home.trim_event_log_to_record_limit(
+        DEFAULT_MAX_EVENT_LOG_RECORDS,
+        DEFAULT_EVENT_LOG_TRIM_FRACTION_DIVISOR,
+    ) {
+        Ok(summary) if summary.deleted > 0 => {
+            let _ = logger.record(
+                "event_log.trimmed",
+                "device-host",
+                JsonMap::from([
+                    ("deleted".to_string(), json!(summary.deleted)),
+                    (
+                        "oldestTimestamp".to_string(),
+                        summary
+                            .oldest_timestamp
+                            .map(Value::String)
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "newestTimestamp".to_string(),
+                        summary
+                            .newest_timestamp
+                            .map(Value::String)
+                            .unwrap_or(Value::Null),
+                    ),
+                ]),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let _ = logger.record(
+                "event_log.trim.error",
+                "device-host",
+                error_payload("event-log", &error),
+            );
+        }
     }
 }
 
@@ -2284,6 +3788,32 @@ mod tests {
     }
 
     #[test]
+    fn app_logger_rotates_after_size_limit_and_keeps_three_generations(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let path = dir.path().join("app-activity.jsonl");
+        let logger = AppLogger::open_with_rotation(&path, 180, 3)?;
+
+        for index in 0..12 {
+            logger.record(
+                "test.event",
+                "test",
+                JsonMap::from([
+                    ("index".to_string(), json!(index)),
+                    ("padding".to_string(), json!("xxxxxxxxxxxxxxxxxxxxxxxx")),
+                ]),
+            )?;
+        }
+
+        assert!(path.exists());
+        assert!(dir.path().join("app-activity.1.jsonl").exists());
+        assert!(dir.path().join("app-activity.2.jsonl").exists());
+        assert!(dir.path().join("app-activity.3.jsonl").exists());
+        assert!(!dir.path().join("app-activity.4.jsonl").exists());
+        Ok(())
+    }
+
+    #[test]
     fn app_settings_persist_talk_interval_minutes(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let data = tempdir()?;
@@ -2299,6 +3829,338 @@ mod tests {
         assert_eq!(reopened.state().talk_interval_minutes, 12);
         assert!(data.path().join("settings").join("app.json").exists());
         Ok(())
+    }
+
+    #[test]
+    fn observation_settings_default_off_and_persist(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = ObservationSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state(),
+            ObservationSettingsState {
+                windows: false,
+                folders: false,
+                downloads: false,
+                settings_path: data.path().join("settings").join("observations.json"),
+            }
+        );
+        registry.set(ObservationSettingsUpdate {
+            windows: true,
+            folders: false,
+            downloads: true,
+        })?;
+
+        let reopened = ObservationSettingsRegistry::open(data.path())?;
+        assert!(reopened.state().windows);
+        assert!(!reopened.state().folders);
+        assert!(reopened.state().downloads);
+        let raw = fs::read_to_string(data.path().join("settings").join("observations.json"))?;
+        assert!(raw.contains("\"windows\": true"));
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_state_missing_file_is_initial_and_completion_persists(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let settings_path = data.path().join("settings").join("onboarding.json");
+        let mut registry = OnboardingRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state(),
+            OnboardingState {
+                completed: false,
+                completed_at: None,
+                settings_path: settings_path.clone(),
+            }
+        );
+        assert!(!settings_path.exists());
+
+        let completed = registry.complete()?;
+        assert!(completed.completed);
+        assert!(completed.completed_at.is_some());
+        assert!(settings_path.exists());
+
+        let raw = fs::read_to_string(&settings_path)?;
+        assert!(raw.contains("\"completed\": true"));
+        assert!(raw.contains("\"completedAt\""));
+
+        let reopened = OnboardingRegistry::open(data.path())?;
+        assert!(reopened.state().completed);
+        assert_eq!(reopened.state().settings_path, settings_path);
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_window_observation_emits_appeared_closed_and_debounced_focus() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = DesktopWindowObservationState::default();
+
+        let first = state.update(now, vec![window_observation("a", "Finder", true)]);
+        assert_eq!(
+            first,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+
+        assert!(state
+            .update(
+                now + chrono::Duration::milliseconds(500),
+                vec![window_observation("a", "Finder", true)]
+            )
+            .is_empty());
+
+        let focused = state.update(
+            now + chrono::Duration::milliseconds(1000),
+            vec![window_observation("a", "Finder", true)],
+        );
+        assert_eq!(
+            focused,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Focused,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+
+        let second = state.update(
+            now + chrono::Duration::milliseconds(1500),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        assert_eq!(
+            second,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "b".to_string(),
+                app: "Safari".to_string(),
+            }]
+        );
+
+        let changed_focus = state.update(
+            now + chrono::Duration::milliseconds(2600),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        assert_eq!(
+            changed_focus,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Focused,
+                window_key: "b".to_string(),
+                app: "Safari".to_string(),
+            }]
+        );
+
+        let closed = state.update(
+            now + chrono::Duration::milliseconds(3000),
+            vec![window_observation("b", "Safari", true)],
+        );
+        assert_eq!(
+            closed,
+            vec![DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Closed,
+                window_key: "a".to_string(),
+                app: "Finder".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn desktop_window_focus_candidate_resets_before_debounce() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = DesktopWindowObservationState::default();
+
+        state.update(now, vec![window_observation("a", "Finder", true)]);
+        state.update(
+            now + chrono::Duration::milliseconds(500),
+            vec![
+                window_observation("a", "Finder", false),
+                window_observation("b", "Safari", true),
+            ],
+        );
+        let transitions = state.update(
+            now + chrono::Duration::milliseconds(900),
+            vec![
+                window_observation("a", "Finder", true),
+                window_observation("b", "Safari", false),
+            ],
+        );
+
+        assert!(transitions.is_empty());
+    }
+
+    #[test]
+    fn desktop_folder_paths_are_normalized_to_known_categories() {
+        let known = KnownDesktopFolders {
+            downloads: Some("/Users/example/Downloads".to_string()),
+            desktop: Some("/Users/example/Desktop".to_string()),
+            documents: Some("/Users/example/Documents".to_string()),
+            pictures: Some("/Users/example/Pictures".to_string()),
+            trash: Some("/Users/example/.Trash".to_string()),
+        };
+
+        assert_eq!(
+            categorize_desktop_folder_path("/Users/example/Downloads/", &known),
+            DesktopFolderCategory::Downloads
+        );
+        assert_eq!(
+            categorize_desktop_folder_path("\\Users\\example\\Documents", &known),
+            DesktopFolderCategory::Documents
+        );
+        assert_eq!(
+            categorize_desktop_folder_path("::{645FF040-5081-101B-9F08-00AA002F954E}", &known),
+            DesktopFolderCategory::Trash
+        );
+        assert_eq!(
+            categorize_desktop_folder_path("/Users/example/Projects", &known),
+            DesktopFolderCategory::Other
+        );
+    }
+
+    #[test]
+    fn desktop_folder_observation_debounces_same_category_for_one_minute() {
+        let now = DateTime::parse_from_rfc3339("2026-07-06T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut state = DesktopFolderObservationState::default();
+
+        assert_eq!(
+            state.update(
+                now,
+                vec![folder_observation(
+                    "front",
+                    DesktopFolderCategory::Downloads,
+                    "finder"
+                )]
+            ),
+            vec![DesktopFolderTransition {
+                category: DesktopFolderCategory::Downloads,
+                app: "finder".to_string(),
+            }]
+        );
+        assert!(state
+            .update(
+                now + chrono::Duration::seconds(30),
+                vec![folder_observation(
+                    "front",
+                    DesktopFolderCategory::Downloads,
+                    "finder"
+                )]
+            )
+            .is_empty());
+        assert_eq!(
+            state.update(
+                now + chrono::Duration::seconds(31),
+                vec![folder_observation(
+                    "front",
+                    DesktopFolderCategory::Documents,
+                    "finder"
+                )]
+            ),
+            vec![DesktopFolderTransition {
+                category: DesktopFolderCategory::Documents,
+                app: "finder".to_string(),
+            }]
+        );
+        assert_eq!(
+            state.update(
+                now + chrono::Duration::seconds(91),
+                vec![folder_observation(
+                    "front",
+                    DesktopFolderCategory::Documents,
+                    "finder"
+                )]
+            ),
+            vec![DesktopFolderTransition {
+                category: DesktopFolderCategory::Documents,
+                app: "finder".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn download_file_names_classify_and_filter_private_or_temporary_files() {
+        assert_eq!(
+            classify_download_file_name("photo.HEIC"),
+            DownloadFileCategory::Image
+        );
+        assert_eq!(
+            classify_download_file_name("movie.webm"),
+            DownloadFileCategory::Video
+        );
+        assert_eq!(
+            classify_download_file_name("song.flac"),
+            DownloadFileCategory::Audio
+        );
+        assert_eq!(
+            classify_download_file_name("report.pdf"),
+            DownloadFileCategory::Document
+        );
+        assert_eq!(
+            classify_download_file_name("bundle.tar.gz"),
+            DownloadFileCategory::Archive
+        );
+        assert_eq!(
+            classify_download_file_name("installer.msi"),
+            DownloadFileCategory::App
+        );
+        assert_eq!(
+            classify_download_file_name("unknown.asset"),
+            DownloadFileCategory::Other
+        );
+
+        assert!(download_file_observation_from_name(".secret.pdf").is_none());
+        assert!(download_file_observation_from_name("movie.mp4.crdownload").is_none());
+        assert!(download_file_observation_from_name("archive.zip.part").is_none());
+        assert!(download_file_observation_from_name("file.download").is_none());
+        assert!(download_file_observation_from_name("sync.tmp").is_none());
+        assert!(download_file_observation_from_name("aria.aria2").is_none());
+        assert_eq!(
+            download_file_observation_from_name("report.pdf"),
+            Some(DesktopDownloadObservation {
+                file_name: "report.pdf".to_string(),
+                file_category: DownloadFileCategory::Document,
+            })
+        );
+    }
+
+    fn window_observation(window_key: &str, app: &str, focused: bool) -> DesktopWindowObservation {
+        DesktopWindowObservation {
+            window_key: window_key.to_string(),
+            app: app.to_string(),
+            focused,
+            frame: DesktopWindowFrame {
+                x: 10.0,
+                y: 20.0,
+                width: 640.0,
+                height: 480.0,
+            },
+        }
+    }
+
+    fn folder_observation(
+        folder_key: &str,
+        category: DesktopFolderCategory,
+        app: &str,
+    ) -> DesktopFolderObservation {
+        DesktopFolderObservation {
+            folder_key: folder_key.to_string(),
+            category,
+            app: app.to_string(),
+        }
     }
 
     #[test]
@@ -2369,6 +4231,70 @@ mod tests {
     }
 
     #[test]
+    fn idle_presence_evaluation_emits_start_and_end_once() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(evaluate_idle_presence(Some(299.0), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(300.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(evaluate_idle_presence(Some(301.9), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(1.0), &mut state),
+            Some(IdlePresenceDecision::End {
+                idle_seconds: 301,
+                idle_minutes: 5
+            })
+        );
+        assert_eq!(evaluate_idle_presence(Some(0.5), &mut state), None);
+    }
+
+    #[test]
+    fn idle_presence_evaluation_ignores_unavailable_input() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(evaluate_idle_presence(None, &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(f64::NAN), &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(-1.0), &mut state), None);
+        assert_eq!(
+            evaluate_idle_presence(Some(300.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(evaluate_idle_presence(None, &mut state), None);
+        assert_eq!(evaluate_idle_presence(Some(300.5), &mut state), None);
+    }
+
+    #[test]
+    fn idle_presence_evaluation_reemits_after_returning_active() {
+        let mut state = PresenceState::default();
+
+        assert_eq!(
+            evaluate_idle_presence(Some(320.2), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+        assert_eq!(
+            evaluate_idle_presence(Some(10.0), &mut state),
+            Some(IdlePresenceDecision::End {
+                idle_seconds: 320,
+                idle_minutes: 5
+            })
+        );
+        assert_eq!(
+            evaluate_idle_presence(Some(600.0), &mut state),
+            Some(IdlePresenceDecision::Start {
+                threshold_seconds: 300
+            })
+        );
+    }
+
+    #[test]
     fn conversation_event_uses_surface_boundary_fields() {
         let event =
             build_conversation_text_event("resident-test", "device-test", "surface-test", "hello");
@@ -2378,6 +4304,26 @@ mod tests {
         assert_eq!(event.device_id.as_deref(), Some("device-test"));
         assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
         assert_eq!(event.payload["text"], json!("hello"));
+    }
+
+    #[test]
+    fn conversation_choice_event_uses_surface_boundary_fields() {
+        let event = build_conversation_choice_event(
+            "resident-test",
+            "device-test",
+            "surface-test",
+            "choice-1",
+            "見る",
+            0,
+        );
+        assert_eq!(event.kind, "conversation.choice");
+        assert_eq!(event.source, "surface");
+        assert_eq!(event.resident_id, "resident-test");
+        assert_eq!(event.device_id.as_deref(), Some("device-test"));
+        assert_eq!(event.surface_id.as_deref(), Some("surface-test"));
+        assert_eq!(event.payload["choiceId"], json!("choice-1"));
+        assert_eq!(event.payload["choice"], json!("見る"));
+        assert_eq!(event.payload["index"], json!(0));
     }
 
     #[test]
@@ -2511,6 +4457,92 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(records.iter().any(|kind| kind == "device.sleep.before"));
         assert!(records.iter().any(|kind| kind == "device.wake"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_window_events_are_logged_with_desktop_observation_privacy() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .emit_desktop_window_transition(DesktopWindowTransition {
+                kind: DesktopWindowTransitionKind::Appeared,
+                window_key: "window-1".to_string(),
+                app: "Finder".to_string(),
+            })
+            .await?;
+
+        let records = runtime.home().event_log().read(EventLogQuery {
+            kind: Some("desktop.window.appeared".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        let record = records.records.first().expect("desktop window record");
+        assert_eq!(record.payload["windowKey"], json!("window-1"));
+        assert_eq!(record.payload["app"], json!("Finder"));
+        let privacy = record.privacy.as_ref().expect("desktop privacy");
+        assert_eq!(privacy.category, DESKTOP_OBSERVATION_PRIVACY_CATEGORY);
+        assert_eq!(privacy.retention, RetentionPolicy::Short);
+        assert!(privacy.extension_readable);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn desktop_folder_and_download_events_store_only_normalized_payloads() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .emit_desktop_folder_transition(DesktopFolderTransition {
+                category: DesktopFolderCategory::Downloads,
+                app: "finder".to_string(),
+            })
+            .await?;
+        runtime
+            .emit_desktop_download_completed(DesktopDownloadObservation {
+                file_name: "photo.png".to_string(),
+                file_category: DownloadFileCategory::Image,
+            })
+            .await?;
+
+        let records = runtime
+            .home()
+            .event_log()
+            .read(EventLogQuery::default())?
+            .records;
+        let folder = records
+            .iter()
+            .find(|record| record.kind == "desktop.folder.opened")
+            .expect("folder record");
+        assert_eq!(folder.payload["category"], json!("downloads"));
+        assert_eq!(folder.payload["app"], json!("finder"));
+        assert!(!folder.payload.contains_key("path"));
+        assert_eq!(
+            folder.privacy.as_ref().expect("folder privacy").category,
+            DESKTOP_OBSERVATION_PRIVACY_CATEGORY
+        );
+
+        let download = records
+            .iter()
+            .find(|record| record.kind == "desktop.download.completed")
+            .expect("download record");
+        assert_eq!(download.payload["fileName"], json!("photo.png"));
+        assert_eq!(download.payload["fileCategory"], json!("image"));
+        assert!(!download.payload.contains_key("path"));
+        assert_eq!(
+            download
+                .privacy
+                .as_ref()
+                .expect("download privacy")
+                .category,
+            DESKTOP_OBSERVATION_PRIVACY_CATEGORY
+        );
         Ok(())
     }
 
@@ -2762,6 +4794,171 @@ mod tests {
         let selected_again =
             LocalYuukeiRuntime::select_world_pack_directory_in(env, &external_root).await?;
         assert_eq!(selected_again.install_id(), install_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn world_pack_zip_import_extracts_and_selects_pack() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let zip_path = data.path().join("zip-yuukei.zip");
+        write_world_pack_zip(&zip_path, None, "zip-yuukei", "Zip Yuukei", &[])?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::import_world_pack_zip_in(env, &zip_path).await?;
+
+        assert_eq!(runtime.snapshot()?.world_pack_id, "zip-yuukei");
+        assert_eq!(
+            runtime.world_pack_status().active_install.canonical_root,
+            fs::canonicalize(data.path().join("packs-imported").join("zip-yuukei"))?
+        );
+        assert!(data
+            .path()
+            .join("packs-imported")
+            .join("zip-yuukei")
+            .join("pack.json")
+            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn world_pack_zip_import_accepts_single_top_directory() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_pack(
+            &workspace.path().join("packs").join("default-yuukei"),
+            "default-yuukei",
+            "Default Yuukei",
+            &[],
+        )?;
+        let zip_path = data.path().join("top-dir-yuukei.zip");
+        write_world_pack_zip(
+            &zip_path,
+            Some("top-dir"),
+            "top-dir-yuukei",
+            "Top Dir Yuukei",
+            &[],
+        )?;
+        let env = test_env(workspace.path(), data.path());
+
+        let runtime = LocalYuukeiRuntime::import_world_pack_zip_in(env, &zip_path).await?;
+
+        assert_eq!(runtime.snapshot()?.world_pack_id, "top-dir-yuukei");
+        assert!(data
+            .path()
+            .join("packs-imported")
+            .join("top-dir-yuukei")
+            .join("scripts")
+            .join("desktop_reactions.daihon")
+            .exists());
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_zip_slip() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("evil.zip");
+        write_zip_entries(
+            &zip_path,
+            vec![
+                ("../evil", "nope".to_string()),
+                ("pack.json", "{}".to_string()),
+            ],
+        )?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("安全でないパス"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_missing_pack_json() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("missing.zip");
+        write_zip_entries(&zip_path, vec![("README.md", "hello".to_string())])?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("pack.jsonが見つかりません"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_inspection_rejects_entry_limit() -> Result<()> {
+        let data = tempdir()?;
+        let zip_path = data.path().join("too-many.zip");
+        let mut entries = Vec::new();
+        for index in 0..=WORLD_PACK_IMPORT_MAX_ENTRIES {
+            entries.push((format!("files/{index}.txt"), String::new()));
+        }
+        write_zip_owned_entries(&zip_path, entries)?;
+
+        let error = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &zip_path,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ファイル数が多すぎます"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_pack_zip_license_text_prefers_license_then_readme_then_none() -> Result<()> {
+        let data = tempdir()?;
+        let with_license = data.path().join("with-license.zip");
+        write_world_pack_zip(
+            &with_license,
+            None,
+            "license-yuukei",
+            "License Yuukei",
+            &[("README.md", "readme text"), ("LICENSE", "license text")],
+        )?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &with_license,
+        )?;
+        assert_eq!(inspection.license_source.as_deref(), Some("LICENSE"));
+        assert_eq!(inspection.license_text.as_deref(), Some("license text"));
+
+        let with_readme = data.path().join("with-readme.zip");
+        write_world_pack_zip(
+            &with_readme,
+            None,
+            "readme-yuukei",
+            "Readme Yuukei",
+            &[("README.md", "readme only")],
+        )?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &with_readme,
+        )?;
+        assert_eq!(inspection.license_source.as_deref(), Some("README.md"));
+        assert_eq!(inspection.license_text.as_deref(), Some("readme only"));
+
+        let without_license = data.path().join("without-license.zip");
+        write_world_pack_zip(&without_license, None, "plain-yuukei", "Plain Yuukei", &[])?;
+        let inspection = LocalYuukeiRuntime::inspect_world_pack_zip_in(
+            test_env(data.path(), data.path()),
+            &without_license,
+        )?;
+        assert!(inspection.license_text.is_none());
+        assert!(inspection.license_source.is_none());
         Ok(())
     }
 
@@ -3061,12 +5258,12 @@ mod tests {
 
         LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
         let runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
-        let commands = runtime
+        let mut receiver = runtime.home().subscribe_commands();
+        runtime
             .send_conversation_text(CLI_SURFACE_ID, "こんにちは")
             .await?;
-        assert!(commands
-            .iter()
-            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
         let records = runtime
             .home()
             .event_log()
@@ -3087,14 +5284,12 @@ mod tests {
             Some(&"yuukei.default-tts".to_string())
         );
         let reopened = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
-        let commands = reopened
+        let mut receiver = reopened.home().subscribe_commands();
+        reopened
             .send_conversation_text(CLI_SURFACE_ID, "もう一度")
             .await?;
-        assert!(commands.iter().any(|command| command
-            .payload
-            .get("speechRef")
-            .and_then(Value::as_str)
-            .is_some_and(|speech_ref| speech_ref.starts_with("yuukei-default-tts://"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
 
         let state = LocalYuukeiRuntime::set_capability_default_in(
             env.clone(),
@@ -3111,12 +5306,12 @@ mod tests {
         assert!(raw_settings.contains("\"user-tts\""));
 
         let reopened = LocalYuukeiRuntime::open_selected_in(env).await?;
-        let commands = reopened
+        let mut receiver = reopened.home().subscribe_commands();
+        reopened
             .send_conversation_text(CLI_SURFACE_ID, "さらに")
             .await?;
-        assert!(commands
-            .iter()
-            .any(|command| command.payload.get("speechRef") == Some(&json!("user-tts://cmd_1"))));
+        let audio = next_runtime_command_of_kind(&mut receiver, "audio.play").await;
+        assert_eq!(audio.payload["audioPath"], json!("/tmp/user-tts/cmd_1.wav"));
         Ok(())
     }
 
@@ -3691,6 +5886,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn usage_record(
         sequence: i64,
         timestamp: &str,
@@ -3829,6 +6025,101 @@ mod tests {
                 "uiSpace": {}
             }))?,
         )?;
+        Ok(())
+    }
+
+    fn world_pack_zip_entries(
+        top_dir: Option<&str>,
+        id: &str,
+        display_name: &str,
+        extra_root_files: &[(&str, &str)],
+    ) -> Vec<(String, String)> {
+        let prefix = top_dir
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| format!("{dir}/"))
+            .unwrap_or_default();
+        let mut entries = vec![
+            (
+                format!("{prefix}pack.json"),
+                serde_json::to_string_pretty(&json!({
+                    "schemaVersion": 1,
+                    "id": id,
+                    "displayName": display_name,
+                    "defaultActorId": "yuukei",
+                    "actors": [
+                        {
+                            "id": "yuukei",
+                            "displayName": display_name,
+                            "profile": {}
+                        }
+                    ],
+                    "signals": {
+                        "allow": ["conversation.text", "surface.attach"]
+                    },
+                    "capabilities": {
+                        "required": [],
+                        "optional": []
+                    },
+                    "daihon": {
+                        "scripts": ["scripts/desktop_reactions.daihon"]
+                    },
+                    "initialVariables": {},
+                    "uiSpace": {}
+                }))
+                .expect("pack json"),
+            ),
+            (
+                format!("{prefix}scripts/desktop_reactions.daihon"),
+                r#"
+## desktop reactions
+### conversation
+合図: ＠conversation.text
+話者: yuukei
+「zipから来ました。」
+"#
+                .to_string(),
+            ),
+        ];
+        for (path, text) in extra_root_files {
+            entries.push((format!("{prefix}{path}"), (*text).to_string()));
+        }
+        entries
+    }
+
+    fn write_world_pack_zip(
+        path: &Path,
+        top_dir: Option<&str>,
+        id: &str,
+        display_name: &str,
+        extra_root_files: &[(&str, &str)],
+    ) -> Result<()> {
+        write_zip_owned_entries(
+            path,
+            world_pack_zip_entries(top_dir, id, display_name, extra_root_files),
+        )
+    }
+
+    fn write_zip_entries(path: &Path, entries: Vec<(&str, String)>) -> Result<()> {
+        write_zip_owned_entries(
+            path,
+            entries
+                .into_iter()
+                .map(|(name, contents)| (name.to_string(), contents))
+                .collect(),
+        )
+    }
+
+    fn write_zip_owned_entries(path: &Path, entries: Vec<(String, String)>) -> Result<()> {
+        let file = File::create(path)?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in entries {
+            zip.start_file(name, options)
+                .map_err(world_pack_zip_error)?;
+            zip.write_all(contents.as_bytes())?;
+        }
+        zip.finish().map_err(world_pack_zip_error)?;
         Ok(())
     }
 
@@ -4193,6 +6484,21 @@ process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
         Ok(())
     }
 
+    async fn next_runtime_command_of_kind(
+        receiver: &mut tokio::sync::broadcast::Receiver<RuntimeCommand>,
+        kind: &str,
+    ) -> RuntimeCommand {
+        loop {
+            let command = tokio::time::timeout(std::time::Duration::from_secs(10), receiver.recv())
+                .await
+                .expect("runtime command timed out")
+                .expect("runtime command channel closed");
+            if command.kind == kind {
+                return command;
+            }
+        }
+    }
+
     fn write_capability_extension_source(
         root: &Path,
         id: &str,
@@ -4223,7 +6529,7 @@ process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
 const fs = require("node:fs");
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const output = input.capability === "speech.synthesis"
-  ? {{ speechRef: "user-tts://cmd_1" }}
+  ? {{ audioPath: "/tmp/user-tts/cmd_1.wav", durationMs: 1200, format: "wav" }}
   : {{}};
 process.stdout.write(JSON.stringify({{
   invocationId: input.id,
@@ -4499,6 +6805,60 @@ globalThis.fetch = async (url, init) => {
                 fs::copy(&source_path, &destination_path)?;
             }
         }
+        Ok(())
+    }
+
+    // リリース判定基準(ROADMAP)の「あんぱんシナリオがdefault packで動く」を、
+    // 同梱の実packで恒久的に保証する。
+    #[tokio::test]
+    async fn bundled_default_pack_runs_anpan_scenario() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("packs")
+            .join("default-yuukei");
+        copy_dir_for_test(
+            &bundled,
+            &workspace.path().join("packs").join("default-yuukei"),
+        )?;
+        let env = test_env(workspace.path(), data.path());
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+        runtime
+            .attach_surface(cli_surface_session(runtime.device_id()))
+            .await?;
+
+        let download_commands = runtime
+            .emit_desktop_download_completed(DesktopDownloadObservation {
+                file_name: "あんぱん.png".to_string(),
+                file_category: DownloadFileCategory::Image,
+            })
+            .await?;
+        assert!(
+            download_commands
+                .iter()
+                .filter_map(|command| command.payload.get("text").and_then(Value::as_str))
+                .any(|text| text.contains("あんぱん.png")),
+            "download scene should mention the file"
+        );
+
+        let commands = runtime
+            .emit_desktop_folder_transition(DesktopFolderTransition {
+                category: DesktopFolderCategory::Downloads,
+                app: "finder".to_string(),
+            })
+            .await?;
+
+        let texts = commands
+            .iter()
+            .filter(|command| command.kind == "dialogue.say")
+            .filter_map(|command| command.payload.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(
+            texts.iter().any(|text| text.contains("あんぱん.png")),
+            "expected the anpan scene to reference the downloaded file, got: {texts:?}"
+        );
         Ok(())
     }
 }

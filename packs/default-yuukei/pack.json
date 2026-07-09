@@ -7,7 +7,9 @@
     {
       "id": "yuukei",
       "displayName": "Yuukei",
-      "speakerAliases": ["ゆ"],
+      "speakerAliases": [
+        "ゆ"
+      ],
       "profile": {
         "role": "UI resident",
         "speechStyle": "short and present"
@@ -24,9 +26,14 @@
             "id": "head",
             "label": "頭",
             "source": "humanoidBone",
-            "bones": ["head"],
+            "bones": [
+              "head"
+            ],
             "shape": "auto",
-            "events": ["avatar.gesture.poke", "avatar.gesture.pat"],
+            "events": [
+              "avatar.gesture.poke",
+              "avatar.gesture.pat"
+            ],
             "priority": 40
           }
         ]
@@ -35,7 +42,9 @@
     {
       "id": "partner",
       "displayName": "Partner",
-      "speakerAliases": ["パ"],
+      "speakerAliases": [
+        "パ"
+      ],
       "profile": {
         "role": "UI resident",
         "speechStyle": "quiet and observant"
@@ -52,9 +61,14 @@
             "id": "head",
             "label": "頭",
             "source": "humanoidBone",
-            "bones": ["head"],
+            "bones": [
+              "head"
+            ],
             "shape": "auto",
-            "events": ["avatar.gesture.poke", "avatar.gesture.pat"],
+            "events": [
+              "avatar.gesture.poke",
+              "avatar.gesture.pat"
+            ],
             "priority": 40
           }
         ]
@@ -72,20 +86,41 @@
       "device.wake",
       "surface.attach",
       "avatar.gesture.poke",
-      "avatar.gesture.pat"
+      "avatar.gesture.pat",
+      "presence.idle.start",
+      "presence.idle.end",
+      "desktop.window.appeared",
+      "desktop.window.closed",
+      "desktop.window.focused",
+      "desktop.folder.opened",
+      "desktop.download.completed"
     ]
   },
   "capabilities": {
     "required": [],
-    "optional": ["speech.synthesis", "dialogue.generate", "mood.evaluate"]
+    "optional": [
+      "speech.synthesis",
+      "dialogue.generate",
+      "mood.evaluate"
+    ]
   },
   "llmDelegation": {
-    "signals": [{ "signal": "conversation.text", "cooldownSeconds": 60 }]
+    "signals": [
+      {
+        "signal": "conversation.text",
+        "cooldownSeconds": 60
+      }
+    ]
   },
   "daihon": {
     "scripts": [
       "scripts/desktop_reactions.daihon",
-      "scripts/random_talk.daihon"
+      "scripts/random_talk.daihon",
+      "scripts/presence_away.daihon",
+      "scripts/presence_return.daihon",
+      "scripts/folder_encounters.daihon",
+      "scripts/downloads.daihon",
+      "scripts/window_perch.daihon"
     ]
   },
   "initialVariables": {},

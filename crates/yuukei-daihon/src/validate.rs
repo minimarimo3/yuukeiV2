@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::diagnostic::{DaihonDiagnostic, Severity};
 use crate::function::FunctionRegistry;
 use crate::parser::parse_variable_ref;
-use crate::runtime::{INTERPRET_FUNCTION_NAME, UNKNOWN_INTERPRETATION};
+use crate::runtime::{CHOICE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME, UNKNOWN_INTERPRETATION};
 use crate::span::Spanned;
 use crate::value::DaihonValue;
 use crate::variable::VariableRef;
@@ -170,6 +170,7 @@ impl<'a> Validator<'a> {
             self.validate_stmt(statement);
         }
         self.validate_interpret_consumption(scene);
+        self.validate_choice_consumption(scene);
     }
 
     fn validate_interpret_consumption(&mut self, scene: &Scene) {
@@ -197,6 +198,37 @@ impl<'a> Validator<'a> {
                     )
                     .with_help(
                         "後続に ※（判定 = 不明）なら: または ※それ以外: を持つ条件分岐を追加してください。",
+                    ),
+                );
+            }
+        }
+    }
+
+    fn validate_choice_consumption(&mut self, scene: &Scene) {
+        for (index, statement) in scene.statements.iter().enumerate() {
+            let Stmt::Assignment(assignment) = statement else {
+                continue;
+            };
+            if !expr_is_choice_call(&assignment.value) {
+                continue;
+            }
+            let consumed = scene
+                .statements
+                .iter()
+                .skip(index + 1)
+                .any(|statement| stmt_has_interpret_consumer(statement, &assignment.target));
+            if !consumed {
+                self.diagnostics.push(
+                    DaihonDiagnostic::error(
+                        "E-DHN-SEM-050",
+                        format!(
+                            "選択結果「{}」は同じシーン内の条件分岐で不明時の枝まで処理してください。",
+                            assignment.target.display_name()
+                        ),
+                        assignment.span,
+                    )
+                    .with_help(
+                        "後続に ※（返事 = 不明）なら: または ※それ以外: を持つ条件分岐を追加してください。",
                     ),
                 );
             }
@@ -475,6 +507,10 @@ fn char_levenshtein(left: &str, right: &str) -> usize {
 
 fn expr_is_interpret_call(expr: &Expr) -> bool {
     matches!(expr, Expr::FunctionCall(function) if function.name.value == INTERPRET_FUNCTION_NAME)
+}
+
+fn expr_is_choice_call(expr: &Expr) -> bool {
+    matches!(expr, Expr::FunctionCall(function) if function.name.value == CHOICE_FUNCTION_NAME)
 }
 
 fn stmt_has_interpret_consumer(stmt: &Stmt, variable: &VariableRef) -> bool {

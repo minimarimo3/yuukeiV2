@@ -26,6 +26,8 @@ struct MockInterpretHandler {
     generate_requests: Vec<GenerateRequest>,
     extract_responses: VecDeque<std::result::Result<String, DaihonRuntimeError>>,
     extract_requests: Vec<ExtractRequest>,
+    choice_responses: VecDeque<std::result::Result<String, DaihonRuntimeError>>,
+    choice_requests: Vec<ChoiceRequest>,
 }
 
 impl MockInterpretHandler {
@@ -37,6 +39,21 @@ impl MockInterpretHandler {
             generate_requests: Vec::new(),
             extract_responses: VecDeque::new(),
             extract_requests: Vec::new(),
+            choice_responses: VecDeque::new(),
+            choice_requests: Vec::new(),
+        }
+    }
+
+    fn with_choice_responses(responses: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            responses: VecDeque::new(),
+            requests: Vec::new(),
+            generate_responses: VecDeque::new(),
+            generate_requests: Vec::new(),
+            extract_responses: VecDeque::new(),
+            extract_requests: Vec::new(),
+            choice_responses: responses.into_iter().map(Ok).collect(),
+            choice_requests: Vec::new(),
         }
     }
 
@@ -52,6 +69,8 @@ impl MockInterpretHandler {
             generate_requests: Vec::new(),
             extract_responses: VecDeque::new(),
             extract_requests: Vec::new(),
+            choice_responses: VecDeque::new(),
+            choice_requests: Vec::new(),
         }
     }
 
@@ -63,6 +82,8 @@ impl MockInterpretHandler {
             generate_requests: Vec::new(),
             extract_responses: responses.into_iter().map(Ok).collect(),
             extract_requests: Vec::new(),
+            choice_responses: VecDeque::new(),
+            choice_requests: Vec::new(),
         }
     }
 
@@ -78,6 +99,8 @@ impl MockInterpretHandler {
                 Span::empty(),
             ))]),
             extract_requests: Vec::new(),
+            choice_responses: VecDeque::new(),
+            choice_requests: Vec::new(),
         }
     }
 
@@ -93,6 +116,8 @@ impl MockInterpretHandler {
             generate_requests: Vec::new(),
             extract_responses: VecDeque::new(),
             extract_requests: Vec::new(),
+            choice_responses: VecDeque::new(),
+            choice_requests: Vec::new(),
         }
     }
 }
@@ -117,6 +142,13 @@ impl InterpretHandler for MockInterpretHandler {
     async fn extract(&mut self, request: ExtractRequest) -> Result<String, DaihonRuntimeError> {
         self.extract_requests.push(request);
         self.extract_responses
+            .pop_front()
+            .unwrap_or_else(|| Ok(UNKNOWN_INTERPRETATION.to_string()))
+    }
+
+    async fn choose(&mut self, request: ChoiceRequest) -> Result<String, DaihonRuntimeError> {
+        self.choice_requests.push(request);
+        self.choice_responses
             .pop_front()
             .unwrap_or_else(|| Ok(UNKNOWN_INTERPRETATION.to_string()))
     }
@@ -220,6 +252,25 @@ fn registry() -> FunctionRegistry {
             },
         ],
         named: BTreeMap::new(),
+        return_type: Some(ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: CHOICE_FUNCTION_NAME.to_owned(),
+        positional: (0..6)
+            .map(|index| ParamSpec {
+                name: Some(format!("選択肢{}", index + 1)),
+                ty: ParamType::String,
+                required: index == 0,
+            })
+            .collect(),
+        named: BTreeMap::from([(
+            "秒数".to_owned(),
+            ParamSpec {
+                name: Some("秒数".to_owned()),
+                ty: ParamType::Number,
+                required: false,
+            },
+        )]),
         return_type: Some(ValueType::String),
     });
     registry.register(FunctionSpec {
@@ -781,6 +832,7 @@ _意図 = ＜解釈 (入力#発言) 「発言の意図は何ですか」 「挨�
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -827,6 +879,7 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -870,6 +923,7 @@ async fn runtime_interpret_choice_branches_scene() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -913,6 +967,7 @@ async fn runtime_interpret_error_becomes_unknown() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -960,6 +1015,7 @@ async fn runtime_interpret_limit_returns_unknown_and_warns() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -971,6 +1027,252 @@ async fn runtime_interpret_limit_returns_unknown_and_warns() {
         .any(|diagnostic| diagnostic.code == "W-DHN-RUN-050"));
     assert_eq!(action.dialogues[0].1, "一回目既知");
     assert_eq!(action.dialogues[1].1, "二回目不明");
+}
+
+#[tokio::test]
+async fn runtime_choice_branches_scene() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+返事=＜選択 「見る」 「あとで」＞
+※（返事 = 「見る」）なら:
+「見よう」
+※あるいは（返事 = 「不明」）なら:
+「わからない」
+※それ以外:
+「あとでね」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_choice_responses(["見る".to_string()]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(interpret.choice_requests.len(), 1);
+    assert_eq!(interpret.choice_requests[0].choices, vec!["見る", "あとで"]);
+    assert_eq!(interpret.choice_requests[0].timeout_seconds, 30);
+    assert_eq!(action.dialogues[0].1, "見よう");
+}
+
+#[tokio::test]
+async fn runtime_choice_unknown_from_handler_takes_unknown_branch() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+返事=＜選択 「見る」 「あとで」＞
+※（返事 = 「見る」）なら:
+「見よう」
+※あるいは（返事 = 「不明」）なら:
+「わからない」
+※それ以外:
+「あとでね」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret =
+        MockInterpretHandler::with_choice_responses([UNKNOWN_INTERPRETATION.to_string()]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(action.dialogues[0].1, "わからない");
+}
+
+#[tokio::test]
+async fn runtime_choice_invalid_choice_counts_return_unknown_without_handler() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+少ない=＜選択 「見る」＞
+※（少ない = 「不明」）なら:
+「少ない」
+※それ以外:
+「bad」
+おわり
+多い=＜選択 「一/二/三/四/五/六/七」＞
+※（多い = 「不明」）なら:
+「多い」
+※それ以外:
+「bad」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_choice_responses(["一".to_string()]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert!(interpret.choice_requests.is_empty());
+    assert_eq!(action.dialogues[0].1, "少ない");
+    assert_eq!(action.dialogues[1].1, "多い");
+}
+
+#[tokio::test]
+async fn runtime_choice_clamps_timeout_seconds() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+短い=＜選択 「はい/いいえ」 秒数=1＞
+※（短い = 「不明」）なら:
+「短い」
+※それ以外:
+「bad」
+おわり
+長い=＜選択 「はい/いいえ」 秒数=999＞
+※（長い = 「不明」）なら:
+「長い」
+※それ以外:
+「bad」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = MockInterpretHandler::with_choice_responses([
+        UNKNOWN_INTERPRETATION.to_string(),
+        UNKNOWN_INTERPRETATION.to_string(),
+    ]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions::default(),
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert_eq!(interpret.choice_requests[0].timeout_seconds, 5);
+    assert_eq!(interpret.choice_requests[1].timeout_seconds, 600);
+}
+
+#[tokio::test]
+async fn runtime_choice_limit_returns_unknown_and_warns() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+一回目=＜選択 「はい/いいえ」＞
+※（一回目 = 「はい」）なら:
+「一回目」
+※それ以外:
+「一回目不明」
+おわり
+二回目=＜選択 「はい/いいえ」＞
+※（二回目 = 「不明」）なら:
+「二回目不明」
+※それ以外:
+「二回目既知」
+おわり
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret =
+        MockInterpretHandler::with_choice_responses(["はい".to_string(), "はい".to_string()]);
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            max_choices_per_dispatch: 1,
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(interpret.choice_requests.len(), 1);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "W-DHN-RUN-056"));
+    assert_eq!(action.dialogues[0].1, "一回目");
+    assert_eq!(action.dialogues[1].1, "二回目不明");
+}
+
+#[test]
+fn validator_requires_choice_result_to_have_unknown_or_catch_all_branch() {
+    let script = parse_script(
+        r#"
+## 選択
+### 通常
+返事=＜選択 「見る」 「あとで」＞
+※（返事 = 「見る」）なら:
+「見よう」
+おわり
+"#,
+    )
+    .unwrap();
+
+    let diagnostics = validate_script(&script, Some(&registry()));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E-DHN-SEM-050"));
 }
 
 #[tokio::test]
@@ -1000,6 +1302,7 @@ async fn runtime_extract_success_assigns_value_and_error_becomes_unknown() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1031,6 +1334,7 @@ async fn runtime_extract_success_assigns_value_and_error_becomes_unknown() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1090,6 +1394,8 @@ async fn runtime_interpret_and_extract_share_dispatch_limit() {
         generate_requests: Vec::new(),
         extract_responses: VecDeque::from([Ok("ミナ".to_string())]),
         extract_requests: Vec::new(),
+        choice_responses: VecDeque::new(),
+        choice_requests: Vec::new(),
     };
     let mut variables = InMemoryVariableStore::new().with_input(
         "ユーザー発言",
@@ -1105,6 +1411,7 @@ async fn runtime_interpret_and_extract_share_dispatch_limit() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1151,6 +1458,7 @@ async fn runtime_generate_outputs_current_speaker_dialogue() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1199,6 +1507,7 @@ async fn runtime_generate_failure_uses_fallback_dialogue() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1231,6 +1540,7 @@ async fn runtime_generate_failure_without_fallback_skips_and_continues() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1272,6 +1582,7 @@ async fn runtime_generate_limit_warns_and_uses_fallback() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1312,6 +1623,7 @@ async fn runtime_uses_defaults_preconditions_and_assignments() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1351,6 +1663,7 @@ async fn runtime_ignores_trailing_comments_but_keeps_dialogue_dollars() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1407,6 +1720,7 @@ async fn runtime_resolves_scoped_dialogue_embeds_as_variables() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1442,6 +1756,7 @@ async fn runtime_warns_for_missing_scoped_dialogue_embed_without_function_fallba
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1482,6 +1797,7 @@ async fn runtime_evaluates_postfix_not_condition() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1521,6 +1837,7 @@ b=いいえ
             options: RunOptions::default(),
             interpretation_count: 0,
             generation_count: 0,
+            choice_count: 0,
             diagnostics: Vec::new(),
         };
 
@@ -1566,6 +1883,7 @@ async fn runtime_evaluates_string_match_conditions() {
             options: RunOptions::default(),
             interpretation_count: 0,
             generation_count: 0,
+            choice_count: 0,
             diagnostics: Vec::new(),
         };
 
@@ -1602,6 +1920,7 @@ async fn runtime_warns_when_comparing_different_types() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1641,6 +1960,7 @@ async fn runtime_warns_and_treats_non_boolean_conditions_as_false() {
         options: RunOptions::default(),
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1687,6 +2007,7 @@ async fn runtime_reports_number_overflow_without_panicking() {
             options: RunOptions::default(),
             interpretation_count: 0,
             generation_count: 0,
+            choice_count: 0,
             diagnostics: Vec::new(),
         };
 
@@ -1729,6 +2050,7 @@ async fn runtime_falls_back_to_default_and_respects_frequency() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1766,6 +2088,7 @@ async fn runtime_respects_once_frequency() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1805,6 +2128,7 @@ async fn runtime_prefers_more_specific_conjunction() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1841,6 +2165,7 @@ async fn runtime_avoids_last_scene_for_same_event_when_possible() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1881,6 +2206,7 @@ async fn runtime_uniform_pick_is_seeded_and_ignores_deprecated_weight() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 
@@ -1921,6 +2247,7 @@ async fn runtime_supports_overnight_time_range() {
         },
         interpretation_count: 0,
         generation_count: 0,
+        choice_count: 0,
         diagnostics: Vec::new(),
     };
 

@@ -7,7 +7,11 @@ import type {
   AppSettingsState,
   CapabilityUsageState,
   DaihonDiagnosticEntry,
+  EventLogPage,
+  EventLogRecord,
   ExtensionSettingsState,
+  ObservationSettingsState,
+  OnboardingState,
   ResidentMemoryState,
   WorldPackSelectionState,
   YuukeiClient
@@ -122,6 +126,29 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   };
 }
 
+function observationSettings(
+  overrides: Partial<ObservationSettingsState> = {}
+): ObservationSettingsState {
+  return {
+    windows: false,
+    folders: false,
+    downloads: false,
+    settingsPath: "/tmp/yuukei-v2/settings/observations.json",
+    ...overrides
+  };
+}
+
+function onboardingState(
+  overrides: Partial<OnboardingState> = {}
+): OnboardingState {
+  return {
+    completed: true,
+    completedAt: "2026-07-07T00:00:00.000Z",
+    settingsPath: "/tmp/yuukei-v2/settings/onboarding.json",
+    ...overrides
+  };
+}
+
 function capabilityUsage(
   extensions: CapabilityUsageState["extensions"] = []
 ): CapabilityUsageState {
@@ -146,6 +173,44 @@ function residentMemories(): ResidentMemoryState {
       }
     ],
     episodeTotal: 1
+  };
+}
+
+function eventLogRecord(
+  sequence: number,
+  kind: string,
+  payload: Record<string, unknown> = { text: "こんにちは" }
+): EventLogRecord {
+  return {
+    sequence,
+    id: `evt_${sequence}`,
+    kind,
+    timestamp: `2026-07-0${sequence}T00:00:00.000Z`,
+    residentId: "resident-default",
+    source: "test",
+    payload,
+    privacy: kind.startsWith("desktop.")
+      ? {
+          category: "desktop-observation",
+          retention: "short",
+          extensionReadable: false
+        }
+      : null
+  };
+}
+
+function eventLogPage(records: EventLogRecord[] = [
+  eventLogRecord(3, "desktop.download.completed", {
+    fileName: "photo.png",
+    fileCategory: "image"
+  }),
+  eventLogRecord(2, "dialogue.say", { text: "おはよう" }),
+  eventLogRecord(1, "conversation.text", { text: "hello" })
+]): EventLogPage {
+  return {
+    records,
+    nextCursor: null,
+    total: records.length
   };
 }
 
@@ -185,6 +250,12 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getSnapshot: vi.fn(async () => snapshot("返事しました")),
     getWorldPackStatus: vi.fn(async () => worldPackStatus()),
     getAppSettings: vi.fn(async () => appSettings()),
+    getObservationSettings: vi.fn(async () => observationSettings()),
+    getOnboardingState: vi.fn(async () => onboardingState()),
+    completeOnboarding: vi.fn(async () => onboardingState()),
+    setObservationSettings: vi.fn(async (settings) =>
+      observationSettings(settings)
+    ),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
     getCapabilityUsage: vi.fn(async () => capabilityUsage()),
     listResidentMemories: vi.fn(async () => residentMemories()),
@@ -193,6 +264,13 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       removedFacts: 1,
       removedEpisodes: 0
     })),
+    readEventLogPage: vi.fn(async () => eventLogPage()),
+    countEventLogDeleteBefore: vi.fn(async () => 2),
+    countEventLogDeleteByKindPrefix: vi.fn(async () => 1),
+    countEventLogDeleteAll: vi.fn(async () => 3),
+    deleteEventLogBefore: vi.fn(async () => ({ deleted: 2 })),
+    deleteEventLogByKindPrefix: vi.fn(async () => ({ deleted: 1 })),
+    deleteEventLogAll: vi.fn(async () => ({ deleted: 3 })),
     getActorSurfaceAssets: vi.fn(async () => ({
       worldPackId: "default-yuukei",
       actors: []
@@ -208,10 +286,24 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
     sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
+    sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(async () => [command("つつかれました", "cmd_4")]),
     openWorldPackDirectory: vi.fn(async () => null),
+    openWorldPackZip: vi.fn(async () => null),
     openExtensionDirectory: vi.fn(async () => null),
     selectWorldPackDirectory: vi.fn(),
+    inspectWorldPackZip: vi.fn(async () => ({
+      packId: "zip-yuukei",
+      displayName: "Zip Yuukei",
+      licenseText: "配布条件です。",
+      licenseSource: "LICENSE",
+      importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
+      replacesExisting: false
+    })),
+    importWorldPackZip: vi.fn(async () => ({
+      status: worldPackStatus("zip-yuukei"),
+      snapshot: snapshot("zipです")
+    })),
     resetWorldPackToDefault: vi.fn(async () => ({
       status: worldPackStatus(),
       snapshot: snapshot("ただいま")
@@ -222,12 +314,14 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),
+    restartExtensionProcess: vi.fn(async () => extensionSettings()),
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
       appSettings(minutes)
     ),
     onCommand: vi.fn(async () => () => undefined),
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
+    onOnboardingDismissed: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined),
     ...overrides
@@ -251,6 +345,71 @@ describe("App", () => {
     );
     expect(client.attachSurface).not.toHaveBeenCalled();
     expect(client.sendConversationText).not.toHaveBeenCalled();
+  });
+
+  it("shows onboarding for an initial launch", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      )
+    });
+
+    render(<App client={client} />);
+
+    expect(await screen.findByRole("heading", { name: "ようこそ" })).toBeInTheDocument();
+    expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
+    expect(
+      screen.getByText("この子はあなたのデバイスに住みます。")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "World Pack" })).not.toBeInTheDocument();
+  });
+
+  it("skips the AI step when starting without AI", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      )
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    expect(
+      await screen.findByRole("heading", { name: "AI(ことば)の設定" })
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "観測とプライバシー" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("completes onboarding and returns to the normal settings screen", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      ),
+      completeOnboarding: vi.fn(async () => onboardingState())
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+    await userEvent.click(screen.getByRole("button", { name: "次へ" }));
+    await userEvent.click(screen.getByRole("button", { name: "完了して始める" }));
+
+    await waitFor(() => expect(client.completeOnboarding).toHaveBeenCalled());
+    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(screen.queryByRole("heading", { name: "完了" })).not.toBeInTheDocument();
   });
 
   it("switches settings categories without leaving the app surface", async () => {
@@ -351,6 +510,86 @@ describe("App", () => {
     });
   });
 
+  it("toggles observation privacy settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "観測" }));
+    expect(await screen.findByText("観測とプライバシー")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "開いた場所の種類だけを記録します(パスは記録しません)"
+      )
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "フォルダ" }));
+
+    await waitFor(() => {
+      expect(client.setObservationSettings).toHaveBeenCalledWith({
+        windows: false,
+        folders: true,
+        downloads: false
+      });
+    });
+  });
+
+  it("lists event log records with payload summaries", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+
+    expect(await screen.findByText("fileName: photo.png")).toBeInTheDocument();
+    expect(screen.getByText(/desktop.download.completed/)).toBeInTheDocument();
+    expect(screen.getAllByText(/desktop-observation/).length).toBeGreaterThan(1);
+    expect(screen.getByText("text: おはよう")).toBeInTheDocument();
+  });
+
+  it("confirms and deletes event log records before a timestamp", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    const input = await screen.findByLabelText("この日時より前");
+    await userEvent.type(input, "2026-07-08T12:00");
+    await userEvent.click(screen.getByRole("button", { name: "期間指定で削除" }));
+
+    await waitFor(() =>
+      expect(client.countEventLogDeleteBefore).toHaveBeenCalledWith(
+        "2026-07-08T03:00:00.000Z"
+      )
+    );
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 2件"));
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("住人の記憶(要約)には残っている場合があります。")
+    );
+    await waitFor(() =>
+      expect(client.deleteEventLogBefore).toHaveBeenCalledWith(
+        "2026-07-08T03:00:00.000Z"
+      )
+    );
+    confirm.mockRestore();
+  });
+
+  it("confirms and deletes all event log records", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    await userEvent.click(screen.getByRole("button", { name: "全削除" }));
+
+    await waitFor(() => expect(client.countEventLogDeleteAll).toHaveBeenCalled());
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 3件"));
+    await waitFor(() => expect(client.deleteEventLogAll).toHaveBeenCalled());
+    confirm.mockRestore();
+  });
+
   it("ignores a canceled World Pack directory dialog", async () => {
     const client = clientFixture({
       openWorldPackDirectory: vi.fn(async () => null),
@@ -392,6 +631,49 @@ describe("App", () => {
       );
     });
     expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
+  });
+
+  it("imports a World Pack from zip after license confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const client = clientFixture({
+      openWorldPackZip: vi.fn(async () => "/Users/example/zip-yuukei.zip"),
+      inspectWorldPackZip: vi.fn(async () => ({
+        packId: "zip-yuukei",
+        displayName: "Zip Yuukei",
+        licenseText: "このPackの配布条件です。",
+        licenseSource: "LICENSE",
+        importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
+        replacesExisting: true
+      })),
+      importWorldPackZip: vi.fn(async () => ({
+        status: worldPackStatus("zip-yuukei"),
+        snapshot: snapshot("zipです")
+      }))
+    });
+
+    render(<App client={client} />);
+
+    await screen.findByText("Default Yuukei");
+    await userEvent.click(screen.getByRole("button", { name: "zipから読み込む" }));
+
+    await waitFor(() =>
+      expect(client.inspectWorldPackZip).toHaveBeenCalledWith(
+        "/Users/example/zip-yuukei.zip"
+      )
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("このPackの配布条件です。")
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("続行すると置き換えます。")
+    );
+    await waitFor(() =>
+      expect(client.importWorldPackZip).toHaveBeenCalledWith(
+        "/Users/example/zip-yuukei.zip"
+      )
+    );
+    expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("shows World Pack selection errors without replacing the current snapshot", async () => {
@@ -536,6 +818,42 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.uninstallExtension).toHaveBeenCalledWith("nya-suffix");
     });
+  });
+
+  it("shows suspended Extension status and restarts it", async () => {
+    const suspended = {
+      ...installedExtension("voicevox", "VOICEVOX"),
+      runtimeStatus: {
+        health: "unavailable" as const,
+        failureCount: 3,
+        suspended: true,
+        message: "timed out"
+      }
+    };
+    const restarted = {
+      ...suspended,
+      runtimeStatus: {
+        health: "ready" as const,
+        failureCount: 0,
+        suspended: false,
+        message: null
+      }
+    };
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([suspended])),
+      restartExtensionProcess: vi.fn(async () => extensionSettings([restarted]))
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    expect(await screen.findByText("状態: 休止")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "再起動" }));
+
+    await waitFor(() => {
+      expect(client.restartExtensionProcess).toHaveBeenCalledWith("voicevox");
+    });
+    expect(await screen.findByText("状態: 正常")).toBeInTheDocument();
   });
 
   it("shows Extension permission rows with a broad subscription warning", async () => {

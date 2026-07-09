@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use yuukei_capability::{DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID, SPEECH_SYNTHESIS_CAPABILITY};
 use yuukei_extension::{
-    validate_extension_summary, ProcessExtensionManifest, ProcessHookExtension, YuukeiExtension,
+    validate_extension_summary, ProcessExtensionManifest, ProcessHookExtension,
+    ProcessRuntimeStatus, YuukeiExtension,
 };
 use yuukei_protocol::{
     now_timestamp, ExtensionCapabilityDeclaration, ExtensionEventSubscription, ExtensionHookPoint,
@@ -60,6 +61,8 @@ pub struct InstalledExtension {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_load_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_status: Option<ProcessRuntimeStatus>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -644,6 +647,7 @@ impl ExtensionSettingsRegistry {
                 installed_at: stored.installed_at.clone(),
                 updated_at: stored.updated_at.clone(),
                 last_load_error: None,
+                runtime_status: None,
             },
             Err(error) => InstalledExtension {
                 extension_id: stored.extension_id.clone(),
@@ -664,6 +668,7 @@ impl ExtensionSettingsRegistry {
                 installed_at: stored.installed_at.clone(),
                 updated_at: stored.updated_at.clone(),
                 last_load_error: Some(error.to_string()),
+                runtime_status: None,
             },
         }
     }
@@ -788,10 +793,8 @@ impl ExtensionSettingsRegistry {
         let secret_keys = schema
             .fields
             .iter()
-            .filter_map(|field| {
-                matches!(field, ExtensionSettingField::Secret { .. })
-                    .then(|| field.key().to_string())
-            })
+            .filter(|field| matches!(field, ExtensionSettingField::Secret { .. }))
+            .map(|field| field.key().to_string())
             .collect::<BTreeSet<_>>();
         let mut keys = self
             .secrets
@@ -1056,9 +1059,9 @@ fn validate_setting_value(field: &ExtensionSettingField, value: &Value) -> Resul
             if options.iter().any(|option| option.value == selected) {
                 Ok(())
             } else {
-                return Err(DeviceHostError::ExtensionSettings(format!(
+                Err(DeviceHostError::ExtensionSettings(format!(
                     "setting {key} must be one of declared options"
-                )));
+                )))
             }
         }
         ExtensionSettingField::Secret { key, .. } => Err(DeviceHostError::ExtensionSettings(

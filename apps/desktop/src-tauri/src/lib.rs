@@ -3,8 +3,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
+use chrono::Utc;
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{
@@ -16,9 +19,12 @@ use tauri::{
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, ExtensionSettingsChangeResult,
-    ExtensionSettingsState, LocalRuntimeEnvironment, LocalYuukeiRuntime, WorldPackSelectionState,
-    WorldPackSwitchResult, TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
+    DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
+    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
+    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
+    ResidentEventLogPage, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -26,9 +32,14 @@ use yuukei_protocol::{
 };
 use yuukei_world::resolve_pack_relative_path;
 
+mod audio_player;
 mod desktop_stage;
+mod idle_observer;
 mod power_observer;
+mod window_observer;
+use audio_player::AudioPlayer;
 use desktop_stage::{ActorStageAnchorReport, DesktopStageManager};
+use idle_observer::seconds_since_last_user_input;
 use power_observer::PowerObserver;
 
 pub struct AppState {
@@ -36,10 +47,13 @@ pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
     asset_index: RwLock<PackAssetIndex>,
     stage: Arc<DesktopStageManager>,
+    audio_player: Option<Arc<AudioPlayer>>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     surface_attached: Mutex<bool>,
     presence_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
     power_observer: Mutex<Option<PowerObserver>>,
+    window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    download_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -155,6 +169,37 @@ async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsState
 }
 
 #[tauri::command]
+async fn get_observation_settings(
+    state: State<'_, AppState>,
+) -> Result<ObservationSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.observation_settings().map_err(to_message)
+}
+
+#[tauri::command]
+async fn get_onboarding_state(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    LocalYuukeiRuntime::onboarding_state_in(state.env.clone()).map_err(to_message)
+}
+
+#[tauri::command]
+async fn complete_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    LocalYuukeiRuntime::complete_onboarding_in(state.env.clone()).map_err(to_message)
+}
+
+#[tauri::command]
+async fn set_observation_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: ObservationSettingsUpdate,
+) -> Result<ObservationSettingsState, String> {
+    let next = LocalYuukeiRuntime::set_observation_settings_in(state.env.clone(), settings)
+        .map_err(to_message)?;
+    reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
+    Ok(next)
+}
+
+#[tauri::command]
 async fn get_capability_usage(state: State<'_, AppState>) -> Result<CapabilityUsageState, String> {
     let runtime = state.runtime.lock().await;
     runtime.capability_usage().map_err(to_message)
@@ -198,6 +243,76 @@ async fn forget_resident_memories(
         .forget_resident_memories(entries.unwrap_or_default(), all.unwrap_or(false))
         .await
         .map_err(to_message)
+}
+
+#[tauri::command]
+async fn read_event_log_page(
+    state: State<'_, AppState>,
+    kind_prefix: Option<String>,
+    privacy_category: EventLogPrivacyCategoryFilter,
+    before_sequence: Option<i64>,
+    limit: Option<usize>,
+) -> Result<ResidentEventLogPage, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .read_event_log_page(kind_prefix, privacy_category, before_sequence, limit)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_before(
+    state: State<'_, AppState>,
+    timestamp: String,
+) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .count_event_log_delete_before(timestamp)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_by_kind_prefix(
+    state: State<'_, AppState>,
+    prefix: String,
+) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .count_event_log_delete_by_kind_prefix(prefix)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn count_event_log_delete_all(state: State<'_, AppState>) -> Result<usize, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.count_event_log_delete_all().map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_before(
+    state: State<'_, AppState>,
+    timestamp: String,
+) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .delete_event_log_before(timestamp)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_by_kind_prefix(
+    state: State<'_, AppState>,
+    prefix: String,
+) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .delete_event_log_by_kind_prefix(prefix)
+        .map_err(to_message)
+}
+
+#[tauri::command]
+async fn delete_event_log_all(state: State<'_, AppState>) -> Result<EventLogDeleteResult, String> {
+    let runtime = state.runtime.lock().await;
+    runtime.delete_event_log_all().map_err(to_message)
 }
 
 #[tauri::command]
@@ -279,6 +394,30 @@ async fn send_conversation_text(
 }
 
 #[tauri::command]
+async fn send_conversation_choice(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    choice_id: String,
+    choice: String,
+    index: usize,
+) -> Result<Vec<RuntimeCommand>, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let commands = match runtime
+        .send_conversation_choice(TAURI_SURFACE_ID, &choice_id, &choice, index)
+        .await
+    {
+        Ok(commands) => commands,
+        Err(error) => {
+            emit_world_pack_status(&app, &runtime.world_pack_status())?;
+            return Err(to_message(error));
+        }
+    };
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
 async fn send_avatar_gesture_poke(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -312,6 +451,30 @@ async fn select_world_pack_directory(
             let current = state.runtime.lock().await.clone();
             let _ = current
                 .record_session_daihon_diagnostics_from_error(&error, Some(Path::new(&path)));
+            emit_world_pack_status(&app, &current.world_pack_status())?;
+            Err(to_message(error))
+        }
+    }
+}
+
+#[tauri::command]
+async fn inspect_world_pack_zip(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorldPackZipInspection, String> {
+    LocalYuukeiRuntime::inspect_world_pack_zip_in(state.env.clone(), &path).map_err(to_message)
+}
+
+#[tauri::command]
+async fn import_world_pack_zip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<WorldPackSwitchResult, String> {
+    match LocalYuukeiRuntime::import_world_pack_zip_in(state.env.clone(), &path).await {
+        Ok(runtime) => replace_runtime(app, state, runtime).await,
+        Err(error) => {
+            let current = state.runtime.lock().await.clone();
             emit_world_pack_status(&app, &current.world_pack_status())?;
             Err(to_message(error))
         }
@@ -401,6 +564,17 @@ async fn set_extension_secret(
 }
 
 #[tauri::command]
+async fn restart_extension_process(
+    state: State<'_, AppState>,
+    extension_id: String,
+) -> Result<ExtensionSettingsState, String> {
+    let runtime = state.runtime.lock().await;
+    runtime
+        .restart_extension_process(&extension_id)
+        .map_err(to_message)
+}
+
+#[tauri::command]
 async fn set_app_talk_interval_minutes(
     state: State<'_, AppState>,
     minutes: u64,
@@ -428,22 +602,50 @@ pub fn run() {
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let stage = Arc::new(DesktopStageManager::new());
-            let command_forwarder =
-                spawn_command_forwarder(runtime.home(), app.handle().clone(), stage.clone());
+            let audio_player = match AudioPlayer::new() {
+                Ok(player) => Some(Arc::new(player)),
+                Err(error) => {
+                    eprintln!("Yuukei audio output unavailable: {error}");
+                    None
+                }
+            };
+            let command_forwarder = spawn_command_forwarder(
+                runtime.home(),
+                app.handle().clone(),
+                stage.clone(),
+                audio_player.clone(),
+            );
             let power_observer = PowerObserver::new(runtime.clone());
+            let should_show_onboarding = LocalYuukeiRuntime::onboarding_state_in(env.clone())
+                .map(|state| !state.completed)
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(AppState {
                 env,
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 stage: stage.clone(),
+                audio_player,
                 command_forwarder: Mutex::new(Some(command_forwarder)),
                 surface_attached: Mutex::new(false),
                 presence_loop: Mutex::new(None),
                 power_observer: Mutex::new(Some(power_observer)),
+                window_observer: Mutex::new(None),
+                download_observer: Mutex::new(None),
             });
+            {
+                let state = app.handle().state::<AppState>();
+                tauri::async_runtime::block_on(reconcile_window_observer(app.handle(), &state))
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+                tauri::async_runtime::block_on(reconcile_download_observer(&state))
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            }
             stage
                 .sync_surfaces(app.handle(), &asset_catalog)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            if should_show_onboarding {
+                show_settings_window(app.handle())
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            }
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -466,6 +668,7 @@ pub fn run() {
             if window.label() == "settings" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
+                    let _ = window.emit("yuukei-onboarding-dismissed", ());
                     let _ = window.hide();
                 }
             }
@@ -476,10 +679,21 @@ pub fn run() {
             get_world_pack_status,
             get_extension_settings,
             get_app_settings,
+            get_observation_settings,
+            get_onboarding_state,
+            complete_onboarding,
+            set_observation_settings,
             get_capability_usage,
             list_resident_memories,
             update_resident_memory,
             forget_resident_memories,
+            read_event_log_page,
+            count_event_log_delete_before,
+            count_event_log_delete_by_kind_prefix,
+            count_event_log_delete_all,
+            delete_event_log_before,
+            delete_event_log_by_kind_prefix,
+            delete_event_log_all,
             get_actor_surface_assets,
             set_actor_window_click_through,
             set_stage_overlay_click_through,
@@ -488,8 +702,11 @@ pub fn run() {
             dismiss_stage_bubble,
             open_settings_window,
             send_conversation_text,
+            send_conversation_choice,
             send_avatar_gesture_poke,
             select_world_pack_directory,
+            inspect_world_pack_zip,
+            import_world_pack_zip,
             reset_world_pack_to_default,
             install_extension_directory,
             uninstall_extension,
@@ -497,6 +714,7 @@ pub fn run() {
             set_extension_hook_order,
             set_extension_setting_values,
             set_extension_secret,
+            restart_extension_process,
             set_app_talk_interval_minutes
         ])
         .run(tauri::generate_context!())
@@ -770,8 +988,13 @@ async fn replace_runtime(
     attach_tauri_surface_or_status(&app, &runtime).await?;
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
-    let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
-    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_forwarder = spawn_command_forwarder(
+        runtime.home(),
+        app.clone(),
+        state.stage.clone(),
+        state.audio_player.clone(),
+    );
+    let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
 
@@ -806,6 +1029,8 @@ async fn replace_runtime(
         let mut power_observer = state.power_observer.lock().await;
         let _previous = power_observer.replace(next_power_observer);
     }
+    reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -841,8 +1066,13 @@ async fn replace_runtime_snapshot(
     attach_tauri_surface_or_status(&app, &runtime).await?;
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
-    let next_forwarder = spawn_command_forwarder(runtime.home(), app.clone(), state.stage.clone());
-    let next_presence_loop = runtime.spawn_presence_loop();
+    let next_forwarder = spawn_command_forwarder(
+        runtime.home(),
+        app.clone(),
+        state.stage.clone(),
+        state.audio_player.clone(),
+    );
+    let next_presence_loop = spawn_desktop_presence_loop(&runtime);
     let next_power_observer = PowerObserver::new(runtime.clone());
     let status = runtime.world_pack_status();
 
@@ -877,6 +1107,8 @@ async fn replace_runtime_snapshot(
         let mut power_observer = state.power_observer.lock().await;
         let _previous = power_observer.replace(next_power_observer);
     }
+    reconcile_window_observer(&app, &state).await?;
+    reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
     state.stage.sync_surfaces(&app, &asset_catalog)?;
@@ -895,9 +1127,279 @@ async fn ensure_presence_loop(
     emit_app_startup_or_status(app, runtime).await?;
     let mut presence_loop = state.presence_loop.lock().await;
     if presence_loop.is_none() {
-        *presence_loop = Some(runtime.spawn_presence_loop());
+        *presence_loop = Some(spawn_desktop_presence_loop(runtime));
     }
     Ok(())
+}
+
+fn spawn_desktop_presence_loop(runtime: &LocalYuukeiRuntime) -> tokio::task::JoinHandle<()> {
+    runtime.spawn_presence_loop_with_idle_sampler(seconds_since_last_user_input)
+}
+
+async fn reconcile_window_observer(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<(), String> {
+    let runtime = state.runtime.lock().await.clone();
+    let settings = runtime.observation_settings().map_err(to_message)?;
+    let enabled = window_observer::observation_loop_enabled(&settings);
+    state
+        .stage
+        .set_window_observation_enabled(settings.windows)?;
+    let mut current = state.window_observer.lock().await;
+    match (enabled, current.is_some()) {
+        (true, false) => {
+            *current = Some(spawn_window_observer(
+                app.clone(),
+                runtime,
+                state.stage.clone(),
+            ));
+        }
+        (false, true) => {
+            if let Some(previous) = current.take() {
+                previous.abort();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn reconcile_download_observer(state: &State<'_, AppState>) -> Result<(), String> {
+    let runtime = state.runtime.lock().await.clone();
+    let settings = runtime.observation_settings().map_err(to_message)?;
+    let mut current = state.download_observer.lock().await;
+    match (settings.downloads, current.is_some()) {
+        (true, false) => {
+            *current = Some(spawn_download_observer(runtime));
+        }
+        (false, true) => {
+            if let Some(previous) = current.take() {
+                previous.abort();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn spawn_window_observer(
+    app: AppHandle,
+    runtime: LocalYuukeiRuntime,
+    stage: Arc<DesktopStageManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut state = DesktopWindowObservationState::default();
+        let mut folder_state = DesktopFolderObservationState::default();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let settings = match runtime.observation_settings() {
+                Ok(settings) => settings,
+                Err(_) => continue,
+            };
+            if settings.windows {
+                let observations = window_observer::collect_desktop_windows();
+                match stage.apply_window_terrain(&app, &observations) {
+                    Ok(ended) => {
+                        for event in ended {
+                            if let Err(error) = runtime
+                                .emit_stage_perch_ended(
+                                    &event.actor_id,
+                                    &event.window_key,
+                                    event.reason,
+                                )
+                                .await
+                            {
+                                let _ = runtime.logger().record(
+                                    "stage.perch.ended.error",
+                                    "device-host",
+                                    serde_json::json!({
+                                        "actorId": event.actor_id,
+                                        "windowKey": event.window_key,
+                                        "message": error.to_string()
+                                    })
+                                    .as_object()
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect(),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = runtime.logger().record(
+                            "desktop.window.terrain.error",
+                            "device-host",
+                            serde_json::json!({ "message": error })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+                for transition in state.update(Utc::now(), observations) {
+                    if let Err(error) = runtime.emit_desktop_window_transition(transition).await {
+                        let _ = runtime.logger().record(
+                            "desktop.window.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+            } else {
+                state = DesktopWindowObservationState::default();
+            }
+            if settings.folders {
+                let observations = window_observer::collect_desktop_folders();
+                for transition in folder_state.update(Utc::now(), observations) {
+                    if let Err(error) = runtime.emit_desktop_folder_transition(transition).await {
+                        let _ = runtime.logger().record(
+                            "desktop.folder.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                }
+            } else {
+                folder_state = DesktopFolderObservationState::default();
+            }
+        }
+    })
+}
+
+fn spawn_download_observer(runtime: LocalYuukeiRuntime) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(downloads_dir) = window_observer::downloads_dir() else {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.unavailable",
+                "device-host",
+                std::collections::BTreeMap::new(),
+            );
+            return;
+        };
+        if !downloads_dir.is_dir() {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.unavailable",
+                "device-host",
+                std::collections::BTreeMap::new(),
+            );
+            return;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher_result: notify::Result<RecommendedWatcher> =
+            notify::recommended_watcher(move |result| {
+                let _ = tx.send(result);
+            });
+        let mut watcher = match watcher_result {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                let _ = runtime.logger().record(
+                    "desktop.download.observer.error",
+                    "device-host",
+                    serde_json::json!({ "message": error.to_string() })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                );
+                return;
+            }
+        };
+        if let Err(error) = watcher.watch(&downloads_dir, RecursiveMode::NonRecursive) {
+            let _ = runtime.logger().record(
+                "desktop.download.observer.error",
+                "device-host",
+                serde_json::json!({ "message": error.to_string() })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            );
+            return;
+        }
+        while let Some(result) = rx.recv().await {
+            let event = match result {
+                Ok(event) => event,
+                Err(error) => {
+                    let _ = runtime.logger().record(
+                        "desktop.download.observer.error",
+                        "device-host",
+                        serde_json::json!({ "message": error.to_string() })
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect(),
+                    );
+                    continue;
+                }
+            };
+            if !is_download_completion_event(&event.kind) {
+                continue;
+            }
+            for path in event.paths {
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if !path.is_file() {
+                        return;
+                    }
+                    let Some(file_name) = path
+                        .file_name()
+                        .and_then(|file_name| file_name.to_str())
+                        .map(str::to_string)
+                    else {
+                        return;
+                    };
+                    let Some(observation) =
+                        yuukei_device_host::download_file_observation_from_name(&file_name)
+                    else {
+                        return;
+                    };
+                    if let Err(error) = runtime.emit_desktop_download_completed(observation).await {
+                        let _ = runtime.logger().record(
+                            "desktop.download.event.error",
+                            "device-host",
+                            serde_json::json!({ "message": error.to_string() })
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                });
+            }
+        }
+    })
+}
+
+fn is_download_completion_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To
+                    | notify::event::RenameMode::Both
+                    | notify::event::RenameMode::Any
+            ))
+    )
 }
 
 async fn attach_tauri_surface_or_status(
@@ -940,10 +1442,20 @@ fn spawn_command_forwarder(
     home: Arc<yuukei_resident_home::ResidentHome>,
     app: AppHandle,
     stage: Arc<DesktopStageManager>,
+    audio_player: Option<Arc<AudioPlayer>>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     let mut receiver = home.subscribe_commands();
     tauri::async_runtime::spawn(async move {
         while let Ok(command) = receiver.recv().await {
+            if command.kind == "audio.play" {
+                if let Some(player) = &audio_player {
+                    if let Err(error) = player.play_command(&command) {
+                        eprintln!("Yuukei audio.play ignored: {error}");
+                    }
+                } else {
+                    eprintln!("Yuukei audio.play ignored: audio output unavailable");
+                }
+            }
             let _ = stage.handle_runtime_command(&app, &command);
             let _ = app.emit("yuukei-command", &command);
         }

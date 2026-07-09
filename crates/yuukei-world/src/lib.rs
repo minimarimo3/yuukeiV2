@@ -12,12 +12,12 @@ use serde_json::{Map, Number, Value};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use yuukei_daihon::{
-    has_errors, parse_script, validate_script, ActionHandler, DaihonDiagnostic, DaihonNumber,
-    DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
+    has_errors, parse_script, validate_script, ActionHandler, ChoiceRequest, DaihonDiagnostic,
+    DaihonNumber, DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
     GenerateRequest, GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest,
     Interpreter, ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script,
     Severity as DaihonSeverity, Span, Spanned, Stmt, SystemEvent, ValidationMode,
-    EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
+    CHOICE_FUNCTION_NAME, EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
     canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
@@ -328,6 +328,12 @@ pub struct DaihonInterpretRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaihonChoiceRequest {
+    pub choices: Vec<String>,
+    pub timeout_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaihonExtractRequest {
     pub input_text: String,
     pub instruction: String,
@@ -349,6 +355,14 @@ pub struct DaihonGenerateResponse {
 #[async_trait]
 pub trait DaihonInterpretHandler: Send {
     async fn interpret(&mut self, request: DaihonInterpretRequest) -> String;
+
+    async fn flush_commands_before_choice(&mut self, _commands: Vec<RuntimeCommand>) -> bool {
+        false
+    }
+
+    async fn choose(&mut self, _request: DaihonChoiceRequest) -> String {
+        yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+    }
 
     async fn extract(&mut self, _request: DaihonExtractRequest) -> String {
         yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
@@ -999,9 +1013,16 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
             .iter()
             .filter(|loaded| script_accepts_event(&loaded.script, &event.kind))
         {
-            let mut action_handler =
-                YuukeiActionHandler::new(event, world.default_actor_id.clone());
-            let mut interpret_bridge = YuukeiInterpretBridge { interpret_handler };
+            let command_buffer = Arc::new(Mutex::new(Vec::new()));
+            let mut action_handler = YuukeiActionHandler::new(
+                event,
+                world.default_actor_id.clone(),
+                command_buffer.clone(),
+            );
+            let mut interpret_bridge = YuukeiInterpretBridge {
+                interpret_handler,
+                command_buffer,
+            };
             let mut interpreter = Interpreter {
                 action_handler: &mut action_handler,
                 interpret_handler: &mut interpret_bridge,
@@ -1016,6 +1037,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                 },
                 interpretation_count: 0,
                 generation_count: 0,
+                choice_count: 0,
                 diagnostics: Vec::new(),
             };
             let run = interpreter
@@ -1044,7 +1066,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     scene_name: scene.name,
                 });
             }
-            commands.extend(action_handler.commands);
+            commands.extend(action_handler.drain_commands().await);
         }
 
         let next_variables = variables.into_values();
@@ -1066,11 +1088,12 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
 struct YuukeiActionHandler {
     event: RuntimeEvent,
     default_actor_id: String,
-    commands: Vec<RuntimeCommand>,
+    commands: Arc<Mutex<Vec<RuntimeCommand>>>,
 }
 
 struct YuukeiInterpretBridge<'a> {
     interpret_handler: &'a mut dyn DaihonInterpretHandler,
+    command_buffer: Arc<Mutex<Vec<RuntimeCommand>>>,
 }
 
 #[async_trait]
@@ -1119,15 +1142,46 @@ impl InterpretHandler for YuukeiInterpretBridge<'_> {
             })
             .await)
     }
+
+    async fn choose(
+        &mut self,
+        request: ChoiceRequest,
+    ) -> std::result::Result<String, DaihonRuntimeError> {
+        let pending_commands: Vec<RuntimeCommand> =
+            self.command_buffer.lock().await.drain(..).collect();
+        if !pending_commands.is_empty()
+            && !self
+                .interpret_handler
+                .flush_commands_before_choice(pending_commands.clone())
+                .await
+        {
+            self.command_buffer.lock().await.extend(pending_commands);
+        }
+        Ok(self
+            .interpret_handler
+            .choose(DaihonChoiceRequest {
+                choices: request.choices,
+                timeout_seconds: request.timeout_seconds,
+            })
+            .await)
+    }
 }
 
 impl YuukeiActionHandler {
-    fn new(event: &RuntimeEvent, default_actor_id: String) -> Self {
+    fn new(
+        event: &RuntimeEvent,
+        default_actor_id: String,
+        commands: Arc<Mutex<Vec<RuntimeCommand>>>,
+    ) -> Self {
         Self {
             event: event.clone(),
             default_actor_id,
-            commands: Vec::new(),
+            commands,
         }
+    }
+
+    async fn drain_commands(&self) -> Vec<RuntimeCommand> {
+        self.commands.lock().await.drain(..).collect()
     }
 
     fn command(&self, kind: &str, speaker_id: Option<&str>) -> RuntimeCommand {
@@ -1165,7 +1219,7 @@ impl ActionHandler for YuukeiActionHandler {
             ("speakerId".to_string(), Value::String(actor_id)),
             ("emotion".to_string(), Value::String("neutral".to_string())),
         ]);
-        self.commands.push(command);
+        self.commands.lock().await.push(command);
         Ok(())
     }
 
@@ -1195,7 +1249,7 @@ impl ActionHandler for YuukeiActionHandler {
                     Value::String(instruction.to_string()),
                 ),
             ]);
-            self.commands.push(command);
+            self.commands.lock().await.push(command);
         }
         if let Some(motion) = dialogue.motion.filter(|value| !value.trim().is_empty()) {
             let mut command = self.command("avatar.motion", speaker_id);
@@ -1216,7 +1270,7 @@ impl ActionHandler for YuukeiActionHandler {
                     Value::String(instruction.to_string()),
                 ),
             ]);
-            self.commands.push(command);
+            self.commands.lock().await.push(command);
         }
         let mut command = self.command("dialogue.say", speaker_id);
         command.source = "capability.dialogue.generate".to_string();
@@ -1237,7 +1291,7 @@ impl ActionHandler for YuukeiActionHandler {
                 Value::String(instruction.to_string()),
             ),
         ]);
-        self.commands.push(command);
+        self.commands.lock().await.push(command);
         Ok(())
     }
 
@@ -1248,12 +1302,12 @@ impl ActionHandler for YuukeiActionHandler {
         positional: Vec<DaihonValue>,
         named: BTreeMap<String, DaihonValue>,
     ) -> std::result::Result<DaihonValue, DaihonRuntimeError> {
-        let Some(value) = function_value(&positional, &named) else {
-            return Ok(DaihonValue::None);
-        };
         let actor_id = speaker_id.unwrap_or(&self.default_actor_id).to_string();
         match name {
             "表情" | "expression" => {
+                let Some(value) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
                 let mut command = self.command("avatar.expression", speaker_id);
                 command.payload = JsonMap::from([
                     ("expression".to_string(), Value::String(value)),
@@ -1263,9 +1317,12 @@ impl ActionHandler for YuukeiActionHandler {
                         Value::String(name.to_string()),
                     ),
                 ]);
-                self.commands.push(command);
+                self.commands.lock().await.push(command);
             }
             "動作" | "モーション" | "motion" => {
+                let Some(value) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
                 let mut command = self.command("avatar.motion", speaker_id);
                 command.payload = JsonMap::from([
                     ("motion".to_string(), Value::String(value)),
@@ -1275,7 +1332,33 @@ impl ActionHandler for YuukeiActionHandler {
                         Value::String(name.to_string()),
                     ),
                 ]);
-                self.commands.push(command);
+                self.commands.lock().await.push(command);
+            }
+            "枠に座る" => {
+                let Some(window_key) = function_value(&positional, &named) else {
+                    return Ok(DaihonValue::None);
+                };
+                let mut command = self.command("stage.perch", speaker_id);
+                command.payload = JsonMap::from([
+                    ("windowKey".to_string(), Value::String(window_key)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "枠から降りる" => {
+                let mut command = self.command("stage.perch.release", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
             }
             _ => {}
         }
@@ -1453,6 +1536,29 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
             DaihonValue::String(period.to_string()),
         ));
     }
+    if let Some(idle_minutes) = event.payload.get("idleMinutes").and_then(Value::as_i64) {
+        inputs.push((
+            "不在分".to_string(),
+            DaihonValue::Number(DaihonNumber::Integer(idle_minutes)),
+        ));
+    }
+    for (payload_key, input_name) in [
+        ("app", "アプリ"),
+        ("windowKey", "窓ID"),
+        ("category", "フォルダ"),
+        ("fileName", "ファイル名"),
+        ("fileCategory", "ファイル種類"),
+        ("recentDownloadFileName", "最近のダウンロード"),
+        ("recentDownloadCategory", "最近のダウンロード種類"),
+    ] {
+        if let Some(value) = event
+            .payload
+            .get(payload_key)
+            .and_then(json_to_daihon_value)
+        {
+            inputs.push((input_name.to_string(), value));
+        }
+    }
     inputs
 }
 
@@ -1534,6 +1640,22 @@ fn yuukei_function_registry() -> FunctionRegistry {
         });
     }
     registry.register(FunctionSpec {
+        name: "枠に座る".to_string(),
+        positional: vec![ParamSpec {
+            name: Some("窓ID".to_string()),
+            ty: ParamType::Any,
+            required: true,
+        }],
+        named: BTreeMap::new(),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "枠から降りる".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::new(),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
         name: INTERPRET_FUNCTION_NAME.to_string(),
         positional: vec![
             ParamSpec {
@@ -1553,6 +1675,25 @@ fn yuukei_function_registry() -> FunctionRegistry {
             },
         ],
         named: BTreeMap::new(),
+        return_type: Some(yuukei_daihon::ValueType::String),
+    });
+    registry.register(FunctionSpec {
+        name: CHOICE_FUNCTION_NAME.to_string(),
+        positional: (0..6)
+            .map(|index| ParamSpec {
+                name: Some(format!("選択肢{}", index + 1)),
+                ty: ParamType::String,
+                required: index == 0,
+            })
+            .collect(),
+        named: BTreeMap::from([(
+            "秒数".to_string(),
+            ParamSpec {
+                name: Some("秒数".to_string()),
+                ty: ParamType::Number,
+                required: false,
+            },
+        )]),
         return_type: Some(yuukei_daihon::ValueType::String),
     });
     registry.register(FunctionSpec {
@@ -2358,6 +2499,216 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn yuukei_adapter_dispatches_gesture_scene_by_hit_surface_input() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["avatar.gesture.poke".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### cloth poke
+合図: ＠avatar.gesture.poke
+条件:（入力#hitSurface = 「cloth」）
+話者: yuukei
+「服だよ」
+
+### skin poke
+合図: ＠avatar.gesture.poke
+条件:（入力#hitSurface = 「skin」）
+話者: yuukei
+「肌だよ」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+        event.id = "evt_hit_surface".to_string();
+        event
+            .payload
+            .insert("hitSurface".to_string(), json!("cloth"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "服だよ");
+        assert_eq!(result.executed_scenes[0].scene_name, "cloth poke");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_idle_end_scene_by_friendly_idle_minutes_input() -> Result<()>
+    {
+        let mut world = pack();
+        world.signals.allow = vec!["presence.idle.end".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### welcome back
+合図: ＠復帰
+条件:（入力#不在分 = 7）
+話者: yuukei
+「おかえり」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("presence.idle.end", "device", "resident-default");
+        event.id = "evt_idle_end".to_string();
+        event.payload.insert("idleMinutes".to_string(), json!(7));
+        event.payload.insert("idleSeconds".to_string(), json!(421));
+
+        let result = adapter.dispatch(&event, &world).await?;
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "おかえり");
+        assert_eq!(result.executed_scenes[0].scene_name, "welcome back");
+        Ok(())
+    }
+
+    #[test]
+    fn event_inputs_include_desktop_terrain_friendly_names() {
+        let mut event = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        event.payload.insert("app".to_string(), json!("finder"));
+        event
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        event
+            .payload
+            .insert("fileName".to_string(), json!("report.pdf"));
+        event
+            .payload
+            .insert("fileCategory".to_string(), json!("document"));
+        event
+            .payload
+            .insert("windowKey".to_string(), json!("window-1"));
+        event
+            .payload
+            .insert("recentDownloadFileName".to_string(), json!("photo.png"));
+        event
+            .payload
+            .insert("recentDownloadCategory".to_string(), json!("image"));
+
+        let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(inputs["アプリ"], DaihonValue::String("finder".to_string()));
+        assert_eq!(
+            inputs["フォルダ"],
+            DaihonValue::String("downloads".to_string())
+        );
+        assert_eq!(
+            inputs["ファイル名"],
+            DaihonValue::String("report.pdf".to_string())
+        );
+        assert_eq!(
+            inputs["ファイル種類"],
+            DaihonValue::String("document".to_string())
+        );
+        assert_eq!(inputs["窓ID"], DaihonValue::String("window-1".to_string()));
+        assert_eq!(
+            inputs["最近のダウンロード"],
+            DaihonValue::String("photo.png".to_string())
+        );
+        assert_eq!(
+            inputs["最近のダウンロード種類"],
+            DaihonValue::String("image".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_stage_perch_functions() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["desktop.window.focused".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### perch on focused window
+合図: ＠窓_注目
+話者: yuukei
+＜枠に座る (入力#窓ID)＞
+＜枠から降りる＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("desktop.window.focused", "device", "resident-default");
+        event.id = "evt_window_focus".to_string();
+        event.device_id = Some("device-local".to_string());
+        event
+            .payload
+            .insert("windowKey".to_string(), json!("win-42"));
+        event.payload.insert("app".to_string(), json!("Finder"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].kind, "stage.perch");
+        assert_eq!(result.commands[0].payload["windowKey"], "win-42");
+        assert_eq!(result.commands[0].payload["speakerId"], "yuukei");
+        assert_eq!(result.commands[0].payload["sourceFunction"], "枠に座る");
+        assert_eq!(
+            result.commands[0]
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref()),
+            Some("yuukei")
+        );
+        assert_eq!(result.commands[1].kind, "stage.perch.release");
+        assert_eq!(result.commands[1].payload["speakerId"], "yuukei");
+        assert_eq!(result.commands[1].payload["sourceFunction"], "枠から降りる");
+        Ok(())
+    }
+
+    struct ChoiceHandler {
+        choice: String,
+        requests: Vec<DaihonChoiceRequest>,
+    }
+
+    #[async_trait]
+    impl DaihonInterpretHandler for ChoiceHandler {
+        async fn interpret(&mut self, _request: DaihonInterpretRequest) -> String {
+            yuukei_daihon::UNKNOWN_INTERPRETATION.to_string()
+        }
+
+        async fn choose(&mut self, request: DaihonChoiceRequest) -> String {
+            self.requests.push(request);
+            self.choice.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_choice_scene_with_mock_handler() -> Result<()> {
+        let mut world = pack();
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### invite
+合図: ＠conversation.text
+話者: yuukei
+返事=＜選択 「見る」 「あとで」＞
+※（返事 = 「見る」）なら:
+「見よう」
+※あるいは（返事 = 「不明」）なら:
+「わからない」
+※それ以外:
+「あとでね」
+おわり
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut handler = ChoiceHandler {
+            choice: "見る".to_string(),
+            requests: Vec::new(),
+        };
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_choice".to_string();
+
+        let result = adapter
+            .dispatch_with_interpret(&event, &world, &mut handler)
+            .await?;
+
+        assert_eq!(handler.requests.len(), 1);
+        assert_eq!(handler.requests[0].choices, vec!["見る", "あとで"]);
+        assert_eq!(handler.requests[0].timeout_seconds, 30);
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].payload["text"], "見よう");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_adapter_resolves_daihon_speaker_aliases() -> Result<()> {
         let mut world = pack();
         world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
@@ -2460,6 +2811,9 @@ mod tests {
         yuukei_pat
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        yuukei_pat
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&yuukei_pat, &world).await?;
         let dialogue = result
             .commands
@@ -2482,6 +2836,9 @@ mod tests {
         partner_pat
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        partner_pat
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&partner_pat, &world).await?;
         let dialogue = result
             .commands
@@ -2515,6 +2872,9 @@ mod tests {
         yuukei_poke
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        yuukei_poke
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&yuukei_poke, &world).await?;
         let dialogue = result
             .commands
@@ -2537,6 +2897,9 @@ mod tests {
         partner_poke
             .payload
             .insert("hitZoneId".to_string(), json!("head"));
+        partner_poke
+            .payload
+            .insert("hitSurface".to_string(), json!("skin"));
         let result = adapter.dispatch(&partner_poke, &world).await?;
         let dialogue = result
             .commands
