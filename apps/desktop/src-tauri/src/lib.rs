@@ -327,14 +327,18 @@ async fn get_actor_surface_assets(
 fn set_actor_window_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
     window
         .set_ignore_cursor_events(passthrough)
-        .map_err(to_message)
+        .map_err(to_message)?;
+    desktop_stage::enforce_borderless(&window);
+    Ok(())
 }
 
 #[tauri::command]
 fn set_stage_overlay_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
     window
         .set_ignore_cursor_events(passthrough)
-        .map_err(to_message)
+        .map_err(to_message)?;
+    desktop_stage::enforce_borderless(&window);
+    Ok(())
 }
 
 #[tauri::command]
