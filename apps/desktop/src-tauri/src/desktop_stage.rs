@@ -727,24 +727,86 @@ fn create_actor_window(
     Ok(())
 }
 
-/// Drop the native window caption on Windows.
+/// Drop the native window caption on Windows and keep it from flashing back.
 ///
-/// The builder's `decorations(false)` above does not reliably remove the caption
-/// for these runtime-created transparent windows on Windows 11: tao always keeps
-/// the `WS_CAPTION` style and only hides the caption via `WM_NCCALCSIZE` when its
-/// internal decorations flag is off — and for these windows that flag ends up on,
-/// leaving a visible "Yuukei" title bar. Re-asserting `set_decorations(false)` at
-/// runtime flips the flag off and forces a frame recompute, so the bar disappears
-/// and stays gone across later cursor-passthrough / always-on-top updates.
+/// tao keeps the `WS_CAPTION` style on these top-level windows at all times and
+/// merely hides the caption by returning 0 from `WM_NCCALCSIZE` while its internal
+/// decorations flag is off (`to_window_styles` only strips `WS_CAPTION` for child
+/// windows). Two consequences on Windows 11:
+///
+/// 1. The builder's `decorations(false)` does not reliably take for these
+///    runtime-created transparent windows, so we re-assert `set_decorations(false)`
+///    to force the flag off and hide the caption in the steady state.
+/// 2. Because `WS_CAPTION` is still present — tao re-adds it via `SetWindowLongW`
+///    on every style update, e.g. each cursor-passthrough toggle — `DefWindowProc`
+///    repaints the caption on every activation change (clicking the actor, or the
+///    Start menu stealing focus), flashing the "Yuukei" title bar for a frame. We
+///    install a window subclass that forwards `WM_NCACTIVATE` with `lParam = -1`,
+///    the documented signal telling `DefWindowProc` not to redraw the non-client
+///    area, which stops the flicker while leaving tao's focus bookkeeping intact.
+///
 /// No-op on platforms where the builder already produced a borderless window.
 fn enforce_borderless(window: &WebviewWindow) {
     #[cfg(windows)]
     {
         let _ = window.set_decorations(false);
+        windows_caption::suppress_activation_flicker(window);
     }
     #[cfg(not(windows))]
     {
         let _ = window;
+    }
+}
+
+#[cfg(windows)]
+mod windows_caption {
+    use tauri::WebviewWindow;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_NCACTIVATE, WM_NCDESTROY};
+
+    /// Stable id for our single caption subclass on each window.
+    const SUBCLASS_ID: usize = 0x594B_00AC;
+
+    /// Install a subclass that stops the native caption from flashing on activation
+    /// changes. See [`super::enforce_borderless`] for the full rationale.
+    pub(super) fn suppress_activation_flicker(window: &WebviewWindow) {
+        // Take the raw handle as an `isize` so the value is `Send` for the closure
+        // below (Tauri's `HWND` newtype wraps a non-`Send` pointer).
+        let hwnd_value = match window.hwnd() {
+            Ok(hwnd) => hwnd.0 as isize,
+            Err(_) => return,
+        };
+        // The subclass must be installed on the thread that owns the window (the main
+        // thread). Window creation is marshalled there even when `build()` is called
+        // from an async command's worker thread, so hop back to it explicitly.
+        let _ = window.run_on_main_thread(move || unsafe {
+            let hwnd = HWND(hwnd_value as *mut core::ffi::c_void);
+            let _ = SetWindowSubclass(hwnd, Some(caption_subclass_proc), SUBCLASS_ID, 0);
+        });
+    }
+
+    unsafe extern "system" fn caption_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _uid_subclass: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            // `lParam = -1` tells `DefWindowProc` to skip repainting the non-client
+            // area, so the still-present `WS_CAPTION` bar never draws on focus changes.
+            // We forward downstream via `DefSubclassProc`, so tao's own `WM_NCACTIVATE`
+            // handler still runs and keeps its active/focus state correct — and it
+            // relays this same `lParam` on to `DefWindowProc`.
+            WM_NCACTIVATE => DefSubclassProc(hwnd, msg, wparam, LPARAM(-1)),
+            WM_NCDESTROY => {
+                let _ = RemoveWindowSubclass(hwnd, Some(caption_subclass_proc), SUBCLASS_ID);
+                DefSubclassProc(hwnd, msg, wparam, lparam)
+            }
+            _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+        }
     }
 }
 
