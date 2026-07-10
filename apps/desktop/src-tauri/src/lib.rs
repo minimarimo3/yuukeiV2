@@ -358,14 +358,18 @@ async fn get_actor_surface_assets(
 fn set_actor_window_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
     window
         .set_ignore_cursor_events(passthrough)
-        .map_err(to_message)
+        .map_err(to_message)?;
+    desktop_stage::enforce_borderless(&window);
+    Ok(())
 }
 
 #[tauri::command]
 fn set_stage_overlay_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
     window
         .set_ignore_cursor_events(passthrough)
-        .map_err(to_message)
+        .map_err(to_message)?;
+    desktop_stage::enforce_borderless(&window);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1004,7 +1008,21 @@ fn desktop_actor_surface_assets(runtime: &LocalYuukeiRuntime) -> DesktopActorSur
 }
 
 fn pack_asset_url(route: &str) -> String {
-    format!("{PACK_ASSET_SCHEME}://localhost/{route}")
+    // Tauri serves custom URI schemes with a different URL shape per platform
+    // (see `tauri::App::register_uri_scheme_protocol` docs):
+    //   - macOS / Linux: `<scheme>://localhost/<path>`
+    //   - Windows / Android: `http://<scheme>.localhost/<path>`
+    // Desktop only ships to Windows and the unix-like platforms, so branch on
+    // `windows`. Using the wrong shape makes WebView2 reject the request and the
+    // VRM assets silently fail to load (the actor renders as an empty window).
+    #[cfg(windows)]
+    {
+        format!("http://{PACK_ASSET_SCHEME}.localhost/{route}")
+    }
+    #[cfg(not(windows))]
+    {
+        format!("{PACK_ASSET_SCHEME}://localhost/{route}")
+    }
 }
 
 fn actor_model_route(actor_id: &str) -> String {
@@ -1549,6 +1567,18 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability == "actor.place"));
+    }
+
+    #[test]
+    fn pack_asset_url_uses_platform_specific_scheme() {
+        // WebView2 (Windows) serves custom schemes at `http://<scheme>.localhost`,
+        // while WKWebView/WebKitGTK use `<scheme>://localhost`. The wrong shape makes
+        // the VRM assets fail to load, leaving the actor window empty.
+        let url = pack_asset_url("actors/yuukei/model");
+        #[cfg(windows)]
+        assert_eq!(url, "http://yuukei-pack.localhost/actors/yuukei/model");
+        #[cfg(not(windows))]
+        assert_eq!(url, "yuukei-pack://localhost/actors/yuukei/model");
     }
 
     #[test]
