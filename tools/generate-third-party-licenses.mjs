@@ -1,0 +1,208 @@
+#!/usr/bin/env node
+
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
+
+const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const outputPath = join(root, "THIRD-PARTY-LICENSES.md");
+const commandBufferBytes = 64 * 1024 * 1024;
+
+function runJson(command, args, options = {}) {
+  const stdout = execFileSync(command, args, {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...options.env
+    },
+    maxBuffer: commandBufferBytes,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  return JSON.parse(stdout);
+}
+
+function runText(command, args, options = {}) {
+  return execFileSync(command, args, {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...options.env
+    },
+    maxBuffer: commandBufferBytes,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+
+function rustHostTarget() {
+  const text = runText("rustc", ["-vV"]);
+  return text
+    .split(/\r?\n/u)
+    .find((line) => line.startsWith("host: "))
+    ?.slice("host: ".length)
+    .trim();
+}
+
+function cargoMetadata() {
+  const offlineEnv = { CARGO_NET_OFFLINE: "true" };
+  try {
+    return runJson("cargo", ["metadata", "--format-version", "1"], {
+      env: offlineEnv
+    });
+  } catch {
+    const host = rustHostTarget();
+    if (!host) throw new Error("rust host target could not be determined");
+    return runJson(
+      "cargo",
+      ["metadata", "--format-version", "1", "--filter-platform", host],
+      { env: offlineEnv }
+    );
+  }
+}
+
+function rustRows() {
+  return cargoMetadata()
+    .packages.filter((pkg) => pkg.source)
+    .map((pkg) => ({
+      name: pkg.name,
+      version: pkg.version,
+      license: pkg.license ?? licenseFileLabel(pkg.license_file)
+    }))
+    .sort(compareRows);
+}
+
+function licenseFileLabel(licenseFile) {
+  if (!licenseFile) return "UNKNOWN";
+  return `SEE LICENSE FILE (${relative(root, licenseFile)})`;
+}
+
+function pnpmLicenseRows() {
+  try {
+    return normalizePnpmLicenses(
+      runJson("corepack", ["pnpm", "licenses", "list", "--json"])
+    );
+  } catch {
+    return npmRowsFromNodeModules();
+  }
+}
+
+function normalizePnpmLicenses(raw) {
+  const rows = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (typeof value.name === "string") {
+      rows.push({
+        name: value.name,
+        version: String(value.version ?? ""),
+        license: licenseText(value.license ?? value.licenses)
+      });
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(raw);
+  return dedupeRows(rows).sort(compareRows);
+}
+
+function npmRowsFromNodeModules() {
+  const rows = [];
+  const nodeModules = join(root, "node_modules");
+  for (const packageJson of findPackageJsons(nodeModules)) {
+    const pkg = JSON.parse(readFileSync(packageJson, "utf8"));
+    if (!pkg.name || !pkg.version) continue;
+    rows.push({
+      name: pkg.name,
+      version: String(pkg.version),
+      license: licenseText(pkg.license ?? pkg.licenses)
+    });
+  }
+  return dedupeRows(rows).sort(compareRows);
+}
+
+function findPackageJsons(start) {
+  if (!existsSync(start)) return [];
+  const found = [];
+  const stack = [start];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current)) {
+      const entryPath = join(current, entry);
+      const stats = statSync(entryPath);
+      if (stats.isDirectory()) {
+        stack.push(entryPath);
+      } else if (entry === "package.json") {
+        found.push(entryPath);
+      }
+    }
+  }
+  return found;
+}
+
+function licenseText(value) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) return value.map(licenseText).join(" OR ") || "UNKNOWN";
+  if (value && typeof value === "object" && typeof value.type === "string") {
+    return value.type;
+  }
+  return "UNKNOWN";
+}
+
+function dedupeRows(rows) {
+  const byKey = new Map();
+  for (const row of rows) {
+    byKey.set(`${row.name}@${row.version}`, row);
+  }
+  return [...byKey.values()];
+}
+
+function compareRows(left, right) {
+  return (
+    left.name.localeCompare(right.name) ||
+    left.version.localeCompare(right.version)
+  );
+}
+
+function markdownTable(rows) {
+  return [
+    "| Package | Version | License |",
+    "| --- | --- | --- |",
+    ...rows.map(
+      (row) =>
+        `| ${escapeCell(row.name)} | ${escapeCell(row.version)} | ${escapeCell(row.license)} |`
+    )
+  ].join("\n");
+}
+
+function escapeCell(value) {
+  return String(value).replace(/\|/gu, "\\|").replace(/\r?\n/gu, " ");
+}
+
+const rust = rustRows();
+const npm = pnpmLicenseRows();
+const generatedAt = new Date().toISOString();
+
+writeFileSync(
+  outputPath,
+  [
+    "# Third-Party Licenses",
+    "",
+    `Generated by \`tools/generate-third-party-licenses.mjs\` at ${generatedAt}.`,
+    "",
+    "## Rust",
+    "",
+    markdownTable(rust),
+    "",
+    "## npm",
+    "",
+    markdownTable(npm),
+    ""
+  ].join("\n"),
+  "utf8"
+);
+
+console.log(`Wrote ${relative(root, outputPath)} (${rust.length} Rust rows, ${npm.length} npm rows)`);

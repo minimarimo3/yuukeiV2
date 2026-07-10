@@ -1053,6 +1053,23 @@ describe("App", () => {
     expect(screen.getByText("ext.watcher.activity")).toBeInTheDocument();
   });
 
+  it("shows VOICEVOX credit text for the bundled speech extension", async () => {
+    const voicevox = installedExtension("yuukei-voicevox", "Yuukei VOICEVOX");
+    const client = clientFixture({
+      getExtensionSettings: vi.fn(async () => extensionSettings([voicevox]))
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+
+    expect(await screen.findByText("Yuukei VOICEVOX")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "音声合成にVOICEVOXを使用します。生成音声の利用は各キャラクターの規約に従ってください(既定の声: VOICEVOX:四国めたん / VOICEVOX:ずんだもん)"
+      )
+    ).toBeInTheDocument();
+  });
+
   it("shows token usage per Extension and refreshes it manually", async () => {
     const intelligence = {
       ...installedExtension("yuukei-intelligence", "Yuukei Intelligence"),

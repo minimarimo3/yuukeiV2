@@ -10,6 +10,7 @@
     "dev": "pnpm dev:cli",
     "dev:cli": "cargo run -p yuukei-cli-surface",
     "dev:tauri": "pnpm --filter @yuukei/desktop tauri dev",
+    "licenses:generate": "node tools/generate-third-party-licenses.mjs",
     "release": "pnpm build:tauri",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"

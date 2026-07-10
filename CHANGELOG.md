@@ -23,6 +23,11 @@ Yuukeiの変更履歴。[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)
 - ログローテーションとevent log上限trim、Extensionプロセスの休止・再起動導線
 - ログイン時自動起動、LLMタイムアウト/文脈件数/感情しきい値の設定化、気分の永続化、シーン実行履歴UI
 - ユーザーガイド(USERGUIDE.md)、Windows実機確認チェックリスト
+- THIRD-PARTY-LICENSES生成スクリプトとVOICEVOXクレジット表示
+
+### Fixed
+
+- 既定データディレクトリをOSの一時領域からOS標準のアプリデータ領域へ移動(既存データは初回起動時に自動移行)。生活史がOS再起動・temp掃除で消える問題の修正
 
 ### Changed
 

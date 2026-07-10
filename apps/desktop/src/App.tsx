@@ -1059,6 +1059,11 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           </small>
                         </span>
                       </label>
+                      {voicevoxCreditText(extension) ? (
+                        <p className="extension-credit-note">
+                          {voicevoxCreditText(extension)}
+                        </p>
+                      ) : null}
                       {permissionRows.length > 0 ? (
                         <dl className="extension-permissions">
                           {permissionRows.map((row) => (
@@ -2307,6 +2312,11 @@ function extensionRuntimeStatusLabel(extension: InstalledExtension): string {
     return `状態: 注意 (${status.failureCount})`;
   }
   return "状態: 正常";
+}
+
+function voicevoxCreditText(extension: InstalledExtension): string | null {
+  if (extension.extensionId !== "yuukei-voicevox") return null;
+  return "音声合成にVOICEVOXを使用します。生成音声の利用は各キャラクターの規約に従ってください(既定の声: VOICEVOX:四国めたん / VOICEVOX:ずんだもん)";
 }
 
 function memoryErrorMessage(error: unknown): string {

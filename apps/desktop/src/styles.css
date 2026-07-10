@@ -1018,6 +1018,17 @@ input {
   font-weight: 700;
 }
 
+.extension-credit-note {
+  margin: 0;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #f9fafb;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .extension-actions {
   display: flex;
   gap: 6px;

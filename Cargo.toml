@@ -25,6 +25,7 @@ async-recursion = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chumsky = "0.9"
+dirs = "4.0"
 futures = "0.3"
 miette = { version = "7", features = ["fancy"] }
 rand = "0.8"
