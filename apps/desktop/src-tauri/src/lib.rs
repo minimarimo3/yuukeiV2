@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex as StdMutex, RwLock},
     time::Duration,
 };
 
@@ -25,7 +25,8 @@ use yuukei_device_host::{
     ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
     LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
     ResidentEventLogPage, RuntimeSettingsState, RuntimeSettingsUpdate, SceneHistoryState,
-    WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection, TAURI_SURFACE_ID,
+    StageSettingsRegistry, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -48,6 +49,7 @@ pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
     asset_index: RwLock<PackAssetIndex>,
     stage: Arc<DesktopStageManager>,
+    stage_settings: StdMutex<StageSettingsRegistry>,
     audio_player: Option<Arc<AudioPlayer>>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     surface_attached: Mutex<bool>,
@@ -475,6 +477,66 @@ async fn send_avatar_gesture_poke(
 }
 
 #[tauri::command]
+async fn begin_avatar_drag(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    actor_id: String,
+) -> Result<Vec<RuntimeCommand>, String> {
+    if window.label() != desktop_stage::actor_window_label(&actor_id) {
+        return Err("actor drag must originate from its own actor window".to_string());
+    }
+    let ended = state.stage.begin_actor_drag(&app, &window, &actor_id)?;
+    let runtime = state.runtime.lock().await.clone();
+    let mut commands = runtime
+        .send_avatar_gesture_grab(TAURI_SURFACE_ID, &actor_id)
+        .await
+        .map_err(to_message)?;
+    if let Some(ended) = ended {
+        commands.extend(
+            runtime
+                .emit_stage_perch_ended(&ended.actor_id, &ended.window_key, ended.reason)
+                .await
+                .map_err(to_message)?,
+        );
+    }
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
+async fn finish_avatar_drag(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    actor_id: String,
+) -> Result<Vec<RuntimeCommand>, String> {
+    if window.label() != desktop_stage::actor_window_label(&actor_id) {
+        return Err("actor drag must finish in its own actor window".to_string());
+    }
+    let finished = state.stage.finish_actor_drag(&app, &window, &actor_id)?;
+    state
+        .stage_settings
+        .lock()
+        .map_err(|_| "stage settings lock is poisoned".to_string())?
+        .set_actor_anchor(finished.actor_id.clone(), finished.anchor)
+        .map_err(to_message)?;
+    let runtime = state.runtime.lock().await.clone();
+    let commands = runtime
+        .send_avatar_gesture_drop(
+            TAURI_SURFACE_ID,
+            &finished.actor_id,
+            finished.moved_distance,
+        )
+        .await
+        .map_err(to_message)?;
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
 async fn select_world_pack_directory(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -629,6 +691,13 @@ async fn set_app_actor_scale_percent(
     state
         .stage
         .apply_actor_scale_percent(&app, next.actor_scale_percent)?;
+    let anchors = state.stage.persisted_actor_anchors()?;
+    state
+        .stage_settings
+        .lock()
+        .map_err(|_| "stage settings lock is poisoned".to_string())?
+        .replace_actor_anchors(anchors)
+        .map_err(to_message)?;
     Ok(next)
 }
 
@@ -669,6 +738,11 @@ pub fn run() {
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let stage = Arc::new(DesktopStageManager::new());
+            let stage_settings = StageSettingsRegistry::open(&env.data_dir)
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            stage
+                .set_persisted_actor_anchors(stage_settings.actor_anchors().clone())
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let actor_scale_percent = runtime
                 .app_settings()
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?
@@ -695,6 +769,7 @@ pub fn run() {
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 stage: stage.clone(),
+                stage_settings: StdMutex::new(stage_settings),
                 audio_player,
                 command_forwarder: Mutex::new(Some(command_forwarder)),
                 surface_attached: Mutex::new(false),
@@ -783,6 +858,8 @@ pub fn run() {
             send_conversation_text,
             send_conversation_choice,
             send_avatar_gesture_poke,
+            begin_avatar_drag,
+            finish_avatar_drag,
             select_world_pack_directory,
             inspect_world_pack_zip,
             import_world_pack_zip,

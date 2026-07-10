@@ -3188,6 +3188,7 @@ fn major_payload(payload: JsonMap) -> JsonMap {
         "hitZoneId",
         "hitZoneLabel",
         "hitSurface",
+        "movedDistance",
         "timePeriod",
         "localHour",
         "localMinute",

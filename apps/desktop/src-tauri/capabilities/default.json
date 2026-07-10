@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default desktop window permissions.",
   "windows": ["actor-*", "settings", "stage-overlay-*"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "dialog:default"
+  ]
 }

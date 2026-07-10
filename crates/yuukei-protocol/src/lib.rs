@@ -77,6 +77,16 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "住人なで",
     },
     StandardSignalDefinition {
+        canonical_id: "avatar.gesture.grab",
+        daihon_alias: "住人_つまむ",
+        display_label: "住人つまみ",
+    },
+    StandardSignalDefinition {
+        canonical_id: "avatar.gesture.drop",
+        daihon_alias: "住人_おろす",
+        display_label: "住人おろし",
+    },
+    StandardSignalDefinition {
         canonical_id: "desktop.window.appeared",
         daihon_alias: "窓_出現",
         display_label: "窓出現",
@@ -1175,6 +1185,8 @@ mod tests {
         assert_eq!(canonical_signal_id("端末_復帰"), "device.wake");
         assert_eq!(canonical_signal_id("住人_つつく"), "avatar.gesture.poke");
         assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");
+        assert_eq!(canonical_signal_id("住人_つまむ"), "avatar.gesture.grab");
+        assert_eq!(canonical_signal_id("住人_おろす"), "avatar.gesture.drop");
         assert_eq!(canonical_signal_id("窓_出現"), "desktop.window.appeared");
         assert_eq!(canonical_signal_id("窓_消滅"), "desktop.window.closed");
         assert_eq!(canonical_signal_id("窓_注目"), "desktop.window.focused");

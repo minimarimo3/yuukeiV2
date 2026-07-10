@@ -84,6 +84,8 @@ pub enum DeviceHostError {
     ExtensionSettings(String),
     #[error("app settings error: {0}")]
     AppSettings(String),
+    #[error("stage settings error: {0}")]
+    StageSettings(String),
     #[error("runtime settings error: {0}")]
     RuntimeSettings(String),
     #[error("observation settings error: {0}")]
@@ -111,6 +113,7 @@ impl DeviceHostError {
             | Self::AppLog(_)
             | Self::ExtensionSettings(_)
             | Self::AppSettings(_)
+            | Self::StageSettings(_)
             | Self::RuntimeSettings(_)
             | Self::ObservationSettings(_)
             | Self::OnboardingSettings(_)
@@ -290,6 +293,121 @@ impl AppSettingsRegistry {
         self.stored.actor_scale_percent = Some(clamp_actor_scale_percent(percent));
         self.save()?;
         Ok(self.state())
+    }
+
+    fn save(&self) -> Result<()> {
+        if let Some(parent) = self.settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.settings_path,
+            serde_json::to_vec_pretty(&self.stored)?,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageFootAnchor {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StageSettingsRegistry {
+    settings_path: PathBuf,
+    stored: StoredStageSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredStageSettings {
+    #[serde(default = "stage_settings_schema_version")]
+    schema_version: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    actors: BTreeMap<String, StageFootAnchor>,
+}
+
+impl Default for StoredStageSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: stage_settings_schema_version(),
+            actors: BTreeMap::new(),
+        }
+    }
+}
+
+const fn stage_settings_schema_version() -> u32 {
+    1
+}
+
+impl StageSettingsRegistry {
+    pub fn open(data_dir: &Path) -> Result<Self> {
+        let settings_path = data_dir.join("settings").join("stage.json");
+        let stored = if settings_path.exists() {
+            let raw = fs::read_to_string(&settings_path)?;
+            let stored: StoredStageSettings = serde_json::from_str(&raw)?;
+            if stored.schema_version != stage_settings_schema_version() {
+                return Err(DeviceHostError::StageSettings(format!(
+                    "unsupported stage settings schemaVersion: {}",
+                    stored.schema_version
+                )));
+            }
+            if stored
+                .actors
+                .values()
+                .any(|anchor| !anchor.x.is_finite() || !anchor.y.is_finite())
+            {
+                return Err(DeviceHostError::StageSettings(
+                    "stage actor anchors must be finite numbers".to_string(),
+                ));
+            }
+            stored
+        } else {
+            StoredStageSettings {
+                schema_version: stage_settings_schema_version(),
+                actors: BTreeMap::new(),
+            }
+        };
+        Ok(Self {
+            settings_path,
+            stored,
+        })
+    }
+
+    pub fn actor_anchors(&self) -> &BTreeMap<String, StageFootAnchor> {
+        &self.stored.actors
+    }
+
+    pub fn set_actor_anchor(
+        &mut self,
+        actor_id: impl Into<String>,
+        anchor: StageFootAnchor,
+    ) -> Result<()> {
+        if !anchor.x.is_finite() || !anchor.y.is_finite() {
+            return Err(DeviceHostError::StageSettings(
+                "stage actor anchors must be finite numbers".to_string(),
+            ));
+        }
+        self.stored.actors.insert(actor_id.into(), anchor);
+        self.save()
+    }
+
+    pub fn replace_actor_anchors(
+        &mut self,
+        anchors: BTreeMap<String, StageFootAnchor>,
+    ) -> Result<()> {
+        if anchors
+            .values()
+            .any(|anchor| !anchor.x.is_finite() || !anchor.y.is_finite())
+        {
+            return Err(DeviceHostError::StageSettings(
+                "stage actor anchors must be finite numbers".to_string(),
+            ));
+        }
+        self.stored.actors = anchors;
+        self.save()
     }
 
     fn save(&self) -> Result<()> {
@@ -2854,6 +2972,87 @@ impl LocalYuukeiRuntime {
         }
     }
 
+    pub async fn send_avatar_gesture_grab(
+        &self,
+        surface_id: &str,
+        actor_id: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.send_avatar_drag_event(surface_id, actor_id, "avatar.gesture.grab", None)
+            .await
+    }
+
+    pub async fn send_avatar_gesture_drop(
+        &self,
+        surface_id: &str,
+        actor_id: &str,
+        moved_distance: u64,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.send_avatar_drag_event(
+            surface_id,
+            actor_id,
+            "avatar.gesture.drop",
+            Some(moved_distance),
+        )
+        .await
+    }
+
+    async fn send_avatar_drag_event(
+        &self,
+        surface_id: &str,
+        actor_id: &str,
+        kind: &str,
+        moved_distance: Option<u64>,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.mark_user_activity(Utc::now())?;
+        let event = build_avatar_drag_event(
+            self.resident_id(),
+            self.device_id(),
+            surface_id,
+            actor_id,
+            kind,
+            moved_distance,
+        );
+        self.logger.record(
+            "surface.input.avatar_gesture",
+            "surface",
+            JsonMap::from([
+                ("eventId".to_string(), json!(event.id)),
+                ("eventType".to_string(), json!(event.kind)),
+                ("surfaceId".to_string(), json!(surface_id)),
+                ("actorId".to_string(), json!(actor_id)),
+            ]),
+        )?;
+        match self.home.ingest_event(event.clone()).await {
+            Ok(commands) => {
+                self.logger.record(
+                    "runtime.commands.emitted",
+                    "resident-home",
+                    JsonMap::from([
+                        ("sourceEventId".to_string(), json!(event.id)),
+                        (
+                            "commandTypes".to_string(),
+                            json!(commands
+                                .iter()
+                                .map(|command| &command.kind)
+                                .collect::<Vec<_>>()),
+                        ),
+                        ("count".to_string(), json!(commands.len())),
+                    ]),
+                )?;
+                Ok(commands)
+            }
+            Err(error) => {
+                self.record_runtime_daihon_diagnostics(kind, &error);
+                let _ = self.logger.record(
+                    "runtime.commands.error",
+                    "resident-home",
+                    error_payload(kind, &error),
+                );
+                Err(error.into())
+            }
+        }
+    }
+
     pub async fn emit_app_startup(&self) -> Result<Vec<RuntimeCommand>> {
         let snapshot = current_presence_snapshot();
         {
@@ -3549,6 +3748,37 @@ pub fn build_avatar_gesture_poke_event(
         device_id: Some(device_id.to_string()),
         surface_id: Some(surface_id.to_string()),
         actor_id: Some(actor_id),
+        privacy: None,
+    }
+}
+
+pub fn build_avatar_drag_event(
+    resident_id: &str,
+    device_id: &str,
+    surface_id: &str,
+    actor_id: &str,
+    kind: &str,
+    moved_distance: Option<u64>,
+) -> RuntimeEvent {
+    debug_assert!(matches!(
+        kind,
+        "avatar.gesture.grab" | "avatar.gesture.drop"
+    ));
+    let mut payload = JsonMap::new();
+    if let Some(distance) = moved_distance {
+        payload.insert("movedDistance".to_string(), json!(distance));
+    }
+    RuntimeEvent {
+        id: new_id("evt"),
+        kind: kind.to_string(),
+        timestamp: now_timestamp(),
+        source: "surface".to_string(),
+        resident_id: resident_id.to_string(),
+        payload,
+        causality: None,
+        device_id: Some(device_id.to_string()),
+        surface_id: Some(surface_id.to_string()),
+        actor_id: Some(actor_id.to_string()),
         privacy: None,
     }
 }
@@ -4333,6 +4563,27 @@ mod tests {
     }
 
     #[test]
+    fn stage_settings_only_persist_explicit_actor_anchors(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let settings_path = data.path().join("settings").join("stage.json");
+        let mut registry = StageSettingsRegistry::open(data.path())?;
+
+        assert!(registry.actor_anchors().is_empty());
+        assert!(!settings_path.exists());
+
+        registry.set_actor_anchor("yuukei", StageFootAnchor { x: 321.5, y: 654.0 })?;
+        let reopened = StageSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            reopened.actor_anchors().get("yuukei"),
+            Some(&StageFootAnchor { x: 321.5, y: 654.0 })
+        );
+        assert!(settings_path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn runtime_settings_persist_and_clamp_llm_and_context(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let data = tempdir()?;
@@ -4915,6 +5166,36 @@ mod tests {
         assert_eq!(event.payload["input"]["button"], json!("primary"));
         assert_eq!(event.payload["screen"]["x"], json!(123.0));
         assert_eq!(event.payload["screen"]["y"], json!(456.0));
+    }
+
+    #[test]
+    fn avatar_drag_events_keep_coordinates_out_of_the_payload() {
+        let grab = build_avatar_drag_event(
+            "resident-test",
+            "device-test",
+            "surface-test",
+            "yuukei",
+            "avatar.gesture.grab",
+            None,
+        );
+        let drop = build_avatar_drag_event(
+            "resident-test",
+            "device-test",
+            "surface-test",
+            "yuukei",
+            "avatar.gesture.drop",
+            Some(184),
+        );
+
+        assert_eq!(grab.actor_id.as_deref(), Some("yuukei"));
+        assert!(grab.payload.is_empty());
+        assert_eq!(drop.actor_id.as_deref(), Some("yuukei"));
+        assert_eq!(
+            drop.payload,
+            JsonMap::from([("movedDistance".to_string(), json!(184))])
+        );
+        assert!(!drop.payload.contains_key("x"));
+        assert!(!drop.payload.contains_key("y"));
     }
 
     #[test]

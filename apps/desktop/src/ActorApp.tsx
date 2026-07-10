@@ -57,7 +57,20 @@ type VrmStageProps = {
   onStageAnchorReport(actorId: string, anchor: StageAnchor): Promise<void>;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
+  onAvatarGestureGrab(actorId: string): Promise<void>;
+  onAvatarGestureDrop(actorId: string): Promise<void>;
 };
+
+export const AVATAR_GRAB_HOLD_MS = 500;
+export const AVATAR_GRAB_MOVE_THRESHOLD_PX = 6;
+
+export function shouldStartAvatarGrab(elapsedMs: number, maxDistancePx: number): boolean {
+  return elapsedMs >= AVATAR_GRAB_HOLD_MS && maxDistancePx <= AVATAR_GRAB_MOVE_THRESHOLD_PX;
+}
+
+export function shouldSendAvatarPokeOnRelease(grabbed: boolean): boolean {
+  return !grabbed;
+}
 
 export function ActorApp({
   actorId,
@@ -122,6 +135,18 @@ export function ActorApp({
     },
     [client]
   );
+  const beginAvatarDrag = useCallback(
+    async (draggedActorId: string) => {
+      await client.beginAvatarDrag(draggedActorId);
+    },
+    [client]
+  );
+  const finishAvatarDrag = useCallback(
+    async (draggedActorId: string) => {
+      await client.finishAvatarDrag(draggedActorId);
+    },
+    [client]
+  );
   const reportStageAnchor = useCallback(
     async (reportedActorId: string, anchor: StageAnchor) => {
       await client.reportActorStageAnchor(reportedActorId, anchor);
@@ -137,6 +162,8 @@ export function ActorApp({
         onStageAnchorReport={reportStageAnchor}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
+        onAvatarGestureGrab={beginAvatarDrag}
+        onAvatarGestureDrop={finishAvatarDrag}
       />
       {visibleStatus ? (
         <p className="actor-status" data-actor-solid="true" role="alert">
@@ -166,7 +193,9 @@ function VrmStage({
   snapshot,
   onStageAnchorReport,
   onHitTestChange,
-  onAvatarGesturePoke
+  onAvatarGesturePoke,
+  onAvatarGestureGrab,
+  onAvatarGestureDrop
 }: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -181,6 +210,7 @@ function VrmStage({
     const canvas = canvasRef.current;
     const stageElement = containerRef.current;
     if (!canvas || !stageElement) return;
+    const checkedCanvas = canvas;
     const checkedStageElement = stageElement;
 
     let disposed = false;
@@ -188,6 +218,15 @@ function VrmStage({
     let hitTestTimer = 0;
     let lastPassthrough: boolean | null = null;
     let lastAnchorSignature = "";
+    let activePointer: {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      maxDistancePx: number;
+      poke: AvatarGesturePokeInput;
+      grabbed: boolean;
+      holdTimer: number;
+    } | null = null;
 
     const actorRoot = new THREE.Group();
     const scene = new THREE.Scene();
@@ -310,7 +349,7 @@ function VrmStage({
     }
 
     function handlePointerDown(event: PointerEvent) {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || activePointer) return;
       const hit = semanticHitZoneAtPointer(
         event,
         renderer.domElement,
@@ -320,18 +359,82 @@ function VrmStage({
       );
       if (!hit) return;
       event.preventDefault();
-      void onAvatarGesturePoke(
-        buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
+      const poke = buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
           hitBone: hit.hitBone,
           hitSurface: hit.hitSurface
-        })
-      ).catch((error) => {
-        console.warn("Failed to send avatar gesture", error);
-      });
+        });
+      const pointer = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        maxDistancePx: 0,
+        poke,
+        grabbed: false,
+        holdTimer: 0
+      };
+      activePointer = pointer;
+      checkedCanvas.setPointerCapture(event.pointerId);
+      pointer.holdTimer = window.setTimeout(() => {
+        if (activePointer !== pointer) return;
+        if (!shouldStartAvatarGrab(AVATAR_GRAB_HOLD_MS, pointer.maxDistancePx)) return;
+        pointer.grabbed = true;
+        if (checkedCanvas.hasPointerCapture(pointer.pointerId)) {
+          checkedCanvas.releasePointerCapture(pointer.pointerId);
+        }
+        void (async () => {
+          try {
+            await onAvatarGestureGrab(pointer.poke.actorId);
+            try {
+              await getCurrentWindow().startDragging();
+            } finally {
+              await onAvatarGestureDrop(pointer.poke.actorId);
+            }
+          } catch (error) {
+            console.warn("Failed to drag avatar window", error);
+          } finally {
+            if (activePointer === pointer) activePointer = null;
+          }
+        })();
+      }, AVATAR_GRAB_HOLD_MS);
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const pointer = activePointer;
+      if (!pointer || pointer.pointerId !== event.pointerId || pointer.grabbed) return;
+      const distance = Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY);
+      pointer.maxDistancePx = Math.max(pointer.maxDistancePx, distance);
+      if (pointer.maxDistancePx > AVATAR_GRAB_MOVE_THRESHOLD_PX) {
+        window.clearTimeout(pointer.holdTimer);
+      }
+    }
+
+    function handlePointerUp(event: PointerEvent) {
+      const pointer = activePointer;
+      if (!pointer || pointer.pointerId !== event.pointerId) return;
+      window.clearTimeout(pointer.holdTimer);
+      if (checkedCanvas.hasPointerCapture(pointer.pointerId)) {
+        checkedCanvas.releasePointerCapture(pointer.pointerId);
+      }
+      if (shouldSendAvatarPokeOnRelease(pointer.grabbed)) {
+        activePointer = null;
+        void onAvatarGesturePoke(pointer.poke).catch((error) => {
+          console.warn("Failed to send avatar gesture", error);
+        });
+      }
+    }
+
+    function handlePointerCancel(event: PointerEvent) {
+      const pointer = activePointer;
+      if (!pointer || pointer.pointerId !== event.pointerId) return;
+      window.clearTimeout(pointer.holdTimer);
+      activePointer = null;
     }
 
     window.addEventListener("resize", resize);
     canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointermove", handlePointerMove);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", handlePointerCancel);
     resize();
     void loadActors().catch((error) => {
       console.error("Failed to load VRM actors", error);
@@ -345,6 +448,10 @@ function VrmStage({
       disposed = true;
       window.removeEventListener("resize", resize);
       canvas.removeEventListener("pointerdown", handlePointerDown);
+      canvas.removeEventListener("pointermove", handlePointerMove);
+      canvas.removeEventListener("pointerup", handlePointerUp);
+      canvas.removeEventListener("pointercancel", handlePointerCancel);
+      if (activePointer) window.clearTimeout(activePointer.holdTimer);
       window.cancelAnimationFrame(animationFrame);
       window.clearInterval(hitTestTimer);
       rendererRef.current = null;
@@ -354,7 +461,14 @@ function VrmStage({
       }
       renderer.dispose();
     };
-  }, [assets, onAvatarGesturePoke, onHitTestChange, onStageAnchorReport]);
+  }, [
+    assets,
+    onAvatarGestureDrop,
+    onAvatarGestureGrab,
+    onAvatarGesturePoke,
+    onHitTestChange,
+    onStageAnchorReport
+  ]);
 
   return (
     <div className="actor-stage" ref={containerRef}>

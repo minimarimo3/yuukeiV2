@@ -418,6 +418,8 @@ export type YuukeiClient = {
   sendAvatarGesturePoke(
     gesture: AvatarGesturePokeInput
   ): Promise<RuntimeCommand[]>;
+  beginAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
+  finishAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openWorldPackZip(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
@@ -542,6 +544,10 @@ export const tauriYuukeiClient: YuukeiClient = {
     }),
   sendAvatarGesturePoke: (gesture: AvatarGesturePokeInput) =>
     invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
+  beginAvatarDrag: (actorId: string) =>
+    invoke<RuntimeCommand[]>("begin_avatar_drag", { actorId }),
+  finishAvatarDrag: (actorId: string) =>
+    invoke<RuntimeCommand[]>("finish_avatar_drag", { actorId }),
   openWorldPackDirectory: async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;

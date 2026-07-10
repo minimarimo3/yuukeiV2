@@ -1592,6 +1592,7 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         ("fileCategory", "ファイル種類"),
         ("recentDownloadFileName", "最近のダウンロード"),
         ("recentDownloadCategory", "最近のダウンロード種類"),
+        ("movedDistance", "移動距離"),
         ("aiConnected", "AI接続"),
     ] {
         if let Some(value) = event
@@ -2672,6 +2673,32 @@ mod tests {
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].payload["text"], "服だよ");
         assert_eq!(result.executed_scenes[0].scene_name, "cloth poke");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_drop_distance_with_friendly_input_name() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["avatar.gesture.drop".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### far drop
+合図: ＠住人_おろす
+条件:（入力#移動距離 >= 100）
+話者: yuukei
+「遠くまで来たね」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("avatar.gesture.drop", "surface", "resident-default");
+        event
+            .payload
+            .insert("movedDistance".to_string(), json!(184));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands[0].payload["text"], "遠くまで来たね");
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use yuukei_device_host::{
-    clamp_actor_scale_percent, DesktopWindowFrame, DesktopWindowObservation,
+    clamp_actor_scale_percent, DesktopWindowFrame, DesktopWindowObservation, StageFootAnchor,
     DEFAULT_ACTOR_SCALE_PERCENT,
 };
 use yuukei_protocol::RuntimeCommand;
@@ -41,6 +41,8 @@ struct DesktopStageState {
     bubbles: BTreeMap<String, StageBubble>,
     perches: BTreeMap<String, StagePerch>,
     terrain_windows: BTreeMap<String, DesktopWindowFrame>,
+    persisted_anchors: BTreeMap<String, StageFootAnchor>,
+    active_drags: BTreeMap<String, StageFootAnchor>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
 }
@@ -53,6 +55,8 @@ impl Default for DesktopStageState {
             bubbles: BTreeMap::new(),
             perches: BTreeMap::new(),
             terrain_windows: BTreeMap::new(),
+            persisted_anchors: BTreeMap::new(),
+            active_drags: BTreeMap::new(),
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: false,
         }
@@ -139,6 +143,13 @@ pub struct StagePerchEnded {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct StageDragFinished {
+    pub actor_id: String,
+    pub anchor: StageFootAnchor,
+    pub moved_distance: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct StagePerch {
     window_key: String,
 }
@@ -183,6 +194,18 @@ impl DesktopStageManager {
         app.emit(STAGE_STATE_EVENT, &snapshot).map_err(to_message)
     }
 
+    pub fn set_persisted_actor_anchors(
+        &self,
+        anchors: BTreeMap<String, StageFootAnchor>,
+    ) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        state.persisted_anchors = anchors;
+        Ok(())
+    }
+
     pub fn sync_surfaces(
         &self,
         app: &AppHandle,
@@ -214,9 +237,17 @@ impl DesktopStageManager {
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
             actor_window_size(state.actor_scale_percent)
         };
+        let persisted_anchors = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            state.persisted_anchors.clone()
+        };
         let resolved_bounds = resolve_actor_window_layout(
             &reconcile.desired_specs,
             &current_bounds,
+            &persisted_anchors,
             &monitors,
             actor_size,
         );
@@ -265,7 +296,9 @@ impl DesktopStageManager {
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            apply_actor_scale_to_state(&mut state, percent)
+            let apply_bounds = apply_actor_scale_to_state(&mut state, percent);
+            update_persisted_anchors_after_scale(&mut state);
+            apply_bounds
         };
         for (label, bounds) in apply_bounds {
             if let Some(window) = app.get_webview_window(&label) {
@@ -273,6 +306,75 @@ impl DesktopStageManager {
             }
         }
         self.emit_state(app)
+    }
+
+    pub fn persisted_actor_anchors(&self) -> Result<BTreeMap<String, StageFootAnchor>, String> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        Ok(state.persisted_anchors.clone())
+    }
+
+    pub fn begin_actor_drag(
+        &self,
+        app: &AppHandle,
+        window: &WebviewWindow,
+        actor_id: &str,
+    ) -> Result<Option<StagePerchEnded>, String> {
+        let bounds = window_bounds(window)?;
+        let ended = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            begin_actor_drag_in_state(&mut state, actor_id, bounds)?
+        };
+        if ended.is_some() {
+            self.emit_state(app)?;
+        }
+        Ok(ended)
+    }
+
+    pub fn finish_actor_drag(
+        &self,
+        app: &AppHandle,
+        window: &WebviewWindow,
+        actor_id: &str,
+    ) -> Result<StageDragFinished, String> {
+        let actual_bounds = window_bounds(window)?;
+        let (bounds, result) = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            let start = state
+                .active_drags
+                .remove(actor_id)
+                .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?;
+            let size = actor_window_size(state.actor_scale_percent);
+            let bounds = normalize_actor_window_bounds(actual_bounds, &state.monitors, size);
+            let anchor = foot_anchor(&bounds);
+            let moved_distance = ((anchor.x - start.x).hypot(anchor.y - start.y)).round() as u64;
+            let actor = state
+                .actors
+                .get_mut(actor_id)
+                .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+            actor.bounds = bounds.clone();
+            actor.anchor = default_actor_anchor(&bounds);
+            state.persisted_anchors.insert(actor_id.to_string(), anchor);
+            (
+                bounds,
+                StageDragFinished {
+                    actor_id: actor_id.to_string(),
+                    anchor,
+                    moved_distance,
+                },
+            )
+        };
+        apply_actor_window_bounds(window, &bounds)?;
+        self.emit_state(app)?;
+        Ok(result)
     }
 
     pub fn set_window_observation_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -662,6 +764,27 @@ impl DesktopStageManager {
     }
 }
 
+fn begin_actor_drag_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    bounds: StageRect,
+) -> Result<Option<StagePerchEnded>, String> {
+    let actor = state
+        .actors
+        .get_mut(actor_id)
+        .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+    actor.bounds = bounds.clone();
+    actor.anchor = default_actor_anchor(&bounds);
+    state
+        .active_drags
+        .insert(actor_id.to_string(), foot_anchor(&bounds));
+    Ok(state.perches.remove(actor_id).map(|perch| StagePerchEnded {
+        actor_id: actor_id.to_string(),
+        window_key: perch.window_key,
+        reason: "user-drag",
+    }))
+}
+
 impl DesktopStageState {
     fn snapshot(&self) -> DesktopStageSnapshot {
         DesktopStageSnapshot {
@@ -997,15 +1120,17 @@ fn apply_actor_window_bounds(window: &WebviewWindow, bounds: &StageRect) -> Resu
 fn resolve_actor_window_layout(
     specs: &[ActorWindowSpec],
     current_bounds: &BTreeMap<String, StageRect>,
+    persisted_anchors: &BTreeMap<String, StageFootAnchor>,
     monitors: &[StageMonitor],
     actor_size: ActorWindowSize,
 ) -> BTreeMap<String, StageRect> {
     let mut occupied = Vec::new();
     let mut resolved = BTreeMap::new();
     for spec in specs {
-        let preferred = current_bounds
+        let preferred = persisted_anchors
             .get(&spec.actor_id)
-            .cloned()
+            .map(|anchor| bounds_from_foot_anchor(*anchor, actor_size))
+            .or_else(|| current_bounds.get(&spec.actor_id).cloned())
             .map(|bounds| normalize_actor_window_bounds(bounds, monitors, actor_size))
             .unwrap_or_else(|| place_actor_window(spec.index, monitors, &occupied, actor_size));
         let bounds = if overlaps_any(&preferred, &occupied) {
@@ -1391,6 +1516,32 @@ fn resize_actor_bounds_from_bottom_center(
     }
 }
 
+fn bounds_from_foot_anchor(anchor: StageFootAnchor, actor_size: ActorWindowSize) -> StageRect {
+    StageRect {
+        x: anchor.x - actor_size.width * 0.5,
+        y: anchor.y - actor_size.height,
+        width: actor_size.width,
+        height: actor_size.height,
+    }
+}
+
+fn foot_anchor(bounds: &StageRect) -> StageFootAnchor {
+    StageFootAnchor {
+        x: bounds.x + bounds.width * 0.5,
+        y: bounds.y + bounds.height,
+    }
+}
+
+fn update_persisted_anchors_after_scale(state: &mut DesktopStageState) {
+    for (actor_id, actor) in &state.actors {
+        if !state.perches.contains_key(actor_id) {
+            state
+                .persisted_anchors
+                .insert(actor_id.clone(), foot_anchor(&actor.bounds));
+        }
+    }
+}
+
 fn default_actor_anchor(bounds: &StageRect) -> StageAnchor {
     StageAnchor {
         x: bounds.x + bounds.width * 0.5,
@@ -1562,6 +1713,7 @@ mod tests {
         let resolved = resolve_actor_window_layout(
             &specs,
             &current_bounds,
+            &BTreeMap::new(),
             &monitors,
             actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
         );
@@ -1591,6 +1743,7 @@ mod tests {
         let resolved = resolve_actor_window_layout(
             &specs,
             &current_bounds,
+            &BTreeMap::new(),
             &monitors,
             actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
         );
@@ -1624,6 +1777,7 @@ mod tests {
         let resolved = resolve_actor_window_layout(
             &specs,
             &current_bounds,
+            &BTreeMap::new(),
             std::slice::from_ref(&monitor),
             actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
         );
@@ -1642,12 +1796,65 @@ mod tests {
     }
 
     #[test]
+    fn actor_layout_restores_persisted_foot_anchor_with_current_scale_and_clamps_it() {
+        let monitor = test_monitor(1000.0, 700.0);
+        let specs = test_specs(&["yuukei"]);
+        let persisted = BTreeMap::from([(
+            "yuukei".to_string(),
+            StageFootAnchor {
+                x: 4_000.0,
+                y: 3_000.0,
+            },
+        )]);
+
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &BTreeMap::new(),
+            &persisted,
+            std::slice::from_ref(&monitor),
+            actor_window_size(50),
+        );
+        let bounds = resolved.get("yuukei").expect("restored bounds");
+
+        assert_eq!(bounds.width, ACTOR_WINDOW_WIDTH * 0.5);
+        assert_eq!(bounds.height, ACTOR_WINDOW_HEIGHT * 0.5);
+        assert!(bounds.x + bounds.width <= monitor.bounds.width - ACTOR_WINDOW_MARGIN + 0.5);
+        assert!(bounds.y + bounds.height <= monitor.bounds.height - ACTOR_WINDOW_MARGIN + 0.5);
+    }
+
+    #[test]
+    fn actor_layout_avoids_collisions_between_persisted_anchors() {
+        let specs = test_specs(&["yuukei", "partner"]);
+        let persisted = BTreeMap::from([
+            ("yuukei".to_string(), StageFootAnchor { x: 500.0, y: 680.0 }),
+            (
+                "partner".to_string(),
+                StageFootAnchor { x: 500.0, y: 680.0 },
+            ),
+        ]);
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &BTreeMap::new(),
+            &persisted,
+            &[test_monitor(1400.0, 800.0)],
+            actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
+        );
+
+        assert!(!rects_overlap(
+            resolved.get("yuukei").expect("yuukei bounds"),
+            resolved.get("partner").expect("partner bounds"),
+            ACTOR_COLLISION_PADDING,
+        ));
+    }
+
+    #[test]
     fn actor_layout_returns_best_effort_when_space_is_tight() {
         let monitors = vec![test_monitor(460.0, 600.0)];
         let specs = test_specs(&["yuukei", "partner", "third"]);
 
         let resolved = resolve_actor_window_layout(
             &specs,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &monitors,
             actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
@@ -1727,6 +1934,8 @@ mod tests {
                 },
             )]),
             terrain_windows: BTreeMap::new(),
+            persisted_anchors: BTreeMap::new(),
+            active_drags: BTreeMap::new(),
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: true,
         };
@@ -1746,6 +1955,42 @@ mod tests {
         assert_eq!(
             state.actors.get("yuukei").expect("actor").bounds.width,
             ACTOR_WINDOW_WIDTH
+        );
+    }
+
+    #[test]
+    fn beginning_user_drag_releases_perch_with_user_drag_reason() {
+        let spec = test_specs(&["yuukei"]).remove(0);
+        let bounds = StageRect {
+            x: 120.0,
+            y: 80.0,
+            width: ACTOR_WINDOW_WIDTH,
+            height: ACTOR_WINDOW_HEIGHT,
+        };
+        let mut state = DesktopStageState {
+            actors: BTreeMap::from([(
+                "yuukei".to_string(),
+                actor_from_spec(&spec, bounds.clone(), true),
+            )]),
+            perches: BTreeMap::from([(
+                "yuukei".to_string(),
+                StagePerch {
+                    window_key: "window-1".to_string(),
+                },
+            )]),
+            ..DesktopStageState::default()
+        };
+
+        let ended = begin_actor_drag_in_state(&mut state, "yuukei", bounds)
+            .expect("begin actor drag")
+            .expect("perch ended");
+
+        assert_eq!(ended.reason, "user-drag");
+        assert_eq!(ended.window_key, "window-1");
+        assert!(state.perches.is_empty());
+        assert_eq!(
+            state.active_drags.get("yuukei"),
+            Some(&StageFootAnchor { x: 330.0, y: 640.0 })
         );
     }
 
@@ -1781,6 +2026,8 @@ mod tests {
                 },
             )]),
             terrain_windows: BTreeMap::from([("window-1".to_string(), target)]),
+            persisted_anchors: BTreeMap::new(),
+            active_drags: BTreeMap::new(),
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: true,
         };
