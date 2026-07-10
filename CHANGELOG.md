@@ -26,8 +26,8 @@ Yuukeiの変更履歴。[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)
 
 ### Changed
 
-- Daihon: 1ファイルに複数イベントを書けるように緩和(予定: タスクM)
-- Daihon: イベント名一致の暗黙合図(予定: タスクM)
+- Daihon: 1ファイルに複数イベントを書けるように緩和(同一ファイル内の重複イベント名は `E-DHN-SEM-007`)
+- Daihon: イベント名が合図と一致するとき、合図なしシーンをその合図の候補として扱う(暗黙合図)
 
 ### Notes
 

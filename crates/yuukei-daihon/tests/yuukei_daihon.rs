@@ -345,6 +345,71 @@ fn parser_ignores_line_and_trailing_comments() {
 }
 
 #[test]
+fn parser_reads_multiple_events_from_one_file() {
+    let scripts = parse_scripts(
+        r#"
+## 不在_開始
+### start
+「いってらっしゃい」
+
+## 復帰
+### end
+「おかえり」
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(scripts.len(), 2);
+    assert_eq!(scripts[0].event.name.value, "不在_開始");
+    assert_eq!(scripts[0].event.scenes[0].name.value, "start");
+    assert_eq!(scripts[1].event.name.value, "復帰");
+    assert_eq!(scripts[1].event.scenes[0].name.value, "end");
+}
+
+#[test]
+fn parser_rejects_duplicate_event_names_in_one_file() {
+    let diagnostics = parse_scripts(
+        r#"
+## 復帰
+### A
+「a」
+
+## 復帰
+### B
+「b」
+"#,
+    )
+    .unwrap_err();
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E-DHN-SEM-007"
+            && diagnostic.message == "同じイベント名がファイル内に複数あります。"
+    }));
+}
+
+#[test]
+fn parser_reports_second_event_diagnostics_at_original_line() {
+    let diagnostics = parse_scripts(
+        r#"
+## 最初
+### ok
+「a」
+
+## 次
+### broken
+おわり
+"#,
+    )
+    .unwrap_err();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "E-DHN-SYN-030")
+        .unwrap();
+
+    assert_eq!(diagnostic.labels[0].span.line, 8);
+}
+
+#[test]
 fn parser_reads_metadata_speaker_scoped_display_and_bareword() {
     let script = parse_script(
         r#"
@@ -888,6 +953,118 @@ async fn runtime_selects_one_triggered_scene_with_speaker_and_bareword() {
     assert_eq!(action.calls[0].0.as_deref(), Some("ミカ"));
     assert_eq!(action.calls[0].2[0], DaihonValue::String("笑顔".to_owned()));
     assert_eq!(action.dialogues[0].0.as_deref(), Some("ミカ"));
+}
+
+#[tokio::test]
+async fn runtime_uses_matching_event_name_as_implicit_signal() {
+    let script = parse_script(
+        r#"
+## desktop.folder.opened
+### downloads
+条件:（入力#category = 「downloads」）
+「フォルダ」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new()
+        .with_input("category", DaihonValue::String("downloads".into()));
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            trigger: Some(SystemEvent::new("desktop.folder.opened", Span::empty())),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "downloads");
+    assert_eq!(action.dialogues[0].1, "フォルダ");
+}
+
+#[tokio::test]
+async fn runtime_does_not_implicitly_match_different_event_name() {
+    let script = parse_script(
+        r#"
+## conversation.text
+### downloads
+条件:（入力#category = 「downloads」）
+「フォルダ」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new()
+        .with_input("category", DaihonValue::String("downloads".into()));
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            trigger: Some(SystemEvent::new("desktop.folder.opened", Span::empty())),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert!(result.selected_scene.is_none());
+    assert!(action.dialogues.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_allows_explicit_signal_to_coexist_with_implicit_event_signal() {
+    let script = parse_script(
+        r#"
+## desktop.folder.opened
+### implicit folder
+「暗黙」
+### explicit focus
+合図: ＠desktop.window.focused
+「明示」
+"#,
+    )
+    .unwrap();
+    let mut action = MockActionHandler::default();
+    let mut interpret = NoopInterpretHandler;
+    let mut variables = InMemoryVariableStore::new();
+    let mut history = InMemorySceneHistory::new();
+    let mut interpreter = Interpreter {
+        action_handler: &mut action,
+        interpret_handler: &mut interpret,
+        variable_store: &mut variables,
+        scene_history: &mut history,
+        function_registry: &registry(),
+        options: RunOptions {
+            trigger: Some(SystemEvent::new("desktop.window.focused", Span::empty())),
+            ..RunOptions::default()
+        },
+        interpretation_count: 0,
+        generation_count: 0,
+        choice_count: 0,
+        diagnostics: Vec::new(),
+    };
+
+    let result = interpreter.run_script(&script).await.unwrap();
+    assert_eq!(result.selected_scene.unwrap().name, "explicit focus");
+    assert_eq!(action.dialogues[0].1, "明示");
 }
 
 #[tokio::test]

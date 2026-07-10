@@ -218,7 +218,7 @@ mod platform {
 mod platform {
     use std::{ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt};
 
-    use windows::core::{BOOL, Interface};
+    use windows::core::{Interface, BOOL};
     use windows::Win32::{
         Foundation::{HWND, LPARAM, RECT},
         Graphics::{

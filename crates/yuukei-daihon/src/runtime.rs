@@ -357,12 +357,15 @@ where
         for scene in &script.event.scenes {
             let signal_match = match &self.options.trigger {
                 Some(trigger) => {
-                    !scene.metadata.signals.is_empty()
-                        && scene
+                    if scene.metadata.signals.is_empty() {
+                        script.event.name.value == trigger.name.value
+                    } else {
+                        scene
                             .metadata
                             .signals
                             .iter()
                             .any(|signal| signal.name.value == trigger.name.value)
+                    }
                 }
                 None => scene.metadata.signals.is_empty(),
             };

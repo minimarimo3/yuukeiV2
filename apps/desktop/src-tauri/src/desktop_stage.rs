@@ -766,7 +766,7 @@ mod windows_caption {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, STYLESTRUCT, GWL_STYLE,
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, STYLESTRUCT,
         SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE,
         WM_NCDESTROY, WM_STYLECHANGED, WM_STYLECHANGING, WS_CAPTION, WS_MAXIMIZEBOX,
         WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
@@ -776,11 +776,8 @@ mod windows_caption {
     const SUBCLASS_ID: usize = 0x594B_00AC;
 
     /// Styles that can make Windows draw a native caption or resize frame.
-    const CAPTION_STYLE_MASK: u32 = WS_CAPTION.0
-        | WS_THICKFRAME.0
-        | WS_SYSMENU.0
-        | WS_MINIMIZEBOX.0
-        | WS_MAXIMIZEBOX.0;
+    const CAPTION_STYLE_MASK: u32 =
+        WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
 
     /// Install a subclass that stops the native caption from flashing on activation
     /// and style changes. See [`super::enforce_borderless`] for the full rationale.
@@ -852,7 +849,6 @@ mod windows_caption {
         }
     }
 }
-
 
 fn reconcile_actor_windows(
     existing_labels: impl IntoIterator<Item = String>,

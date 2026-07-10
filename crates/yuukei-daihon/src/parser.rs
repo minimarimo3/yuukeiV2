@@ -36,6 +36,10 @@ struct ExprToken {
 }
 
 pub fn parse_script(source: &str) -> Result<Script, Vec<DaihonDiagnostic>> {
+    parse_scripts(source).map(|mut scripts| scripts.remove(0))
+}
+
+pub fn parse_scripts(source: &str) -> Result<Vec<Script>, Vec<DaihonDiagnostic>> {
     lex_source(source)?;
     let _ = chumsky_source_probe().parse(source);
 
@@ -45,15 +49,17 @@ pub fn parse_script(source: &str) -> Result<Script, Vec<DaihonDiagnostic>> {
         index: 0,
         diagnostics: Vec::new(),
     };
-    let script = parser.parse_script();
+    let scripts = parser.parse_scripts();
     if parser.diagnostics.is_empty() {
-        script.ok_or_else(|| {
-            vec![DaihonDiagnostic::error(
+        if scripts.is_empty() {
+            Err(vec![DaihonDiagnostic::error(
                 "E-DHN-SYN-001",
                 "台本が空です。## イベント名 から始めてください。",
                 Span::empty(),
-            )]
-        })
+            )])
+        } else {
+            Ok(scripts)
+        }
     } else {
         Err(parser.diagnostics)
     }
@@ -70,7 +76,36 @@ struct DaihonParser {
 }
 
 impl DaihonParser {
-    fn parse_script(&mut self) -> Option<Script> {
+    fn parse_scripts(&mut self) -> Vec<Script> {
+        let mut scripts = Vec::new();
+        let mut seen_events = BTreeMap::<String, Span>::new();
+        while self.index < self.lines.len() {
+            self.skip_empty();
+            if self.index >= self.lines.len() {
+                break;
+            }
+            let Some(script) = self.parse_one_script() else {
+                self.index += 1;
+                continue;
+            };
+            if let Some(previous) =
+                seen_events.insert(script.event.name.value.clone(), script.event.name.span)
+            {
+                self.diagnostics.push(
+                    DaihonDiagnostic::error(
+                        "E-DHN-SEM-007",
+                        "同じイベント名がファイル内に複数あります。",
+                        script.event.name.span,
+                    )
+                    .with_label(previous, "最初の定義はここです。"),
+                );
+            }
+            scripts.push(script);
+        }
+        scripts
+    }
+
+    fn parse_one_script(&mut self) -> Option<Script> {
         self.skip_empty();
         let event_line = self.next_line()?;
         let Some(event_name) = parse_header(&event_line, "##") else {
@@ -99,7 +134,10 @@ impl DaihonParser {
         if self.current_is_section("前提条件") {
             self.index += 1;
             while let Some(line) = self.peek_line() {
-                if is_section_start(&line.text) || is_scene_header(&line.text) {
+                if is_event_header(&line.text)
+                    || is_section_start(&line.text)
+                    || is_scene_header(&line.text)
+                {
                     break;
                 }
                 if line.text.trim().is_empty() {
@@ -122,7 +160,7 @@ impl DaihonParser {
         if self.current_is_section("初期値") {
             self.index += 1;
             while let Some(line) = self.peek_line() {
-                if is_scene_header(&line.text) {
+                if is_event_header(&line.text) || is_scene_header(&line.text) {
                     break;
                 }
                 if line.text.trim().is_empty() {
@@ -146,6 +184,12 @@ impl DaihonParser {
         while self.index < self.lines.len() {
             self.skip_empty();
             if self.index >= self.lines.len() {
+                break;
+            }
+            if self
+                .peek_line()
+                .is_some_and(|line| is_event_header(&line.text))
+            {
                 break;
             }
             if let Some(scene) = self.parse_scene() {
@@ -302,7 +346,7 @@ impl DaihonParser {
     fn parse_stmt_list_until_scene(&mut self) -> Vec<Stmt> {
         let mut statements = Vec::new();
         while let Some(line) = self.peek_line() {
-            if is_scene_header(&line.text) {
+            if is_event_header(&line.text) || is_scene_header(&line.text) {
                 break;
             }
             if line.text.trim().is_empty() {
@@ -334,6 +378,8 @@ impl DaihonParser {
             if normalized == "おわり"
                 || normalized.starts_with("※あるいは")
                 || normalized.starts_with("※それ以外")
+                || is_event_header(&line.text)
+                || is_scene_header(&line.text)
             {
                 break;
             }
@@ -1914,6 +1960,11 @@ fn normalize_line_head(text: &str) -> String {
 fn is_section_start(text: &str) -> bool {
     let normalized = normalize_line_head(text);
     normalized.starts_with("前提条件:") || normalized.starts_with("初期値:")
+}
+
+fn is_event_header(text: &str) -> bool {
+    let normalized = normalize_line_head(text);
+    normalized.starts_with("##") && !normalized.starts_with("###")
 }
 
 fn is_scene_header(text: &str) -> bool {

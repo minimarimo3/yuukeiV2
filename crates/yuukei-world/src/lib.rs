@@ -12,7 +12,7 @@ use serde_json::{Map, Number, Value};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use yuukei_daihon::{
-    has_errors, parse_script, validate_script, ActionHandler, ChoiceRequest, DaihonDiagnostic,
+    has_errors, parse_scripts, validate_script, ActionHandler, ChoiceRequest, DaihonDiagnostic,
     DaihonNumber, DaihonRuntimeError, DaihonValue, ExtractRequest, FunctionRegistry, FunctionSpec,
     GenerateRequest, GeneratedDialogue, InMemoryVariableStore, InterpretHandler, InterpretRequest,
     Interpreter, ParamSpec, ParamType, RunOptions, SceneHistoryStore, Script,
@@ -979,7 +979,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
         let function_registry = yuukei_function_registry();
         let mut scripts = Vec::new();
         for source in &world.daihon.loaded_scripts {
-            let mut script = parse_script(&source.source).map_err(|diagnostics| {
+            let parsed_scripts = parse_scripts(&source.source).map_err(|diagnostics| {
                 WorldError::Daihon(diagnostic_report(
                     &diagnostics,
                     DaihonDiagnosticPhase::LoadParse,
@@ -987,21 +987,23 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     None,
                 ))
             })?;
-            canonicalize_daihon_script_signals(&mut script, aliases);
-            canonicalize_daihon_script_speakers(&mut script, &speaker_aliases, &source.path)?;
-            let diagnostics = validate_script(&script, Some(&function_registry));
-            if has_errors(&diagnostics) {
-                return Err(WorldError::Daihon(diagnostic_report(
-                    &diagnostics,
-                    DaihonDiagnosticPhase::LoadValidate,
-                    Some(&source.path),
-                    None,
-                )));
+            for mut script in parsed_scripts {
+                canonicalize_daihon_script_signals(&mut script, aliases);
+                canonicalize_daihon_script_speakers(&mut script, &speaker_aliases, &source.path)?;
+                let diagnostics = validate_script(&script, Some(&function_registry));
+                if has_errors(&diagnostics) {
+                    return Err(WorldError::Daihon(diagnostic_report(
+                        &diagnostics,
+                        DaihonDiagnosticPhase::LoadValidate,
+                        Some(&source.path),
+                        None,
+                    )));
+                }
+                scripts.push(LoadedDaihonScript {
+                    path: source.path.clone(),
+                    script,
+                });
             }
-            scripts.push(LoadedDaihonScript {
-                path: source.path.clone(),
-                script,
-            });
         }
 
         let initial_variables = world
@@ -2536,6 +2538,106 @@ mod tests {
         assert_eq!(result.commands[0].payload["text"], "top-level alias");
         assert_eq!(result.executed_scenes[0].event_name, "conversation.text");
         assert_eq!(result.executed_scenes[0].scene_name, "conversation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_conditioned_scene_by_implicit_event_signal() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["desktop.folder.opened".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## フォルダ_開いた
+### downloads
+条件:（入力#フォルダ = 「downloads」）
+話者: yuukei
+「ダウンロードを見ています」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        event.id = "evt_folder_implicit".to_string();
+        event
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(
+            result.commands[0].payload["text"],
+            "ダウンロードを見ています"
+        );
+        assert_eq!(
+            result.executed_scenes[0].event_name,
+            "desktop.folder.opened"
+        );
+        assert_eq!(result.executed_scenes[0].scene_name, "downloads");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_does_not_dispatch_implicit_scene_for_mismatched_event() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["desktop.folder.opened".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## 会話_入力
+### downloads
+条件:（入力#フォルダ = 「downloads」）
+話者: yuukei
+「これは出ない」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        event.id = "evt_folder_mismatch".to_string();
+        event
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert!(result.commands.is_empty());
+        assert!(result.executed_scenes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_loads_multiple_events_from_one_daihon_file() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec![
+            "presence.idle.start".to_string(),
+            "presence.idle.end".to_string(),
+        ];
+        world.daihon.loaded_scripts[0].source = r#"
+## 不在_開始
+### idle start
+話者: yuukei
+「いってらっしゃい」
+
+## 復帰
+### idle end
+話者: yuukei
+「おかえり」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut start_event =
+            RuntimeEvent::new("presence.idle.start", "device", "resident-default");
+        start_event.id = "evt_idle_start_multi".to_string();
+        let start = adapter.dispatch(&start_event, &world).await?;
+
+        let mut end_event = RuntimeEvent::new("presence.idle.end", "device", "resident-default");
+        end_event.id = "evt_idle_end_multi".to_string();
+        let end = adapter.dispatch(&end_event, &world).await?;
+
+        assert_eq!(start.commands[0].payload["text"], "いってらっしゃい");
+        assert_eq!(start.executed_scenes[0].event_name, "presence.idle.start");
+        assert_eq!(end.commands[0].payload["text"], "おかえり");
+        assert_eq!(end.executed_scenes[0].event_name, "presence.idle.end");
         Ok(())
     }
 

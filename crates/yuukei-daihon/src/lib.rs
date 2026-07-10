@@ -16,7 +16,7 @@ pub use diagnostic::*;
 pub use function::*;
 pub use inspect::*;
 pub use lexer::lex_source;
-pub use parser::parse_script;
+pub use parser::{parse_script, parse_scripts};
 pub use runtime::*;
 pub use span::*;
 pub use token::*;
