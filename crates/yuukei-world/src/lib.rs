@@ -1590,6 +1590,7 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         ("fileCategory", "ファイル種類"),
         ("recentDownloadFileName", "最近のダウンロード"),
         ("recentDownloadCategory", "最近のダウンロード種類"),
+        ("aiConnected", "AI接続"),
     ] {
         if let Some(value) = event
             .payload
@@ -2622,6 +2623,7 @@ mod tests {
         event
             .payload
             .insert("recentDownloadCategory".to_string(), json!("image"));
+        event.payload.insert("aiConnected".to_string(), json!(true));
 
         let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
 
@@ -2647,6 +2649,7 @@ mod tests {
             inputs["最近のダウンロード種類"],
             DaihonValue::String("image".to_string())
         );
+        assert_eq!(inputs["AI接続"], DaihonValue::Boolean(true));
     }
 
     #[tokio::test]

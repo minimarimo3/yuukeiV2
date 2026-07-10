@@ -1239,6 +1239,14 @@ impl ResidentHome {
     }
 
     fn enrich_event_for_daihon_dispatch(&self, mut event: RuntimeEvent) -> Result<RuntimeEvent> {
+        let ai_connected = self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .has_healthy_provider(DIALOGUE_GENERATE_CAPABILITY);
+        event
+            .payload
+            .insert("aiConnected".to_string(), json!(ai_connected));
         if event.kind == "desktop.folder.opened" {
             let (file_name, file_category) = self.recent_download_for_folder_event(&event)?;
             event.payload.insert(
@@ -4001,6 +4009,44 @@ mod tests {
         world
     }
 
+    fn conversation_ai_connected_world() -> WorldPack {
+        let mut world = world_pack();
+        world.actors[0].speaker_aliases = vec!["ゆ".to_string()];
+        world.actors.push(ActorDefinition {
+            id: "partner".to_string(),
+            display_name: "Partner".to_string(),
+            speaker_aliases: vec!["パ".to_string()],
+            profile: JsonMap::new(),
+            renderer: None,
+        });
+        world.daihon.loaded_scripts[0].source = r#"
+## 会話_入力
+
+### AIなしの相槌1
+合図: ＠会話_入力
+条件:（入力#AI接続 = いいえ）
+頻度: 30秒に1回
+話者: ゆ
+「ん、聞いてます。……いまは、うまく言葉が出ないんですけど。」
+
+### AIなしの相槌2
+合図: ＠会話_入力
+条件:（入力#AI接続 = いいえ）
+頻度: 30秒に1回
+話者: パ
+「……(こくり)」
+"#
+        .to_string();
+        world.llm_delegation = LlmDelegation {
+            signals: vec![LlmDelegationSignal {
+                signal: "conversation.text".to_string(),
+                cooldown_seconds: Some(60),
+            }],
+            daily_budget: None,
+        };
+        world
+    }
+
     fn random_talk_world() -> WorldPack {
         let mut world = world_pack();
         world.signals.allow = vec![
@@ -4915,6 +4961,72 @@ mod tests {
             .iter()
             .any(|record| record.kind == "capability.invocation.result"
                 && record.payload["capability"] == DIALOGUE_GENERATE_CAPABILITY));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_without_ai_route_uses_daihon_acknowledgement() -> Result<()> {
+        let home = ResidentHome::new(
+            "resident-default",
+            conversation_ai_connected_world(),
+            EventLog::in_memory()?,
+        )
+        .await?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_no_ai_ack".to_string();
+        event.payload.insert("text".to_string(), json!("ねえ"));
+        let commands = home.ingest_event(event).await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].kind, "dialogue.say");
+        let text = commands[0].payload["text"].as_str().unwrap_or_default();
+        assert!(
+            text == "ん、聞いてます。……いまは、うまく言葉が出ないんですけど。"
+                || text == "……(こくり)"
+        );
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        let dispatch = records
+            .iter()
+            .find(|record| record.kind == "daihon.dispatch.result")
+            .expect("daihon dispatch result");
+        assert!(dispatch.payload["executedScenes"]
+            .as_array()
+            .is_some_and(|scenes| !scenes.is_empty()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_with_ai_route_skips_acknowledgement_and_delegates() -> Result<()> {
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("AIで返します。")),
+        ]));
+        let calls = provider.calls();
+        let mut capabilities = CapabilityRouter::new();
+        capabilities.register(provider)?;
+        let home = ResidentHome::with_parts(
+            "resident-default",
+            conversation_ai_connected_world(),
+            EventLog::in_memory()?,
+            Arc::new(YuukeiDaihonAdapter::default()),
+            capabilities,
+        )
+        .await?;
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_ai_connected".to_string();
+        event.payload.insert("text".to_string(), json!("ねえ"));
+        let commands = home.ingest_event(event).await?;
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].kind, "dialogue.say");
+        assert_eq!(commands[0].payload["text"], "AIで返します。");
+        assert_eq!(calls.lock().expect("calls lock").len(), 1);
+        let records = home.event_log().read(EventLogQuery::default())?.records;
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == "daihon.dispatch.result"));
         Ok(())
     }
 

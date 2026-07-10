@@ -115,6 +115,7 @@
   "daihon": {
     "scripts": [
       "scripts/desktop_reactions.daihon",
+      "scripts/conversation_fallback.daihon",
       "scripts/random_talk.daihon",
       "scripts/presence_away.daihon",
       "scripts/presence_return.daihon",
