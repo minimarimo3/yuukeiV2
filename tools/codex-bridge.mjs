@@ -1,12 +1,12 @@
 // Codex app-server への実装委任ブリッジ。使い方は .claude/skills/codex/SKILL.md 参照。
 //   node tools/codex-bridge.mjs <仕様書ファイル> [再開threadId]
 // 前提: codex app-server --listen ws://127.0.0.1:4500 が起動中。Node 22+(グローバルWebSocket)。
-// env: BRIDGE_TIMEOUT_MIN(既定45) / BRIDGE_EFFORT(既定medium)
+// env: BRIDGE_TIMEOUT_MIN(既定45) / BRIDGE_EFFORT(既定high) / BRIDGE_MODEL(既定gpt-5.6-terra)
 import { readFileSync, appendFileSync } from "node:fs";
 
 const WS_URL = "ws://127.0.0.1:4500";
 const PROJECT = "/Users/minimarimo/Sagyouba/V2/Yuukei";
-const MODEL = "gpt-5.5";
+const MODEL = process.env.BRIDGE_MODEL ?? "gpt-5.6-terra";
 const promptFile = process.argv[2];
 if (!promptFile) {
   console.error("usage: node codex-bridge.mjs <prompt-file>");
@@ -78,7 +78,7 @@ ws.onopen = async () => {
         networkAccess: false,
       },
       model: MODEL,
-      effort: process.env.BRIDGE_EFFORT ?? "medium",
+      effort: process.env.BRIDGE_EFFORT ?? "high",
       summary: "concise",
       input: [{ type: "text", text: prompt }],
     });
