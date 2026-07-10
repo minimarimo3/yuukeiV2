@@ -51,6 +51,9 @@ pub const TAURI_SURFACE_ID: &str = "surface-tauri";
 pub const CLI_SURFACE_ID: &str = "surface-cli";
 pub const PRESENCE_LIFE_TICK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_TALK_INTERVAL_MINUTES: u64 = 5;
+pub const DEFAULT_ACTOR_SCALE_PERCENT: u16 = 100;
+pub const MIN_ACTOR_SCALE_PERCENT: u16 = 50;
+pub const MAX_ACTOR_SCALE_PERCENT: u16 = 200;
 pub const DEFAULT_LLM_TIMEOUT_MS: u64 = 30_000;
 pub const MIN_LLM_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_LLM_TIMEOUT_MS: u64 = 300_000;
@@ -205,6 +208,7 @@ impl LocalRuntimeConfig {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsState {
     pub talk_interval_minutes: u64,
+    pub actor_scale_percent: u16,
     pub settings_path: PathBuf,
 }
 
@@ -219,6 +223,8 @@ struct AppSettingsRegistry {
 struct StoredAppSettings {
     schema_version: u32,
     talk_interval_minutes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor_scale_percent: Option<u16>,
 }
 
 impl Default for StoredAppSettings {
@@ -226,8 +232,13 @@ impl Default for StoredAppSettings {
         Self {
             schema_version: 1,
             talk_interval_minutes: DEFAULT_TALK_INTERVAL_MINUTES,
+            actor_scale_percent: None,
         }
     }
+}
+
+pub fn clamp_actor_scale_percent(percent: u16) -> u16 {
+    percent.clamp(MIN_ACTOR_SCALE_PERCENT, MAX_ACTOR_SCALE_PERCENT)
 }
 
 impl AppSettingsRegistry {
@@ -260,12 +271,23 @@ impl AppSettingsRegistry {
     fn state(&self) -> AppSettingsState {
         AppSettingsState {
             talk_interval_minutes: self.stored.talk_interval_minutes,
+            actor_scale_percent: self
+                .stored
+                .actor_scale_percent
+                .map(clamp_actor_scale_percent)
+                .unwrap_or(DEFAULT_ACTOR_SCALE_PERCENT),
             settings_path: self.settings_path.clone(),
         }
     }
 
     fn set_talk_interval_minutes(&mut self, minutes: u64) -> Result<AppSettingsState> {
         self.stored.talk_interval_minutes = minutes;
+        self.save()?;
+        Ok(self.state())
+    }
+
+    fn set_actor_scale_percent(&mut self, percent: u16) -> Result<AppSettingsState> {
+        self.stored.actor_scale_percent = Some(clamp_actor_scale_percent(percent));
         self.save()?;
         Ok(self.state())
     }
@@ -1982,6 +2004,18 @@ impl LocalYuukeiRuntime {
     ) -> Result<AppSettingsState> {
         let mut registry = AppSettingsRegistry::open(&env.data_dir)?;
         registry.set_talk_interval_minutes(minutes)
+    }
+
+    pub fn set_app_actor_scale_percent(percent: u16) -> Result<AppSettingsState> {
+        Self::set_app_actor_scale_percent_in(LocalRuntimeEnvironment::default_local(), percent)
+    }
+
+    pub fn set_app_actor_scale_percent_in(
+        env: LocalRuntimeEnvironment,
+        percent: u16,
+    ) -> Result<AppSettingsState> {
+        let mut registry = AppSettingsRegistry::open(&env.data_dir)?;
+        registry.set_actor_scale_percent(percent)
     }
 
     pub fn set_runtime_settings(settings: RuntimeSettingsUpdate) -> Result<RuntimeSettingsState> {
@@ -4250,6 +4284,51 @@ mod tests {
         let reopened = AppSettingsRegistry::open(data.path())?;
         assert_eq!(reopened.state().talk_interval_minutes, 12);
         assert!(data.path().join("settings").join("app.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn app_settings_default_missing_actor_scale_percent(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let settings_dir = data.path().join("settings");
+        fs::create_dir_all(&settings_dir)?;
+        fs::write(
+            settings_dir.join("app.json"),
+            r#"{"schemaVersion":1,"talkIntervalMinutes":7}"#,
+        )?;
+
+        let registry = AppSettingsRegistry::open(data.path())?;
+
+        assert_eq!(registry.state().talk_interval_minutes, 7);
+        assert_eq!(
+            registry.state().actor_scale_percent,
+            DEFAULT_ACTOR_SCALE_PERCENT
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_settings_persist_and_clamp_actor_scale_percent(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = AppSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state().actor_scale_percent,
+            DEFAULT_ACTOR_SCALE_PERCENT
+        );
+        assert_eq!(
+            registry.set_actor_scale_percent(20)?.actor_scale_percent,
+            50
+        );
+        assert_eq!(
+            registry.set_actor_scale_percent(240)?.actor_scale_percent,
+            200
+        );
+
+        let reopened = AppSettingsRegistry::open(data.path())?;
+        assert_eq!(reopened.state().actor_scale_percent, 200);
         Ok(())
     }
 

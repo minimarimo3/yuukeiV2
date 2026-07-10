@@ -619,6 +619,20 @@ async fn set_app_talk_interval_minutes(
 }
 
 #[tauri::command]
+async fn set_app_actor_scale_percent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    percent: u16,
+) -> Result<AppSettingsState, String> {
+    let next = LocalYuukeiRuntime::set_app_actor_scale_percent_in(state.env.clone(), percent)
+        .map_err(to_message)?;
+    state
+        .stage
+        .apply_actor_scale_percent(&app, next.actor_scale_percent)?;
+    Ok(next)
+}
+
+#[tauri::command]
 async fn set_runtime_settings(
     state: State<'_, AppState>,
     settings: RuntimeSettingsUpdate,
@@ -655,6 +669,10 @@ pub fn run() {
             configure_tray(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let stage = Arc::new(DesktopStageManager::new());
+            let actor_scale_percent = runtime
+                .app_settings()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?
+                .actor_scale_percent;
             let audio_player = match AudioPlayer::new() {
                 Ok(player) => Some(Arc::new(player)),
                 Err(error) => {
@@ -687,6 +705,10 @@ pub fn run() {
             });
             {
                 let state = app.handle().state::<AppState>();
+                state
+                    .stage
+                    .apply_actor_scale_percent(app.handle(), actor_scale_percent)
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
                 tauri::async_runtime::block_on(reconcile_window_observer(app.handle(), &state))
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
                 tauri::async_runtime::block_on(reconcile_download_observer(&state))
@@ -773,6 +795,7 @@ pub fn run() {
             set_extension_secret,
             restart_extension_process,
             set_app_talk_interval_minutes,
+            set_app_actor_scale_percent,
             set_runtime_settings,
             reset_scene_history
         ])

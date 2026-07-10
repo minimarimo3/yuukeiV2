@@ -183,6 +183,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getWorldPackStatus: vi.fn(),
     getAppSettings: vi.fn(async () => ({
       talkIntervalMinutes: 5,
+      actorScalePercent: 100,
       settingsPath: "/tmp/yuukei-v2/settings/app.json"
     })),
     getExtensionSettings: vi.fn(),
@@ -206,6 +207,12 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     setExtensionEnabled: vi.fn(),
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) => ({
       talkIntervalMinutes: minutes,
+      actorScalePercent: 100,
+      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+    })),
+    setAppActorScalePercent: vi.fn(async (percent: number) => ({
+      talkIntervalMinutes: 5,
+      actorScalePercent: percent,
       settingsPath: "/tmp/yuukei-v2/settings/app.json"
     })),
     setExtensionHookOrder: vi.fn(),

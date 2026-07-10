@@ -1141,6 +1141,26 @@ input {
   outline: 3px solid rgba(37, 99, 235, 0.12);
 }
 
+.range-setting-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.range-setting-control output {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+}
+
+.app-setting-field input[type="range"] {
+  padding: 0;
+  accent-color: var(--accent);
+}
+
 .extension-secret-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

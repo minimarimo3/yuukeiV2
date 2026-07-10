@@ -419,6 +419,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function saveActorScalePercent(percent: number) {
+    const normalized = Math.trunc(percent || 100);
+    setAppSettingsError(null);
+    try {
+      setAppSettings(await client.setAppActorScalePercent(normalized));
+    } catch (error) {
+      setAppSettingsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function toggleAutostart(enabled: boolean) {
     setAppSettingsError(null);
     try {
@@ -678,6 +688,29 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   void saveTalkInterval(Number.isFinite(value) ? value : 0);
                 }}
               />
+            </label>
+            <label className="app-setting-field" htmlFor="actor-scale-percent">
+              <span>
+                <strong>住人の大きさ</strong>
+                <small>デスクトップに表示される住人の大きさを変えられます。</small>
+              </span>
+              <span className="range-setting-control">
+                <input
+                  id="actor-scale-percent"
+                  type="range"
+                  min={50}
+                  max={200}
+                  step={10}
+                  value={appSettings?.actorScalePercent ?? 100}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    void saveActorScalePercent(Number.isFinite(value) ? value : 100);
+                  }}
+                />
+                <output htmlFor="actor-scale-percent">
+                  {appSettings?.actorScalePercent ?? 100}%
+                </output>
+              </span>
             </label>
             <label className="extension-toggle" htmlFor="autostart-enabled">
               <span>

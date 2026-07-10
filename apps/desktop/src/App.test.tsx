@@ -1,4 +1,11 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
@@ -124,6 +131,7 @@ function extensionSettings(
 function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   return {
     talkIntervalMinutes,
+    actorScalePercent: 100,
     settingsPath: "/tmp/yuukei-v2/settings/app.json"
   };
 }
@@ -353,6 +361,10 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
       appSettings(minutes)
     ),
+    setAppActorScalePercent: vi.fn(async (percent: number) => ({
+      ...appSettings(),
+      actorScalePercent: percent
+    })),
     setRuntimeSettings: vi.fn(async (settings) => runtimeSettings(settings)),
     resetSceneHistory: vi.fn(async () => sceneHistory([])),
     onCommand: vi.fn(async () => () => undefined),
@@ -544,6 +556,22 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(client.setAppTalkIntervalMinutes).toHaveBeenLastCalledWith(12);
+    });
+  });
+
+  it("saves actor scale settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const input = await screen.findByRole("slider", {
+      name: /住人の大きさ/
+    });
+    fireEvent.change(input, { target: { value: "150" } });
+
+    await waitFor(() => {
+      expect(client.setAppActorScalePercent).toHaveBeenLastCalledWith(150);
     });
   });
 

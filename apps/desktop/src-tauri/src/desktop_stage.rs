@@ -10,7 +10,10 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
-use yuukei_device_host::DesktopWindowObservation;
+use yuukei_device_host::{
+    clamp_actor_scale_percent, DesktopWindowFrame, DesktopWindowObservation,
+    DEFAULT_ACTOR_SCALE_PERCENT,
+};
 use yuukei_protocol::RuntimeCommand;
 
 use crate::DesktopActorSurfaceAssetCatalog;
@@ -31,13 +34,29 @@ pub struct DesktopStageManager {
     state: RwLock<DesktopStageState>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct DesktopStageState {
     monitors: Vec<StageMonitor>,
     actors: BTreeMap<String, StageActor>,
     bubbles: BTreeMap<String, StageBubble>,
     perches: BTreeMap<String, StagePerch>,
+    terrain_windows: BTreeMap<String, DesktopWindowFrame>,
+    actor_scale_percent: u16,
     window_observation_enabled: bool,
+}
+
+impl Default for DesktopStageState {
+    fn default() -> Self {
+        Self {
+            monitors: Vec::new(),
+            actors: BTreeMap::new(),
+            bubbles: BTreeMap::new(),
+            perches: BTreeMap::new(),
+            terrain_windows: BTreeMap::new(),
+            actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
+            window_observation_enabled: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -124,6 +143,12 @@ struct StagePerch {
     window_key: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActorWindowSize {
+    width: f64,
+    height: f64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActorWindowSpec {
     pub actor_id: String,
@@ -182,14 +207,25 @@ impl DesktopStageManager {
                 }
             }
         }
-        let resolved_bounds =
-            resolve_actor_window_layout(&reconcile.desired_specs, &current_bounds, &monitors);
+        let actor_size = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            actor_window_size(state.actor_scale_percent)
+        };
+        let resolved_bounds = resolve_actor_window_layout(
+            &reconcile.desired_specs,
+            &current_bounds,
+            &monitors,
+            actor_size,
+        );
         let mut next_actors = BTreeMap::new();
         for spec in &reconcile.desired_specs {
             let bounds = resolved_bounds
                 .get(&spec.actor_id)
                 .cloned()
-                .unwrap_or_else(|| place_actor_window(spec.index, &monitors, &[]));
+                .unwrap_or_else(|| place_actor_window(spec.index, &monitors, &[], actor_size));
             if let Some(window) = app.get_webview_window(&spec.label) {
                 apply_actor_window_bounds(&window, &bounds)?;
                 let visible = window.is_visible().unwrap_or(true);
@@ -210,6 +246,8 @@ impl DesktopStageManager {
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
             state.monitors = monitors;
             state.actors = next_actors;
+            let terrain_windows = state.terrain_windows.clone();
+            reapply_perches_to_state(&mut state, &terrain_windows);
             let actor_ids = state.actors.keys().cloned().collect::<BTreeSet<_>>();
             state
                 .bubbles
@@ -217,6 +255,22 @@ impl DesktopStageManager {
             state
                 .perches
                 .retain(|actor_id, _| actor_ids.contains(actor_id));
+        }
+        self.emit_state(app)
+    }
+
+    pub fn apply_actor_scale_percent(&self, app: &AppHandle, percent: u16) -> Result<(), String> {
+        let apply_bounds = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            apply_actor_scale_to_state(&mut state, percent)
+        };
+        for (label, bounds) in apply_bounds {
+            if let Some(window) = app.get_webview_window(&label) {
+                apply_actor_window_bounds(&window, &bounds)?;
+            }
         }
         self.emit_state(app)
     }
@@ -229,6 +283,7 @@ impl DesktopStageManager {
         state.window_observation_enabled = enabled;
         if !enabled {
             state.perches.clear();
+            state.terrain_windows.clear();
         }
         Ok(())
     }
@@ -943,6 +998,7 @@ fn resolve_actor_window_layout(
     specs: &[ActorWindowSpec],
     current_bounds: &BTreeMap<String, StageRect>,
     monitors: &[StageMonitor],
+    actor_size: ActorWindowSize,
 ) -> BTreeMap<String, StageRect> {
     let mut occupied = Vec::new();
     let mut resolved = BTreeMap::new();
@@ -950,24 +1006,28 @@ fn resolve_actor_window_layout(
         let preferred = current_bounds
             .get(&spec.actor_id)
             .cloned()
-            .map(|bounds| normalize_actor_window_bounds(bounds, monitors))
-            .unwrap_or_else(|| place_actor_window(spec.index, monitors, &occupied));
+            .map(|bounds| normalize_actor_window_bounds(bounds, monitors, actor_size))
+            .unwrap_or_else(|| place_actor_window(spec.index, monitors, &occupied, actor_size));
         let bounds = if overlaps_any(&preferred, &occupied) {
-            place_actor_window(spec.index, monitors, &occupied)
+            place_actor_window(spec.index, monitors, &occupied, actor_size)
         } else {
             preferred
         };
-        let bounds = normalize_actor_window_bounds(bounds, monitors);
+        let bounds = normalize_actor_window_bounds(bounds, monitors, actor_size);
         occupied.push(bounds.clone());
         resolved.insert(spec.actor_id.clone(), bounds);
     }
     resolved
 }
 
-fn normalize_actor_window_bounds(bounds: StageRect, monitors: &[StageMonitor]) -> StageRect {
+fn normalize_actor_window_bounds(
+    bounds: StageRect,
+    monitors: &[StageMonitor],
+    actor_size: ActorWindowSize,
+) -> StageRect {
     let bounds = StageRect {
-        width: ACTOR_WINDOW_WIDTH,
-        height: ACTOR_WINDOW_HEIGHT,
+        width: actor_size.width,
+        height: actor_size.height,
         ..bounds
     };
     let monitor = best_monitor_bounds_for_rect(&bounds, monitors);
@@ -976,7 +1036,7 @@ fn normalize_actor_window_bounds(bounds: StageRect, monitors: &[StageMonitor]) -
 
 fn perch_actor_bounds(
     actor_bounds: &StageRect,
-    target: &yuukei_device_host::DesktopWindowFrame,
+    target: &DesktopWindowFrame,
     monitors: &[StageMonitor],
 ) -> StageRect {
     let target = StageRect {
@@ -988,12 +1048,12 @@ fn perch_actor_bounds(
     let width = if actor_bounds.width > 0.0 {
         actor_bounds.width
     } else {
-        ACTOR_WINDOW_WIDTH
+        actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT).width
     };
     let height = if actor_bounds.height > 0.0 {
         actor_bounds.height
     } else {
-        ACTOR_WINDOW_HEIGHT
+        actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT).height
     };
     let desired = StageRect {
         x: target.x + (target.width / 2.0) - (width / 2.0),
@@ -1009,6 +1069,10 @@ fn apply_window_terrain_to_state(
     state: &mut DesktopStageState,
     observations: &[DesktopWindowObservation],
 ) -> (Vec<(String, StageRect)>, Vec<StagePerchEnded>) {
+    state.terrain_windows = observations
+        .iter()
+        .map(|window| (window.window_key.clone(), window.frame.clone()))
+        .collect();
     let windows = observations
         .iter()
         .map(|window| (window.window_key.as_str(), &window.frame))
@@ -1045,6 +1109,48 @@ fn apply_window_terrain_to_state(
     (apply_bounds, ended)
 }
 
+fn apply_actor_scale_to_state(
+    state: &mut DesktopStageState,
+    percent: u16,
+) -> Vec<(String, StageRect)> {
+    state.actor_scale_percent = clamp_actor_scale_percent(percent);
+    let actor_size = actor_window_size(state.actor_scale_percent);
+    let terrain_windows = state.terrain_windows.clone();
+    let mut apply_bounds = Vec::new();
+    for actor in state.actors.values_mut() {
+        let resized = resize_actor_bounds_from_bottom_center(&actor.bounds, actor_size);
+        actor.bounds = normalize_actor_window_bounds(resized, &state.monitors, actor_size);
+        actor.anchor = default_actor_anchor(&actor.bounds);
+    }
+    reapply_perches_to_state(state, &terrain_windows);
+    for actor in state.actors.values() {
+        apply_bounds.push((actor.window_label.clone(), actor.bounds.clone()));
+    }
+    apply_bounds
+}
+
+fn reapply_perches_to_state(
+    state: &mut DesktopStageState,
+    terrain_windows: &BTreeMap<String, DesktopWindowFrame>,
+) {
+    let actor_ids = state.perches.keys().cloned().collect::<Vec<_>>();
+    for actor_id in actor_ids {
+        let Some(perch) = state.perches.get(&actor_id).cloned() else {
+            continue;
+        };
+        let Some(target) = terrain_windows.get(&perch.window_key) else {
+            continue;
+        };
+        let Some(actor) = state.actors.get_mut(&actor_id) else {
+            state.perches.remove(&actor_id);
+            continue;
+        };
+        let bounds = perch_actor_bounds(&actor.bounds, target, &state.monitors);
+        actor.bounds = bounds.clone();
+        actor.anchor = default_actor_anchor(&bounds);
+    }
+}
+
 fn restore_actor_to_desktop(
     state: &mut DesktopStageState,
     actor_id: &str,
@@ -1061,7 +1167,12 @@ fn restore_actor_to_desktop(
         .filter(|(other_actor_id, _)| other_actor_id.as_str() != actor_id)
         .map(|(_, actor)| actor.bounds.clone())
         .collect::<Vec<_>>();
-    let bounds = place_actor_window(index, &state.monitors, &occupied);
+    let bounds = place_actor_window(
+        index,
+        &state.monitors,
+        &occupied,
+        actor_window_size(state.actor_scale_percent),
+    );
     let actor = state.actors.get_mut(actor_id)?;
     actor.bounds = bounds.clone();
     actor.anchor = default_actor_anchor(&bounds);
@@ -1095,6 +1206,7 @@ fn place_actor_window(
     index: usize,
     monitors: &[StageMonitor],
     occupied: &[StageRect],
+    actor_size: ActorWindowSize,
 ) -> StageRect {
     let monitor = monitors
         .first()
@@ -1108,8 +1220,8 @@ fn place_actor_window(
     let size = StageRect {
         x: 0.0,
         y: 0.0,
-        width: ACTOR_WINDOW_WIDTH,
-        height: ACTOR_WINDOW_HEIGHT,
+        width: actor_size.width,
+        height: actor_size.height,
     };
     let initial = clamp_rect_to_bounds(
         StageRect {
@@ -1257,6 +1369,28 @@ fn same_size(a: &StageRect, b: &StageRect) -> bool {
     (a.width - b.width).abs() <= 0.5 && (a.height - b.height).abs() <= 0.5
 }
 
+fn actor_window_size(percent: u16) -> ActorWindowSize {
+    let scale = f64::from(clamp_actor_scale_percent(percent)) / 100.0;
+    ActorWindowSize {
+        width: ACTOR_WINDOW_WIDTH * scale,
+        height: ACTOR_WINDOW_HEIGHT * scale,
+    }
+}
+
+fn resize_actor_bounds_from_bottom_center(
+    bounds: &StageRect,
+    actor_size: ActorWindowSize,
+) -> StageRect {
+    let bottom_center_x = bounds.x + bounds.width * 0.5;
+    let bottom_y = bounds.y + bounds.height;
+    StageRect {
+        x: bottom_center_x - actor_size.width * 0.5,
+        y: bottom_y - actor_size.height,
+        width: actor_size.width,
+        height: actor_size.height,
+    }
+}
+
 fn default_actor_anchor(bounds: &StageRect) -> StageAnchor {
     StageAnchor {
         x: bounds.x + bounds.width * 0.5,
@@ -1394,8 +1528,9 @@ mod tests {
             },
             scale_factor: 1.0,
         }];
-        let first = place_actor_window(0, &monitors, &[]);
-        let second = place_actor_window(1, &monitors, std::slice::from_ref(&first));
+        let size = actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT);
+        let first = place_actor_window(0, &monitors, &[], size);
+        let second = place_actor_window(1, &monitors, std::slice::from_ref(&first), size);
 
         assert!(!rects_overlap(&first, &second, 16.0));
     }
@@ -1424,7 +1559,12 @@ mod tests {
             },
         );
 
-        let resolved = resolve_actor_window_layout(&specs, &current_bounds, &monitors);
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &current_bounds,
+            &monitors,
+            actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
+        );
         let first = resolved.get("yuukei").expect("yuukei bounds");
         let second = resolved.get("partner").expect("partner bounds");
 
@@ -1448,7 +1588,12 @@ mod tests {
             );
         }
 
-        let resolved = resolve_actor_window_layout(&specs, &current_bounds, &monitors);
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &current_bounds,
+            &monitors,
+            actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
+        );
         let bounds = specs
             .iter()
             .map(|spec| resolved.get(&spec.actor_id).expect("actor bounds"))
@@ -1476,8 +1621,12 @@ mod tests {
             },
         );
 
-        let resolved =
-            resolve_actor_window_layout(&specs, &current_bounds, std::slice::from_ref(&monitor));
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &current_bounds,
+            std::slice::from_ref(&monitor),
+            actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
+        );
         let bounds = resolved.get("yuukei").expect("yuukei bounds");
 
         assert!(bounds.x >= monitor.bounds.x + ACTOR_WINDOW_MARGIN);
@@ -1497,7 +1646,12 @@ mod tests {
         let monitors = vec![test_monitor(460.0, 600.0)];
         let specs = test_specs(&["yuukei", "partner", "third"]);
 
-        let resolved = resolve_actor_window_layout(&specs, &BTreeMap::new(), &monitors);
+        let resolved = resolve_actor_window_layout(
+            &specs,
+            &BTreeMap::new(),
+            &monitors,
+            actor_window_size(DEFAULT_ACTOR_SCALE_PERCENT),
+        );
 
         assert_eq!(resolved.len(), 3);
         for bounds in resolved.values() {
@@ -1572,6 +1726,8 @@ mod tests {
                     window_key: "window-1".to_string(),
                 },
             )]),
+            terrain_windows: BTreeMap::new(),
+            actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: true,
         };
 
@@ -1591,6 +1747,52 @@ mod tests {
             state.actors.get("yuukei").expect("actor").bounds.width,
             ACTOR_WINDOW_WIDTH
         );
+    }
+
+    #[test]
+    fn actor_scale_recomputes_perched_actor_with_scaled_size() {
+        let spec = test_specs(&["yuukei"]).remove(0);
+        let target = DesktopWindowFrame {
+            x: 300.0,
+            y: 900.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let mut state = DesktopStageState {
+            monitors: vec![test_monitor(1400.0, 1200.0)],
+            actors: BTreeMap::from([(
+                "yuukei".to_string(),
+                actor_from_spec(
+                    &spec,
+                    StageRect {
+                        x: 390.0,
+                        y: 160.0,
+                        width: ACTOR_WINDOW_WIDTH,
+                        height: ACTOR_WINDOW_HEIGHT,
+                    },
+                    true,
+                ),
+            )]),
+            bubbles: BTreeMap::new(),
+            perches: BTreeMap::from([(
+                "yuukei".to_string(),
+                StagePerch {
+                    window_key: "window-1".to_string(),
+                },
+            )]),
+            terrain_windows: BTreeMap::from([("window-1".to_string(), target)]),
+            actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
+            window_observation_enabled: true,
+        };
+
+        let apply_bounds = apply_actor_scale_to_state(&mut state, 150);
+        let bounds = state.actors.get("yuukei").expect("actor").bounds.clone();
+
+        assert_eq!(apply_bounds.len(), 1);
+        assert_eq!(bounds.width, ACTOR_WINDOW_WIDTH * 1.5);
+        assert_eq!(bounds.height, ACTOR_WINDOW_HEIGHT * 1.5);
+        assert_eq!(bounds.x, 300.0 + 200.0 - bounds.width / 2.0);
+        assert_eq!(bounds.y, 900.0 - bounds.height);
     }
 
     #[test]
