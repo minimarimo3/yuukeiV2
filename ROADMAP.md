@@ -155,6 +155,7 @@ Downloads遭遇・フォルダ観測・ウィンドウ地形はリリースM2へ
 - LLMタイムアウト・recentContext件数の設定化
 - 設定GUIのselect動的選択肢(listModels照会)、APIキーのOSキーチェーン格納、使用量のコスト換算表示
 - Claude専用provider、ChatGPT(openai-compatibleのbaseUrl変更)の動作確認
+- リファクタ残: device-host runtime.rs(1,246行)のさらなる分割、App.tsx本体(1,308行)のカスタムフック分割(2026-07-11のmove-only分割で残した将来候補。分割時は挙動不変を厳守)
 
 ## 遠距離(構想のみ)
 
