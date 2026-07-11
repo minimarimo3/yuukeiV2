@@ -87,6 +87,8 @@
       "surface.attach",
       "avatar.gesture.poke",
       "avatar.gesture.pat",
+      "avatar.gesture.grab",
+      "avatar.gesture.drop",
       "presence.idle.start",
       "presence.idle.end",
       "desktop.window.appeared",
