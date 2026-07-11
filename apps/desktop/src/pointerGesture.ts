@@ -365,7 +365,6 @@ export function reducePointerGesture(
           sessionId: event.sessionId
         },
         effects: [
-          notifyGrab,
           {
             type: "cancelWindowDrag",
             gestureId: state.gestureId,

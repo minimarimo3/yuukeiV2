@@ -46,6 +46,7 @@ import {
   type PointerGestureState,
   type SemanticActorHit
 } from "./pointerGesture";
+import { createPointerGestureSemanticQueue } from "./pointerGestureSemanticQueue";
 
 type ActorAppProps = {
   actorId?: string | null;
@@ -215,6 +216,8 @@ function VrmStage({
     const holdTimers = new Map<number, number>();
     let moveFrame = 0;
     let moveQueue = Promise.resolve();
+    // Meaning notifications stay ordered without delaying physical drag state.
+    const semanticNotificationQueue = createPointerGestureSemanticQueue();
     let pendingMoveEffect: Extract<
       PointerGestureEffect,
       { type: "moveWindowDrag" }
@@ -564,7 +567,10 @@ function VrmStage({
         return;
       }
       if (effect.type === "notifyPoke") {
-        void onAvatarGesturePoke(effect.poke).then(
+        const completion = semanticNotificationQueue.enqueue(() =>
+          onAvatarGesturePoke(effect.poke)
+        );
+        void completion.then(
           () => dispatchPointerGesture({
             type: "avatarPokeNotified",
             gestureId: effect.gestureId
@@ -581,7 +587,10 @@ function VrmStage({
         return;
       }
       if (effect.type === "notifyGrab") {
-        void client.notifyAvatarGestureGrab(effect.actorId).then(
+        const completion = semanticNotificationQueue.enqueue(async () => {
+          await client.notifyAvatarGestureGrab(effect.actorId);
+        });
+        void completion.then(
           () => dispatchPointerGesture({
             type: "avatarGrabNotified",
             gestureId: effect.gestureId
@@ -598,22 +607,26 @@ function VrmStage({
         return;
       }
       if (effect.type === "notifyDrop") {
-        void client
-          .notifyAvatarGestureDrop(effect.actorId, effect.movedDistance)
-          .then(
-            () => dispatchPointerGesture({
-              type: "avatarDropNotified",
-              gestureId: effect.gestureId
-            }),
-            (error: unknown) => {
-              console.warn("Failed to notify avatar drop", error);
-              dispatchPointerGesture({
-                type: "avatarDropNotifyFailed",
-                gestureId: effect.gestureId,
-                error
-              });
-            }
+        const completion = semanticNotificationQueue.enqueue(async () => {
+          await client.notifyAvatarGestureDrop(
+            effect.actorId,
+            effect.movedDistance
           );
+        });
+        void completion.then(
+          () => dispatchPointerGesture({
+            type: "avatarDropNotified",
+            gestureId: effect.gestureId
+          }),
+          (error: unknown) => {
+            console.warn("Failed to notify avatar drop", error);
+            dispatchPointerGesture({
+              type: "avatarDropNotifyFailed",
+              gestureId: effect.gestureId,
+              error
+            });
+          }
+        );
         return;
       }
       const unhandledEffect: never = effect;

@@ -346,6 +346,7 @@ describe("pointer gesture state machine", () => {
       });
       expect(started.state.type).toBe("cancellingDrag");
       expect(effectsOfType(started.effects, "cancelWindowDrag")).toHaveLength(1);
+      expect(effectsOfType(started.effects, "notifyGrab")).toHaveLength(0);
     });
 
     it("returns startingDrag to idle on windowDragStartFailed", () => {
