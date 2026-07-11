@@ -1,48 +1,146 @@
-use std::{env, path::PathBuf};
+mod menu;
+
+use std::{
+    env,
+    io::{self, BufRead, Write},
+    path::PathBuf,
+};
 
 use anyhow::{bail, Context, Result};
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use menu::{
+    menu_lines, transition, MenuAction, MenuActor, MenuData, MenuExtension, MenuHitZone, MenuState,
+};
+use tokio::task::JoinHandle;
 use yuukei_device_host::{
-    cli_surface_session, InstalledExtension, LocalYuukeiRuntime, RuntimePaths,
-    WorldPackSelectionState, CLI_SURFACE_ID,
+    cli_surface_session, ActorSurfaceAssetCatalog, AvatarGestureInput, AvatarGesturePoke,
+    AvatarGestureScreen, LocalYuukeiRuntime, RuntimePaths, WorldPackSelectionState, CLI_SURFACE_ID,
 };
 use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CliMode {
-    Wizard,
-    Say(String),
-    Snapshot,
-    ExportEvents(PathBuf),
-    SelectWorldPack(PathBuf),
-    ResetWorldPack,
-    InstallExtension(PathBuf),
+    Repl,
     Help,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mode = parse_args(env::args().skip(1))?;
-    if mode == CliMode::Help {
-        print_usage();
-        return Ok(());
-    }
-    if let CliMode::InstallExtension(path) = &mode {
-        install_extension(path)?;
-        return Ok(());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputMode {
+    Human,
+    Jsonl,
+}
+
+impl OutputMode {
+    fn from_environment() -> Self {
+        match env::var("YUUKEI_CLI_OUTPUT").as_deref() {
+            Ok("jsonl") => Self::Jsonl,
+            _ => Self::Human,
+        }
     }
 
-    let runtime = match &mode {
-        CliMode::SelectWorldPack(path) => LocalYuukeiRuntime::select_world_pack_directory(path)
-            .await
-            .context("failed to select World Pack")?,
-        CliMode::ResetWorldPack => LocalYuukeiRuntime::reset_world_pack_to_default()
-            .await
-            .context("failed to reset World Pack")?,
-        _ => LocalYuukeiRuntime::open_default()
-            .await
-            .context("failed to open Yuukei local runtime")?,
-    };
+    fn toggled(self) -> Self {
+        match self {
+            Self::Human => Self::Jsonl,
+            Self::Jsonl => Self::Human,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Jsonl => "jsonl",
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("error: {error:#}");
+        if error.to_string().starts_with("unknown argument:") {
+            print_usage(&mut io::stderr());
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
+    match parse_args(env::args().skip(1)) {
+        Ok(CliMode::Help) => {
+            print_usage(&mut io::stdout());
+            Ok(())
+        }
+        Ok(CliMode::Repl) => run_repl().await,
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliMode> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    match args.as_slice() {
+        [] => Ok(CliMode::Repl),
+        [flag] if flag == "-h" || flag == "--help" => Ok(CliMode::Help),
+        [flag, ..] => bail!("unknown argument: {flag}"),
+    }
+}
+
+async fn run_repl() -> Result<()> {
+    let presence_enabled = env::var("YUUKEI_CLI_PRESENCE").as_deref() == Ok("1");
+    let mut runtime = open_attached_default().await?;
+    let mut presence_loop = presence_enabled.then(|| runtime.spawn_presence_loop());
+    let mut state = MenuState::Top;
+    let mut output_mode = OutputMode::from_environment();
+    let mut command_history = Vec::new();
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let mut line = String::new();
+
+    loop {
+        let data = current_menu_data(&runtime)?;
+        print_menu(&state, &data);
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
+        let result = transition(state.clone(), line, &data);
+        state = result.next_state;
+        if let Some(error) = result.error {
+            eprintln!("error: {error}");
+            continue;
+        }
+        let Some(action) = result.action else {
+            continue;
+        };
+        match execute_action(
+            action,
+            &mut runtime,
+            &mut presence_loop,
+            presence_enabled,
+            &mut command_history,
+            &mut output_mode,
+        )
+        .await
+        {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => eprintln!("error: {error:#}"),
+        }
+    }
+
+    if let Some(handle) = presence_loop {
+        handle.abort();
+    }
+    Ok(())
+}
+
+async fn open_attached_default() -> Result<LocalYuukeiRuntime> {
+    let runtime = LocalYuukeiRuntime::open_default()
+        .await
+        .context("failed to open Yuukei local runtime")?;
+    attach_runtime(runtime).await
+}
+
+async fn attach_runtime(runtime: LocalYuukeiRuntime) -> Result<LocalYuukeiRuntime> {
     runtime
         .attach_surface(cli_surface_session(runtime.device_id()))
         .await
@@ -51,301 +149,318 @@ async fn main() -> Result<()> {
         .emit_app_startup()
         .await
         .context("failed to emit app startup")?;
-    let snapshot = runtime.snapshot()?;
+    Ok(runtime)
+}
 
-    match mode {
-        CliMode::Wizard => run_wizard(runtime, snapshot).await,
-        CliMode::Say(text) => {
-            if text.trim().is_empty() {
-                bail!("--say requires non-empty text");
-            }
+async fn execute_action(
+    action: MenuAction,
+    runtime: &mut LocalYuukeiRuntime,
+    presence_loop: &mut Option<JoinHandle<()>>,
+    presence_enabled: bool,
+    command_history: &mut Vec<RuntimeCommand>,
+    output_mode: &mut OutputMode,
+) -> Result<bool> {
+    match action {
+        MenuAction::Quit => return Ok(true),
+        MenuAction::SendConversation(text) => {
             let commands = runtime
-                .send_conversation_text(CLI_SURFACE_ID, text.trim())
+                .send_conversation_text(CLI_SURFACE_ID, &text)
                 .await
                 .context("failed to send conversation text")?;
-            println!("{}", serde_json::to_string_pretty(&commands)?);
-            Ok(())
+            record_commands(command_history, &commands, *output_mode)?;
         }
-        CliMode::Snapshot => {
-            println!("{}", serde_json::to_string_pretty(&runtime.snapshot()?)?);
-            Ok(())
+        MenuAction::SendPoke {
+            actor_id,
+            hit_zone_id,
+            hit_zone_label,
+        } => {
+            let commands = runtime
+                .send_avatar_gesture_poke(
+                    CLI_SURFACE_ID,
+                    AvatarGesturePoke {
+                        actor_id,
+                        hit_zone_id,
+                        hit_zone_label,
+                        hit_surface: Some("unknown".to_string()),
+                        hit_bone: None,
+                        input: AvatarGestureInput {
+                            kind: "cli".to_string(),
+                            button: "none".to_string(),
+                        },
+                        screen: AvatarGestureScreen { x: 0.0, y: 0.0 },
+                    },
+                )
+                .await
+                .context("failed to send avatar gesture poke")?;
+            record_commands(command_history, &commands, *output_mode)?;
         }
-        CliMode::ExportEvents(path) => {
+        MenuAction::SendGrab { actor_id } => {
+            let commands = runtime
+                .send_avatar_gesture_grab(CLI_SURFACE_ID, &actor_id)
+                .await
+                .context("failed to send avatar gesture grab")?;
+            record_commands(command_history, &commands, *output_mode)?;
+        }
+        MenuAction::SendDrop {
+            actor_id,
+            moved_distance,
+        } => {
+            let commands = runtime
+                .send_avatar_gesture_drop(CLI_SURFACE_ID, &actor_id, moved_distance)
+                .await
+                .context("failed to send avatar gesture drop")?;
+            record_commands(command_history, &commands, *output_mode)?;
+        }
+        MenuAction::ShowSnapshot => print_snapshot(&runtime.snapshot()?, *output_mode)?,
+        MenuAction::ShowHistory => print_commands(command_history, *output_mode)?,
+        MenuAction::ShowWorldPackStatus => {
+            print_world_pack_status(&runtime.world_pack_status(), *output_mode)?;
+        }
+        MenuAction::ShowPaths => print_paths(runtime.paths(), *output_mode)?,
+        MenuAction::ExportEventLog(path) => {
+            let path = PathBuf::from(path);
             let exported = runtime
                 .export_event_log_jsonl(&path)
                 .context("failed to export event log")?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "exported": exported,
-                    "path": path.display().to_string()
+            print_exported_event_log(exported, &path, *output_mode)?;
+        }
+        MenuAction::ToggleOutputMode => {
+            *output_mode = output_mode.toggled();
+            print_output_mode(*output_mode)?;
+        }
+        MenuAction::SelectWorldPack(path) => {
+            let new_runtime = LocalYuukeiRuntime::select_world_pack_directory(PathBuf::from(path))
+                .await
+                .context("failed to select World Pack")?;
+            replace_runtime(
+                runtime,
+                attach_runtime(new_runtime).await?,
+                presence_loop,
+                presence_enabled,
+            );
+            command_history.clear();
+            print_world_pack_status(&runtime.world_pack_status(), *output_mode)?;
+        }
+        MenuAction::ResetWorldPack => {
+            let new_runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
+                .await
+                .context("failed to reset World Pack")?;
+            replace_runtime(
+                runtime,
+                attach_runtime(new_runtime).await?,
+                presence_loop,
+                presence_enabled,
+            );
+            command_history.clear();
+            print_world_pack_status(&runtime.world_pack_status(), *output_mode)?;
+        }
+        MenuAction::InstallExtension(path) => {
+            LocalYuukeiRuntime::install_extension_directory(PathBuf::from(path))
+                .context("failed to install Extension")?;
+            replace_runtime(
+                runtime,
+                open_attached_default().await?,
+                presence_loop,
+                presence_enabled,
+            );
+            command_history.clear();
+            print_extensions(*output_mode)?;
+        }
+        MenuAction::SetExtensionEnabled {
+            extension_id,
+            enabled,
+        } => {
+            LocalYuukeiRuntime::set_extension_enabled(&extension_id, enabled)
+                .with_context(|| format!("failed to update Extension {extension_id}"))?;
+            replace_runtime(
+                runtime,
+                open_attached_default().await?,
+                presence_loop,
+                presence_enabled,
+            );
+            command_history.clear();
+            print_extensions(*output_mode)?;
+        }
+    }
+    Ok(false)
+}
+
+fn replace_runtime(
+    runtime: &mut LocalYuukeiRuntime,
+    new_runtime: LocalYuukeiRuntime,
+    presence_loop: &mut Option<JoinHandle<()>>,
+    presence_enabled: bool,
+) {
+    if let Some(handle) = presence_loop.take() {
+        handle.abort();
+    }
+    if presence_enabled {
+        *presence_loop = Some(new_runtime.spawn_presence_loop());
+    }
+    *runtime = new_runtime;
+}
+
+fn current_menu_data(runtime: &LocalYuukeiRuntime) -> Result<MenuData> {
+    let ActorSurfaceAssetCatalog { actors, .. } = runtime.actor_surface_assets();
+    let actors = actors
+        .into_iter()
+        .map(|actor| MenuActor {
+            id: actor.actor_id,
+            display_name: actor.display_name,
+            hit_zones: actor
+                .renderer
+                .map(|renderer| {
+                    renderer
+                        .hit_zones
+                        .into_iter()
+                        .map(|hit_zone| MenuHitZone {
+                            id: hit_zone.id,
+                            label: hit_zone.label,
+                        })
+                        .collect()
                 })
-            );
-            Ok(())
-        }
-        CliMode::SelectWorldPack(_) | CliMode::ResetWorldPack => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "snapshot": runtime.snapshot()?,
-                    "worldPackStatus": runtime.world_pack_status()
-                }))?
-            );
-            Ok(())
-        }
-        CliMode::InstallExtension(_) => unreachable!("handled before runtime startup"),
-        CliMode::Help => unreachable!("handled before runtime startup"),
-    }
+                .unwrap_or_default(),
+        })
+        .collect();
+    let extensions = LocalYuukeiRuntime::extension_settings_state()?
+        .installed
+        .into_iter()
+        .map(|extension| MenuExtension {
+            id: extension.extension_id,
+            display_name: extension.display_name,
+            enabled: extension.enabled,
+        })
+        .collect();
+    Ok(MenuData { actors, extensions })
 }
 
-fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliMode> {
-    let args = args.into_iter().collect::<Vec<_>>();
-    if args.is_empty() {
-        return Ok(CliMode::Wizard);
+fn print_menu(state: &MenuState, data: &MenuData) {
+    for line in menu_lines(state, data) {
+        eprintln!("{line}");
     }
-
-    match args[0].as_str() {
-        "--say" => {
-            let Some(text) = args.get(1) else {
-                bail!("missing text after --say");
-            };
-            Ok(CliMode::Say(text.clone()))
-        }
-        "--snapshot" => Ok(CliMode::Snapshot),
-        "--export-events" => {
-            let Some(path) = args.get(1) else {
-                bail!("missing path after --export-events");
-            };
-            Ok(CliMode::ExportEvents(PathBuf::from(path)))
-        }
-        "--world-pack" => {
-            let Some(path) = args.get(1) else {
-                bail!("missing path after --world-pack");
-            };
-            Ok(CliMode::SelectWorldPack(PathBuf::from(path)))
-        }
-        "--reset-world-pack" => Ok(CliMode::ResetWorldPack),
-        "--install-extension" => {
-            let Some(path) = args.get(1) else {
-                bail!("missing directory after --install-extension");
-            };
-            Ok(CliMode::InstallExtension(PathBuf::from(path)))
-        }
-        "-h" | "--help" => Ok(CliMode::Help),
-        other => bail!("unknown argument: {other}"),
-    }
+    eprint!("> ");
+    let _ = io::stderr().flush();
 }
 
-fn install_extension(path: &PathBuf) -> Result<()> {
-    let state = LocalYuukeiRuntime::install_extension_directory(path)
-        .with_context(|| format!("failed to install Extension from {}", path.display()))?;
-    let installed = most_recent_installed_extension(&state.installed)
-        .context("Extension was installed, but no installed entry was returned")?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "extensionId": installed.extension_id,
-            "displayName": installed.display_name,
-            "enabled": installed.enabled,
-            "installedPath": installed.installed_path.display().to_string()
-        }))?
-    );
+fn record_commands(
+    command_history: &mut Vec<RuntimeCommand>,
+    commands: &[RuntimeCommand],
+    output_mode: OutputMode,
+) -> Result<()> {
+    command_history.extend(commands.iter().cloned());
+    print_commands(commands, output_mode)
+}
+
+fn print_commands(commands: &[RuntimeCommand], output_mode: OutputMode) -> Result<()> {
+    if commands.is_empty() {
+        if output_mode == OutputMode::Human {
+            println!("コマンドは発行されませんでした。");
+        }
+        return Ok(());
+    }
+    match output_mode {
+        OutputMode::Human => {
+            for command in commands {
+                println!("{}", command_label(command));
+                if command.kind == "dialogue.say" {
+                    if let Some(text) = command.payload.get("text").and_then(|value| value.as_str())
+                    {
+                        println!("  \"{text}\"");
+                    }
+                }
+            }
+        }
+        OutputMode::Jsonl => {
+            for command in commands {
+                println!("{}", serde_json::to_string(command)?);
+            }
+        }
+    }
     Ok(())
 }
 
-fn most_recent_installed_extension(
-    installed: &[InstalledExtension],
-) -> Option<&InstalledExtension> {
-    installed.iter().max_by(|a, b| {
-        a.updated_at
-            .cmp(&b.updated_at)
-            .then_with(|| a.extension_id.cmp(&b.extension_id))
-    })
+fn print_snapshot(snapshot: &ResidentSnapshot, output_mode: OutputMode) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => print_snapshot_summary(snapshot),
+        OutputMode::Jsonl => println!("{}", serde_json::to_string(snapshot)?),
+    }
+    Ok(())
 }
 
-async fn run_wizard(mut runtime: LocalYuukeiRuntime, snapshot: ResidentSnapshot) -> Result<()> {
-    let theme = ColorfulTheme::default();
-    let mut command_history: Vec<RuntimeCommand> = Vec::new();
-    let mut presence_loop = runtime.spawn_presence_loop();
+fn print_world_pack_status(
+    status: &WorldPackSelectionState,
+    output_mode: OutputMode,
+) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => print_world_pack_status_summary(status),
+        OutputMode::Jsonl => println!("{}", serde_json::to_string(status)?),
+    }
+    Ok(())
+}
 
-    println!("Yuukei CLI Surface");
-    println!("Surface: {CLI_SURFACE_ID}");
-    print_paths(runtime.paths());
-    print_world_pack_status(&runtime.world_pack_status());
-    print_snapshot_summary(&snapshot);
+fn print_paths(paths: &RuntimePaths, output_mode: OutputMode) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => {
+            println!("Event log: {}", paths.event_log_path.display());
+            println!("App log: {}", paths.app_log_path.display());
+            println!("World root: {}", paths.world_root.display());
+            println!("Extension root: {}", paths.extension_root.display());
+        }
+        OutputMode::Jsonl => println!(
+            "{}",
+            serde_json::json!({
+                "eventLogPath": paths.event_log_path,
+                "appLogPath": paths.app_log_path,
+                "worldRoot": paths.world_root,
+                "extensionRoot": paths.extension_root,
+            })
+        ),
+    }
+    Ok(())
+}
 
-    loop {
-        let action = select_action(&theme)?;
-        match action {
-            WizardAction::Talk => {
-                let text = Input::<String>::with_theme(&theme)
-                    .with_prompt("セリフを入力")
-                    .allow_empty(false)
-                    .interact_text()?;
-                let commands = runtime
-                    .send_conversation_text(CLI_SURFACE_ID, text.trim())
-                    .await
-                    .context("failed to send conversation text")?;
-                print_commands(&commands);
-                command_history.splice(0..0, commands);
-            }
-            WizardAction::Snapshot => {
-                let snapshot = runtime.snapshot()?;
-                print_snapshot_summary(&snapshot);
-            }
-            WizardAction::CommandHistory => {
-                show_command_history_page(&theme, &command_history)?;
-            }
-            WizardAction::ExportEvents => {
-                let default_path = runtime.paths().data_dir.join("events-export.jsonl");
-                let path = Input::<String>::with_theme(&theme)
-                    .with_prompt("書き出し先")
-                    .default(default_path.display().to_string())
-                    .interact_text()?;
-                let exported = runtime.export_event_log_jsonl(PathBuf::from(path.trim()))?;
-                println!("{exported} records exported.");
-            }
-            WizardAction::Paths => {
-                print_paths(runtime.paths());
-                print_world_pack_status(&runtime.world_pack_status());
-            }
-            WizardAction::SelectWorldPack => {
-                let path = Input::<String>::with_theme(&theme)
-                    .with_prompt("World Pack ディレクトリ")
-                    .allow_empty(false)
-                    .interact_text()?;
-                runtime =
-                    LocalYuukeiRuntime::select_world_pack_directory(PathBuf::from(path.trim()))
-                        .await
-                        .context("failed to select World Pack")?;
-                runtime
-                    .attach_surface(cli_surface_session(runtime.device_id()))
-                    .await?;
-                runtime.emit_app_startup().await?;
-                let snapshot = runtime.snapshot()?;
-                presence_loop.abort();
-                presence_loop = runtime.spawn_presence_loop();
-                command_history.clear();
-                print_world_pack_status(&runtime.world_pack_status());
-                print_snapshot_summary(&snapshot);
-            }
-            WizardAction::ResetWorldPack => {
-                runtime = LocalYuukeiRuntime::reset_world_pack_to_default()
-                    .await
-                    .context("failed to reset World Pack")?;
-                runtime
-                    .attach_surface(cli_surface_session(runtime.device_id()))
-                    .await?;
-                runtime.emit_app_startup().await?;
-                let snapshot = runtime.snapshot()?;
-                presence_loop.abort();
-                presence_loop = runtime.spawn_presence_loop();
-                command_history.clear();
-                print_world_pack_status(&runtime.world_pack_status());
-                print_snapshot_summary(&snapshot);
-            }
-            WizardAction::Quit => {
-                presence_loop.abort();
-                println!("CLI Surface を終了します。");
-                return Ok(());
+fn print_exported_event_log(
+    exported: usize,
+    path: &PathBuf,
+    output_mode: OutputMode,
+) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => println!("{exported} records exported to {}.", path.display()),
+        OutputMode::Jsonl => println!(
+            "{}",
+            serde_json::json!({ "exported": exported, "path": path })
+        ),
+    }
+    Ok(())
+}
+
+fn print_extensions(output_mode: OutputMode) -> Result<()> {
+    let extensions = LocalYuukeiRuntime::extension_settings_state()?;
+    match output_mode {
+        OutputMode::Human => {
+            for extension in extensions.installed {
+                let enabled = if extension.enabled {
+                    "有効"
+                } else {
+                    "無効"
+                };
+                println!("{} ({})", extension.display_name, enabled);
             }
         }
+        OutputMode::Jsonl => println!("{}", serde_json::to_string(&extensions)?),
     }
+    Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum WizardAction {
-    Talk,
-    Snapshot,
-    CommandHistory,
-    ExportEvents,
-    Paths,
-    SelectWorldPack,
-    ResetWorldPack,
-    Quit,
-}
-
-fn select_action(theme: &ColorfulTheme) -> Result<WizardAction> {
-    let actions = [
-        ("話しかける", WizardAction::Talk),
-        ("状態を見る", WizardAction::Snapshot),
-        ("コマンド履歴を見る", WizardAction::CommandHistory),
-        ("イベントログを書き出す", WizardAction::ExportEvents),
-        ("ログファイルの場所を見る", WizardAction::Paths),
-        ("World Packを選ぶ", WizardAction::SelectWorldPack),
-        ("Default World Packに戻す", WizardAction::ResetWorldPack),
-        ("終了", WizardAction::Quit),
-    ];
-    let labels = actions.iter().map(|(label, _)| *label).collect::<Vec<_>>();
-    let selected = Select::with_theme(theme)
-        .with_prompt("実行する項目")
-        .items(&labels)
-        .default(0)
-        .interact()?;
-    Ok(actions[selected].1)
-}
-
-fn show_command_history_page(theme: &ColorfulTheme, commands: &[RuntimeCommand]) -> Result<()> {
-    if commands.is_empty() {
-        println!("まだコマンドはありません。");
-        return Ok(());
+fn print_output_mode(output_mode: OutputMode) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => println!("出力モード: {}", output_mode.name()),
+        OutputMode::Jsonl => println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "outputMode": output_mode.name() }))?
+        ),
     }
-
-    let mut labels = commands.iter().map(command_label).collect::<Vec<_>>();
-    labels.push("戻る".to_string());
-
-    loop {
-        let selected = Select::with_theme(theme)
-            .with_prompt("詳細を見るコマンド")
-            .items(&labels)
-            .default(0)
-            .interact()?;
-        if selected == commands.len() {
-            return Ok(());
-        }
-        println!("{}", serde_json::to_string_pretty(&commands[selected])?);
-    }
-}
-
-fn print_paths(paths: &RuntimePaths) {
-    println!("Event log: {}", paths.event_log_path.display());
-    println!("App log: {}", paths.app_log_path.display());
-    println!("World root: {}", paths.world_root.display());
-    println!("Extension root: {}", paths.extension_root.display());
-}
-
-fn print_world_pack_status(status: &WorldPackSelectionState) {
-    println!(
-        "World Pack: {} / install: {} / configured: {}",
-        status.active_install.world_pack_id,
-        status.running_install_id,
-        status.configured_install_id
-    );
-    if status.fallback_active {
-        println!(
-            "World Pack fallback: {}",
-            status.last_load_error.as_deref().unwrap_or("unknown error")
-        );
-    }
-    let diagnostics = &status.daihon_diagnostics;
-    if diagnostics.is_empty() {
-        return;
-    }
-    println!("Daihon errors: {}", diagnostics.len());
-    for diagnostic in diagnostics.iter().take(4) {
-        println!(
-            "  - {} / {} / {}",
-            diagnostic.code,
-            diagnostic.script_path.as_deref().unwrap_or("unknown"),
-            diagnostic.message
-        );
-        if let (Some(line), Some(column)) = (diagnostic.line, diagnostic.column) {
-            println!("    at {line}:{column}");
-        }
-    }
-    if diagnostics.len() > 4 {
-        println!("  ... {} more", diagnostics.len() - 4);
-    }
+    Ok(())
 }
 
 fn print_snapshot_summary(snapshot: &ResidentSnapshot) {
@@ -366,18 +481,33 @@ fn print_snapshot_summary(snapshot: &ResidentSnapshot) {
     }
 }
 
-fn print_commands(commands: &[RuntimeCommand]) {
-    if commands.is_empty() {
-        println!("コマンドは発行されませんでした。");
+fn print_world_pack_status_summary(status: &WorldPackSelectionState) {
+    println!(
+        "World Pack: {} / install: {} / configured: {}",
+        status.active_install.world_pack_id,
+        status.running_install_id,
+        status.configured_install_id
+    );
+    if status.fallback_active {
+        println!(
+            "World Pack fallback: {}",
+            status.last_load_error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    if status.daihon_diagnostics.is_empty() {
         return;
     }
-    for command in commands {
-        println!("{}", command_label(command));
-        if command.kind == "dialogue.say" {
-            if let Some(text) = command.payload.get("text").and_then(|value| value.as_str()) {
-                println!("  \"{text}\"");
-            }
-        }
+    println!("Daihon errors: {}", status.daihon_diagnostics.len());
+    for diagnostic in status.daihon_diagnostics.iter().take(4) {
+        println!(
+            "  - {} / {} / {}",
+            diagnostic.code,
+            diagnostic.script_path.as_deref().unwrap_or("unknown"),
+            diagnostic.message
+        );
+    }
+    if status.daihon_diagnostics.len() > 4 {
+        println!("  ... {} more", status.daihon_diagnostics.len() - 4);
     }
 }
 
@@ -399,16 +529,10 @@ fn command_label(command: &RuntimeCommand) -> String {
     }
 }
 
-fn print_usage() {
-    println!(
-        "Usage:
-  yuukei-cli-surface
-  yuukei-cli-surface --say <text>
-  yuukei-cli-surface --snapshot
-  yuukei-cli-surface --export-events <path>
-  yuukei-cli-surface --world-pack <dir>
-  yuukei-cli-surface --reset-world-pack
-  yuukei-cli-surface --install-extension <dir>"
+fn print_usage(output: &mut impl Write) {
+    let _ = writeln!(
+        output,
+        "Usage:\n  yuukei-cli-surface\n  yuukei-cli-surface --help"
     );
 }
 
@@ -417,59 +541,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_args_starts_wizard() -> Result<()> {
-        assert_eq!(parse_args(Vec::new())?, CliMode::Wizard);
+    fn no_arguments_start_the_repl() -> Result<()> {
+        assert_eq!(parse_args(Vec::new())?, CliMode::Repl);
         Ok(())
     }
 
     #[test]
-    fn say_mode_captures_text() -> Result<()> {
-        assert_eq!(
-            parse_args(vec!["--say".to_string(), "hello".to_string()])?,
-            CliMode::Say("hello".to_string())
-        );
+    fn help_flags_are_the_only_accepted_flags() -> Result<()> {
+        assert_eq!(parse_args(vec!["-h".to_string()])?, CliMode::Help);
+        assert_eq!(parse_args(vec!["--help".to_string()])?, CliMode::Help);
+        assert!(parse_args(vec!["--say".to_string(), "hello".to_string()]).is_err());
         Ok(())
     }
 
     #[test]
-    fn export_mode_captures_path() -> Result<()> {
-        assert_eq!(
-            parse_args(vec![
-                "--export-events".to_string(),
-                "target/events.jsonl".to_string()
-            ])?,
-            CliMode::ExportEvents(PathBuf::from("target/events.jsonl"))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn world_pack_mode_captures_directory() -> Result<()> {
-        assert_eq!(
-            parse_args(vec!["--world-pack".to_string(), "packs/custom".to_string()])?,
-            CliMode::SelectWorldPack(PathBuf::from("packs/custom"))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn reset_world_pack_mode_is_supported() -> Result<()> {
-        assert_eq!(
-            parse_args(vec!["--reset-world-pack".to_string()])?,
-            CliMode::ResetWorldPack
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn install_extension_mode_captures_directory() -> Result<()> {
-        assert_eq!(
-            parse_args(vec![
-                "--install-extension".to_string(),
-                "packages/yuukei-intelligence".to_string()
-            ])?,
-            CliMode::InstallExtension(PathBuf::from("packages/yuukei-intelligence"))
-        );
-        Ok(())
+    fn jsonl_output_is_only_enabled_by_its_exact_environment_value() {
+        assert_eq!(OutputMode::Jsonl.name(), "jsonl");
+        assert_eq!(OutputMode::Human.toggled(), OutputMode::Jsonl);
     }
 }

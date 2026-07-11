@@ -366,7 +366,7 @@ CLI Surfaceの目的は、GUI(desktop Surface)と同じcanonical signalを同じ
 
 - 動的一覧(アクター、ヒットゾーン、拡張機能)は、固定項目の後にID辞書順で 1..N(拡張機能は 2..N+1)を割り当て、番号を安定させる。0 は戻る。
 - ジェスチャーはGUIと同じDevice Host入口(`send_avatar_gesture_poke` / `send_avatar_gesture_grab` / `send_avatar_gesture_drop`)を呼ぶ。ヒットゾーンはactive World Packのavatar定義(`hitZones`)から列挙する。
-- CLIが実ポインタを持たないため、pokeの付帯フィールドは固定値 `input: {kind: "cli", button: "none"}`、`screen: {x: 0, y: 0}` とする。これらはSurface付帯情報であり、Resident Homeの判定は `actorId` / `hitZoneId` で行われる。もし付帯フィールドの違いで挙動が変わる不具合があれば、それ自体がCoreのSurface依存として検出できる。
+- CLIが実ポインタを持たないため、pokeの付帯フィールドは固定値 `input: {kind: "cli", button: "none"}`、`screen: {x: 0, y: 0}`、`hitSurface: "unknown"` とする。`"unknown"` はdesktop Surfaceが素材判定に失敗したときのフォールバック値と同じであり、GUIからの信号と同じ形を保つ(台本は `入力#hitSurface` を常に参照できる)。`hitBone` は送らない(現状どのpackも参照していない)。
 
 例: default packで「yuukeiの頭を撫でる」は `printf '1\n2\n1\n0\n' | yuukei-cli-surface`(1 撫でる → アクター2 yuukei → ヒットゾーン1 head → 0 終了。アクター番号はID辞書順のため partner=1, yuukei=2)。
 
