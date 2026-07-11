@@ -39,17 +39,19 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 
 開発時の既定SurfaceはCLIである。
 
-- `pnpm dev`: CLI Surfaceをウィザード形式で起動する。
+- `pnpm dev`: CLI Surfaceを番号メニュー形式で起動する。
 - `pnpm dev:cli`: CLI Surfaceを起動する。
 - `pnpm dev:tauri`: Tauri版Desktop Surfaceを起動する。
 - `pnpm release`: リリース向けのTauri版Surfaceをビルドする。
 
-CLI Surfaceは手動確認だけでなく、機械的なテストに使える非対話モードを持つ。
+CLI Surfaceは番号入力の状態機械REPLであり、手動確認にもパイプ入力による機械的テストにも同じ経路で使える(仕様は [03-protocols.md](03-protocols.md) の「CLI Surfaceの番号入力状態機械」)。メニューとプロンプトはstderr、実行結果はstdoutに出る。GUIと同じcanonical signalを同じCore入口へ送るため、GUIで起きた不具合がCLIでも再現すればCore側、しなければSurface側と切り分けられる。
 
-- `cargo run -p yuukei-cli-surface -- --say "こんにちは"`: `conversation.text` を送り、発行された `RuntimeCommand` をJSONで出力する。
-- `cargo run -p yuukei-cli-surface -- --snapshot`: Surface attach後の `ResidentSnapshot` をJSONで出力する。
-- `cargo run -p yuukei-cli-surface -- --export-events target/events.jsonl`: canonical event logをJSONLで書き出す。
-- `cargo run -p yuukei-cli-surface -- --install-extension packages/yuukei-intelligence`: ローカルExtensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
+- `printf '4\nこんにちは\n0\n' | cargo run -p yuukei-cli-surface`: `conversation.text` を送り、発行された `RuntimeCommand` を出力する。
+- `printf '1\n2\n1\n0\n' | cargo run -p yuukei-cli-surface`: yuukeiの頭を撫でる(`avatar.gesture.poke`。アクターとヒットゾーンの番号はID辞書順)。
+- `printf '5\n0\n' | cargo run -p yuukei-cli-surface`: `ResidentSnapshot` を出力する。
+- `printf '9\n1\ntarget/events.jsonl\n0\n' | cargo run -p yuukei-cli-surface`: canonical event logをJSONLで書き出す。
+- `printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface`: ローカルExtensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
+- `YUUKEI_CLI_OUTPUT=jsonl` を付けるとRuntimeCommandを1行1JSONで出力する。presence loop(生活時計)は既定で起動せず、`YUUKEI_CLI_PRESENCE=1` で有効化する。
 
 アプリ動作ログは `YUUKEI_DATA_DIR` が指定されていればその中、未指定ならOSの一時ディレクトリ配下の `yuukei-v2/app-activity.jsonl` に保存する。canonical event logは同じデータディレクトリの `events.sqlite3` に保存する。
 
@@ -110,7 +112,7 @@ Extensionは信頼したローカルコードとして実行する。YuukeiはCo
 
 ### Official Default Extension: yuukei-intelligence
 
-`packages/yuukei-intelligence` は `dialogue.generate` と `dialogue.interpret` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案の生成と、Daihon scene内の曖昧な入力の選択肢判定を行う。`cargo run -p yuukei-cli-surface -- --install-extension packages/yuukei-intelligence` でこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
+`packages/yuukei-intelligence` は `dialogue.generate` と `dialogue.interpret` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案の生成と、Daihon scene内の曖昧な入力の選択肢判定を行う。`printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface` でこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
 
 LM StudioなどのOpenAI互換APIを使う場合は、ローカルサーバーを `http://127.0.0.1:1234/v1` で起動し、必要に応じて `OPENAI_COMPATIBLE_MODEL` またはmanifest内の `config.openaiCompatible.model` を設定する。ChatGPT互換の別endpointを使う場合も `openai-compatible` providerの `baseUrl`、`apiKey`、`model` を差し替えるだけでよい。
 
@@ -119,19 +121,21 @@ Geminiを使う場合は、`YUUKEI_INTELLIGENCE_PROVIDER=gemini` と `GEMINI_API
 Extensionをインストールした同じ `YUUKEI_DATA_DIR` で、以下のようにCLIから `conversation.text` を送ると、World Packの `llmDelegation` とDaihon不一致条件を満たした場合だけ `dialogue.generate` が呼ばれる。
 
 ```sh
-YUUKEI_DATA_DIR=/path/to/yuukei-data \
-OPENAI_COMPATIBLE_MODEL=local-model \
-cargo run -p yuukei-cli-surface -- --say "こんにちは"
+printf '4\nこんにちは\n0\n' | \
+  YUUKEI_DATA_DIR=/path/to/yuukei-data \
+  OPENAI_COMPATIBLE_MODEL=local-model \
+  cargo run -p yuukei-cli-surface
 ```
 
-`dialogue.interpret` の手動確認には `packs/demo-interpret` を使える。このPackはCLI起動時に「今日はお出かけの日だよね！」と聞き、同じ `--say` 実行内の会話入力を `はい/いいえ/不明` に解釈してDaihonへ戻す。
+`dialogue.interpret` の手動確認には `packs/demo-interpret` を使える。このPackはCLI起動時に「今日はお出かけの日だよね！」と聞き、同じREPLセッション内の会話入力を `はい/いいえ/不明` に解釈してDaihonへ戻す。
 
 ```sh
 export YUUKEI_DATA_DIR=/tmp/yuukei-interpret-demo
-cargo run -p yuukei-cli-surface -- --install-extension packages/yuukei-intelligence
-cargo run -p yuukei-cli-surface -- --world-pack packs/demo-interpret
-OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1 \
-OPENAI_COMPATIBLE_MODEL=local-model \
-cargo run -p yuukei-cli-surface -- --say "あ〜うん。いやちょっと忙しくて..."
-cargo run -p yuukei-cli-surface -- --reset-world-pack
+printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface
+printf '7\n1\npacks/demo-interpret\n0\n' | cargo run -p yuukei-cli-surface
+printf '4\nあ〜うん。いやちょっと忙しくて...\n0\n' | \
+  OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1 \
+  OPENAI_COMPATIBLE_MODEL=local-model \
+  cargo run -p yuukei-cli-surface
+printf '7\n2\n0\n0\n' | cargo run -p yuukei-cli-surface
 ```

@@ -44,7 +44,7 @@
 - **LM Studio**: `192.168.0.126:1234`(gemma-4-e4b / 26b)。`response_format: json_object`は拒否される。`json_schema`強制はローカルモデルの出力を壊すので`responseFormat: "none"`+頑健パースが既定。ローカル26Bは45〜90秒かかる(timeout: fetch 120秒/プロセス150秒)
 - どちらも起動していない可能性がある。E2E前に疎通確認し、落ちていたらユーザーに起動を頼む
 - ビルド: `cargo build` / `cargo test`、`pnpm install` / `pnpm -r test`
-- Extensionのソース変更は毎回 `--install-extension` での再インストール(コピー式)が必要
+- Extensionのソース変更は毎回再インストール(コピー式)が必要: `printf '8\n1\n<dir>\n0\n' | yuukei-cli-surface`(CLIメニュー8→1)
 
 ## Codex委任の要点(詳細と仕様書テンプレートは `/codex` スキル)
 

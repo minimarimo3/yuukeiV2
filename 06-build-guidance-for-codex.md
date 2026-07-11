@@ -51,7 +51,7 @@ Resident HomeをTauri非依存で作る。
 
 VRMやLive2Dは後でよい。最初はHTMLや簡単なcanvasで、Surfaceが人格を持たずcommandを描画するだけであることを確認する。
 
-開発時はCLI Surfaceを既定にしてよい。上下キーで操作するウィザードは動線確認に使い、`--say` などの非対話モードはプログラムやLLMによる機械的テストに使う。リリース向けの既定SurfaceはTauri版Desktop Surfaceにする。
+開発時はCLI Surfaceを既定にしてよい。CLIは番号入力の状態機械REPL(03の「CLI Surfaceの番号入力状態機械」が仕様の正)で、手動確認にもパイプ入力(例: `printf '1\n2\n1\n0\n' | yuukei-cli-surface`)による機械的テストにも同じ経路を使う。リリース向けの既定SurfaceはTauri版Desktop Surfaceにする。
 
 ### 4. Device Host
 
