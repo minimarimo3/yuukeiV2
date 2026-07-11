@@ -33,6 +33,7 @@ import {
   type HitSurface,
   type ResolvedActorHitZone
 } from "./actorHitZones";
+import { beginDragRequested, idlePointerGesture, releasePointerGesture, windowDragBegan, type ActorHit, type PointerGestureState, type SemanticActorHit } from "./pointerGesture";
 
 type ActorAppProps = {
   actorId?: string | null;
@@ -57,9 +58,7 @@ type VrmStageProps = {
   onStageAnchorReport(actorId: string, anchor: StageAnchor): Promise<void>;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
-  onAvatarGestureGrab(actorId: string): Promise<void>;
-  onAvatarGestureMove(actorId: string, dx: number, dy: number): Promise<void>;
-  onAvatarGestureDrop(actorId: string): Promise<void>;
+  client: Pick<YuukeiClient, "beginActorWindowDrag" | "moveActorWindowDrag" | "finishActorWindowDrag" | "cancelActorWindowDrag" | "notifyAvatarGestureGrab" | "notifyAvatarGestureDrop">;
 };
 
 export const AVATAR_GRAB_HOLD_MS = 500;
@@ -67,10 +66,6 @@ export const AVATAR_GRAB_MOVE_THRESHOLD_PX = 6;
 
 export function shouldStartAvatarGrab(elapsedMs: number, maxDistancePx: number): boolean {
   return elapsedMs >= AVATAR_GRAB_HOLD_MS && maxDistancePx <= AVATAR_GRAB_MOVE_THRESHOLD_PX;
-}
-
-export function shouldSendAvatarPokeOnRelease(grabbed: boolean): boolean {
-  return !grabbed;
 }
 
 export function ActorApp({
@@ -136,24 +131,6 @@ export function ActorApp({
     },
     [client]
   );
-  const beginAvatarDrag = useCallback(
-    async (draggedActorId: string) => {
-      await client.beginAvatarDrag(draggedActorId);
-    },
-    [client]
-  );
-  const finishAvatarDrag = useCallback(
-    async (draggedActorId: string) => {
-      await client.finishAvatarDrag(draggedActorId);
-    },
-    [client]
-  );
-  const moveAvatarDrag = useCallback(
-    async (draggedActorId: string, dx: number, dy: number) => {
-      await client.moveAvatarDrag(draggedActorId, dx, dy);
-    },
-    [client]
-  );
   const reportStageAnchor = useCallback(
     async (reportedActorId: string, anchor: StageAnchor) => {
       await client.reportActorStageAnchor(reportedActorId, anchor);
@@ -169,9 +146,7 @@ export function ActorApp({
         onStageAnchorReport={reportStageAnchor}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
-        onAvatarGestureGrab={beginAvatarDrag}
-        onAvatarGestureMove={moveAvatarDrag}
-        onAvatarGestureDrop={finishAvatarDrag}
+        client={client}
       />
       {visibleStatus ? (
         <p className="actor-status" data-actor-solid="true" role="alert">
@@ -202,9 +177,7 @@ function VrmStage({
   onStageAnchorReport,
   onHitTestChange,
   onAvatarGesturePoke,
-  onAvatarGestureGrab,
-  onAvatarGestureMove,
-  onAvatarGestureDrop
+  client
 }: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -227,24 +200,11 @@ function VrmStage({
     let hitTestTimer = 0;
     let lastPassthrough: boolean | null = null;
     let lastAnchorSignature = "";
-    let activePointer: {
-      pointerId: number;
-      startX: number;
-      startY: number;
-      maxDistancePx: number;
-      poke: AvatarGesturePokeInput;
-      grabbed: boolean;
-      holdTimer: number;
-      startScreenX: number;
-      startScreenY: number;
-      dx: number;
-      dy: number;
-      dragStarted: boolean;
-      finishRequested: boolean;
-      finishSent: boolean;
-      moveFrame: number;
-      moveQueue: Promise<void>;
-    } | null = null;
+    let gesture: PointerGestureState = idlePointerGesture();
+    let holdTimer = 0;
+    let moveFrame = 0;
+    let moveQueue = Promise.resolve();
+    let latestScreen: { x: number; y: number } | null = null;
 
     const actorRoot = new THREE.Group();
     const scene = new THREE.Scene();
@@ -367,149 +327,105 @@ function VrmStage({
     }
 
     function handlePointerDown(event: PointerEvent) {
-      if (event.button !== 0 || activePointer) return;
-      const hit = semanticHitZoneAtPointer(
+      if (event.button !== 0 || gesture.type !== "idle") return;
+      const actorHit = actorAtPointer(
         event,
         renderer.domElement,
         camera,
         loadedActors,
         semanticRaycaster
       );
-      if (!hit) return;
+      if (!actorHit) return;
+      const hit = semanticHitAtPointer(event, renderer.domElement, camera, loadedActors, semanticRaycaster);
       event.preventDefault();
-      const poke = buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
+      const semanticHit: SemanticActorHit | null = hit ? { actorId: hit.actorId, poke: buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
           hitBone: hit.hitBone,
           hitSurface: hit.hitSurface
-        });
-      const pointer = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        maxDistancePx: 0,
-        poke,
-        grabbed: false,
-        holdTimer: 0,
-        startScreenX: event.screenX,
-        startScreenY: event.screenY,
-        dx: 0,
-        dy: 0,
-        dragStarted: false,
-        finishRequested: false,
-        finishSent: false,
-        moveFrame: 0,
-        moveQueue: Promise.resolve()
-      };
-      activePointer = pointer;
+        }) } : null;
+      gesture = { type: "pressing", pointerId: event.pointerId, actorHit, semanticHit, startClient: { x: event.clientX, y: event.clientY }, startScreen: { x: event.screenX, y: event.screenY }, maxDistancePx: 0 };
+      latestScreen = { x: event.screenX, y: event.screenY };
       checkedCanvas.setPointerCapture(event.pointerId);
-      pointer.holdTimer = window.setTimeout(() => {
-        if (activePointer !== pointer) return;
-        if (!shouldStartAvatarGrab(AVATAR_GRAB_HOLD_MS, pointer.maxDistancePx)) return;
-        pointer.grabbed = true;
+      holdTimer = window.setTimeout(() => {
+        if (gesture.type !== "pressing" || !shouldStartAvatarGrab(AVATAR_GRAB_HOLD_MS, gesture.maxDistancePx)) return;
+        const transition = beginDragRequested(gesture);
+        gesture = transition.state;
+        const actorId = gesture.type === "startingDrag" ? gesture.actorId : actorHit.actorId;
         void (async () => {
           try {
-            await onAvatarGestureGrab(pointer.poke.actorId);
-            pointer.dragStarted = true;
-            if (pointer.finishRequested) {
-              enqueuePointerDragMove(pointer);
-              finishPointerDrag(pointer);
-            } else {
-              schedulePointerDragMove(pointer);
-            }
+            const started = await client.beginActorWindowDrag(actorId);
+            void client.notifyAvatarGestureGrab(actorId).catch((error) => console.warn("Failed to notify avatar grab", error));
+            const began = windowDragBegan(gesture, started.sessionId);
+            gesture = began.state;
+            await runEffects(began.effects);
           } catch (error) {
             console.warn("Failed to drag avatar window", error);
-            if (activePointer === pointer) activePointer = null;
+            gesture = idlePointerGesture();
           }
         })();
       }, AVATAR_GRAB_HOLD_MS);
     }
 
-    function schedulePointerDragMove(pointer: NonNullable<typeof activePointer>) {
-      if (!pointer.dragStarted || pointer.finishRequested || pointer.moveFrame) return;
-      pointer.moveFrame = window.requestAnimationFrame(() => {
-        pointer.moveFrame = 0;
-        if (!pointer.dragStarted || pointer.finishRequested) return;
-        enqueuePointerDragMove(pointer);
+    function schedulePointerDragMove() {
+      if (gesture.type !== "dragging" || moveFrame) return;
+      moveFrame = window.requestAnimationFrame(() => {
+        moveFrame = 0;
+        if (gesture.type === "dragging") enqueuePointerDragMove(gesture);
       });
     }
 
-    function enqueuePointerDragMove(pointer: NonNullable<typeof activePointer>) {
-      const { actorId } = pointer.poke;
-      const { dx, dy } = pointer;
-      pointer.moveQueue = pointer.moveQueue.then(async () => {
-        await onAvatarGestureMove(actorId, dx, dy);
+    function enqueuePointerDragMove(state: Extract<PointerGestureState, { type: "dragging" }>) {
+      if (!latestScreen) return;
+      const dx = latestScreen.x - state.startScreen.x;
+      const dy = latestScreen.y - state.startScreen.y;
+      moveQueue = moveQueue.then(async () => {
+        await client.moveActorWindowDrag(state.actorId, state.sessionId, dx, dy);
       }).catch((error) => {
         console.warn("Failed to move avatar window", error);
       });
     }
 
-    function finishPointerDrag(pointer: NonNullable<typeof activePointer>) {
-      if (!pointer.dragStarted || pointer.finishSent) return;
-      pointer.finishSent = true;
-      if (pointer.moveFrame) {
-        window.cancelAnimationFrame(pointer.moveFrame);
-        pointer.moveFrame = 0;
+    async function runEffects(effects: ReturnType<typeof releasePointerGesture>["effects"]) {
+      for (const effect of effects) {
+        if (effect.type === "poke") await onAvatarGesturePoke(effect.poke);
+        if (effect.type === "finishWindowDrag") {
+          const finished = await moveQueue.then(() => client.finishActorWindowDrag(effect.actorId, effect.sessionId));
+          await client.notifyAvatarGestureDrop(finished.actorId, finished.movedDistance);
+          gesture = idlePointerGesture();
+        }
+        if (effect.type === "cancelWindowDrag") {
+          await moveQueue.then(() => client.cancelActorWindowDrag(effect.actorId, effect.sessionId));
+          gesture = idlePointerGesture();
+        }
       }
-      void pointer.moveQueue.then(async () => {
-        await onAvatarGestureDrop(pointer.poke.actorId);
-      }).catch((error) => {
-        console.warn("Failed to finish avatar drag", error);
-      });
     }
 
     function handlePointerMove(event: PointerEvent) {
-      const pointer = activePointer;
-      if (!pointer || pointer.pointerId !== event.pointerId) return;
-      if (pointer.grabbed) {
-        pointer.dx = event.screenX - pointer.startScreenX;
-        pointer.dy = event.screenY - pointer.startScreenY;
-        schedulePointerDragMove(pointer);
+      if (gesture.type === "idle" || !("pointerId" in gesture) || gesture.pointerId !== event.pointerId) return;
+      latestScreen = { x: event.screenX, y: event.screenY };
+      if (gesture.type === "dragging") {
+        schedulePointerDragMove();
         return;
       }
-      const distance = Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY);
-      pointer.maxDistancePx = Math.max(pointer.maxDistancePx, distance);
-      if (pointer.maxDistancePx > AVATAR_GRAB_MOVE_THRESHOLD_PX) {
-        window.clearTimeout(pointer.holdTimer);
+      if (gesture.type === "pressing") {
+        const distance = Math.hypot(event.clientX - gesture.startClient.x, event.clientY - gesture.startClient.y);
+        gesture = { ...gesture, maxDistancePx: Math.max(gesture.maxDistancePx, distance) };
+        if (gesture.maxDistancePx > AVATAR_GRAB_MOVE_THRESHOLD_PX) window.clearTimeout(holdTimer);
       }
     }
 
-    function handlePointerUp(event: PointerEvent) {
-      const pointer = activePointer;
-      if (!pointer || pointer.pointerId !== event.pointerId) return;
-      window.clearTimeout(pointer.holdTimer);
-      if (pointer.grabbed) {
-        pointer.dx = event.screenX - pointer.startScreenX;
-        pointer.dy = event.screenY - pointer.startScreenY;
-        if (pointer.dragStarted) enqueuePointerDragMove(pointer);
-      }
-      activePointer = null;
-      if (checkedCanvas.hasPointerCapture(pointer.pointerId)) {
-        checkedCanvas.releasePointerCapture(pointer.pointerId);
-      }
-      if (shouldSendAvatarPokeOnRelease(pointer.grabbed)) {
-        void onAvatarGesturePoke(pointer.poke).catch((error) => {
-          console.warn("Failed to send avatar gesture", error);
-        });
-      } else {
-        pointer.finishRequested = true;
-        finishPointerDrag(pointer);
-      }
+    function endPointer(event: PointerEvent, cancelled: boolean) {
+      if (gesture.type === "idle" || !("pointerId" in gesture) || gesture.pointerId !== event.pointerId) return;
+      window.clearTimeout(holdTimer);
+      latestScreen = { x: event.screenX, y: event.screenY };
+      if (gesture.type === "dragging") enqueuePointerDragMove(gesture);
+      const transition = releasePointerGesture(gesture, cancelled);
+      gesture = transition.state;
+      if (!cancelled && checkedCanvas.hasPointerCapture(event.pointerId)) checkedCanvas.releasePointerCapture(event.pointerId);
+      void runEffects(transition.effects).catch((error) => console.warn("Failed to end pointer gesture", error));
     }
 
-    function handlePointerCancel(event: PointerEvent) {
-      const pointer = activePointer;
-      if (!pointer || pointer.pointerId !== event.pointerId) return;
-      window.clearTimeout(pointer.holdTimer);
-      if (pointer.grabbed) {
-        pointer.dx = event.screenX - pointer.startScreenX;
-        pointer.dy = event.screenY - pointer.startScreenY;
-        if (pointer.dragStarted) enqueuePointerDragMove(pointer);
-      }
-      activePointer = null;
-      if (pointer.grabbed) {
-        pointer.finishRequested = true;
-        finishPointerDrag(pointer);
-      }
-    }
+    const handlePointerUp = (event: PointerEvent) => endPointer(event, false);
+    const handlePointerCancel = (event: PointerEvent) => endPointer(event, true);
 
     window.addEventListener("resize", resize);
     canvas.addEventListener("pointerdown", handlePointerDown);
@@ -532,12 +448,8 @@ function VrmStage({
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", handlePointerUp);
       canvas.removeEventListener("pointercancel", handlePointerCancel);
-      if (activePointer) {
-        window.clearTimeout(activePointer.holdTimer);
-        if (activePointer.moveFrame) {
-          window.cancelAnimationFrame(activePointer.moveFrame);
-        }
-      }
+      window.clearTimeout(holdTimer);
+      if (moveFrame) window.cancelAnimationFrame(moveFrame);
       window.cancelAnimationFrame(animationFrame);
       window.clearInterval(hitTestTimer);
       rendererRef.current = null;
@@ -549,9 +461,7 @@ function VrmStage({
     };
   }, [
     assets,
-    onAvatarGestureDrop,
-    onAvatarGestureGrab,
-    onAvatarGestureMove,
+    client,
     onAvatarGesturePoke,
     onHitTestChange,
     onStageAnchorReport
@@ -736,13 +646,13 @@ function reverseHumanoidBoneNodes(
   return byObject;
 }
 
-function semanticHitZoneAtPointer(
+function intersectionsAtPointer(
   event: PointerEvent,
   canvas: HTMLCanvasElement,
   camera: THREE.PerspectiveCamera,
   loadedActors: Map<string, LoadedActor>,
   raycaster: THREE.Raycaster
-): SemanticHitZoneResult | null {
+): THREE.Intersection[] {
   const rect = canvas.getBoundingClientRect();
   if (
     event.clientX < rect.left ||
@@ -750,7 +660,7 @@ function semanticHitZoneAtPointer(
     event.clientY < rect.top ||
     event.clientY > rect.bottom
   ) {
-    return null;
+    return [];
   }
 
   const pointer = new THREE.Vector2(
@@ -760,13 +670,24 @@ function semanticHitZoneAtPointer(
   raycaster.setFromCamera(pointer, camera);
 
   const actorScenes = [...loadedActors.values()].map((loaded) => loaded.vrm.scene);
-  for (const intersection of raycaster.intersectObjects(actorScenes, true)) {
+  return raycaster.intersectObjects(actorScenes, true);
+}
+
+function actorAtPointer(event: PointerEvent, canvas: HTMLCanvasElement, camera: THREE.PerspectiveCamera, loadedActors: Map<string, LoadedActor>, raycaster: THREE.Raycaster): ActorHit | null {
+  for (const intersection of intersectionsAtPointer(event, canvas, camera, loadedActors, raycaster)) {
+    const loaded = loadedActorForObject(intersection.object, loadedActors);
+    if (loaded) return { actorId: loaded.actorId };
+  }
+  return null;
+}
+
+function semanticHitAtPointer(event: PointerEvent, canvas: HTMLCanvasElement, camera: THREE.PerspectiveCamera, loadedActors: Map<string, LoadedActor>, raycaster: THREE.Raycaster): SemanticHitZoneResult | null {
+  for (const intersection of intersectionsAtPointer(event, canvas, camera, loadedActors, raycaster)) {
     const loaded = loadedActorForObject(intersection.object, loadedActors);
     if (!loaded) continue;
     const hit = semanticHitZoneForIntersection(loaded, intersection);
-    return hit ? { ...hit, actorId: loaded.actorId } : null;
+    if (hit) return { ...hit, actorId: loaded.actorId };
   }
-
   return null;
 }
 

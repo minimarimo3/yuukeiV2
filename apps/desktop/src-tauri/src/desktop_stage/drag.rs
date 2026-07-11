@@ -1,6 +1,7 @@
 pub(super) fn begin_actor_drag_in_state(
     state: &mut DesktopStageState,
     actor_id: &str,
+    session_id: &str,
     bounds: StageRect,
 ) -> Result<Option<StagePerchEnded>, String> {
     let actor = state
@@ -12,6 +13,7 @@ pub(super) fn begin_actor_drag_in_state(
     state.active_drags.insert(
         actor_id.to_string(),
         ActiveActorDrag {
+            session_id: session_id.to_string(),
             start_bounds: bounds,
         },
     );
@@ -25,15 +27,18 @@ pub(super) fn begin_actor_drag_in_state(
 pub(super) fn move_actor_drag_in_state(
     state: &mut DesktopStageState,
     actor_id: &str,
+    session_id: &str,
     dx: f64,
     dy: f64,
 ) -> Result<StageRect, String> {
-    let start_bounds = state
+    let active = state
         .active_drags
         .get(actor_id)
-        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?
-        .start_bounds
-        .clone();
+        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?;
+    if active.session_id != session_id {
+        return Err(format!("stale actor drag session: {actor_id}"));
+    }
+    let start_bounds = active.start_bounds.clone();
     let bounds = StageRect {
         x: start_bounds.x + dx,
         y: start_bounds.y + dy,
@@ -48,9 +53,28 @@ pub(super) fn move_actor_drag_in_state(
     actor.anchor = default_actor_anchor(&bounds);
     Ok(bounds)
 }
+
+pub(super) fn take_actor_drag_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    session_id: &str,
+) -> Result<ActiveActorDrag, String> {
+    let active = state
+        .active_drags
+        .get(actor_id)
+        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?;
+    if active.session_id != session_id {
+        return Err(format!("stale actor drag session: {actor_id}"));
+    }
+    state
+        .active_drags
+        .remove(actor_id)
+        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))
+}
 use super::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ActiveActorDrag {
+    pub(super) session_id: String,
     pub(super) start_bounds: StageRect,
 }

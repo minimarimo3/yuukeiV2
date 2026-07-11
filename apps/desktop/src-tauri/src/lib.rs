@@ -477,40 +477,26 @@ async fn send_avatar_gesture_poke(
 }
 
 #[tauri::command]
-async fn begin_avatar_drag(
+fn begin_actor_window_drag(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     actor_id: String,
-) -> Result<Vec<RuntimeCommand>, String> {
+) -> Result<desktop_stage::ActorWindowDragStarted, String> {
     if window.label() != desktop_stage::actor_window_label(&actor_id) {
         return Err("actor drag must originate from its own actor window".to_string());
     }
-    let ended = state.stage.begin_actor_drag(&app, &window, &actor_id)?;
-    let runtime = state.runtime.lock().await.clone();
-    let mut commands = runtime
-        .send_avatar_gesture_grab(TAURI_SURFACE_ID, &actor_id)
-        .await
-        .map_err(to_message)?;
-    if let Some(ended) = ended {
-        commands.extend(
-            runtime
-                .emit_stage_perch_ended(&ended.actor_id, &ended.window_key, ended.reason)
-                .await
-                .map_err(to_message)?,
-        );
-    }
-    let snapshot = runtime.snapshot().map_err(to_message)?;
-    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
-    Ok(commands)
+    let (started, _ended) = state.stage.begin_actor_drag(&app, &window, &actor_id)?;
+    Ok(started)
 }
 
 #[tauri::command]
-fn move_avatar_drag(
+fn move_actor_window_drag(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     actor_id: String,
+    session_id: String,
     dx: f64,
     dy: f64,
 ) -> Result<(), String> {
@@ -519,37 +505,78 @@ fn move_avatar_drag(
     }
     state
         .stage
-        .move_actor_drag(&app, &window, &actor_id, dx, dy)
+        .move_actor_drag(&app, &window, &actor_id, &session_id, dx, dy)
 }
 
 #[tauri::command]
-async fn finish_avatar_drag(
+fn finish_actor_window_drag(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     actor_id: String,
-) -> Result<Vec<RuntimeCommand>, String> {
+    session_id: String,
+) -> Result<desktop_stage::StageDragFinished, String> {
     if window.label() != desktop_stage::actor_window_label(&actor_id) {
         return Err("actor drag must finish in its own actor window".to_string());
     }
-    let finished = state.stage.finish_actor_drag(&app, &window, &actor_id)?;
+    let finished = state
+        .stage
+        .finish_actor_drag(&app, &window, &actor_id, &session_id)?;
     state
         .stage_settings
         .lock()
         .map_err(|_| "stage settings lock is poisoned".to_string())?
         .set_actor_anchor(finished.actor_id.clone(), finished.anchor)
         .map_err(to_message)?;
+    Ok(finished)
+}
+
+#[tauri::command]
+fn cancel_actor_window_drag(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    actor_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    if window.label() != desktop_stage::actor_window_label(&actor_id) {
+        return Err("actor drag must cancel in its own actor window".to_string());
+    }
+    state
+        .stage
+        .cancel_actor_drag(&app, &window, &actor_id, &session_id)
+}
+
+#[tauri::command]
+async fn notify_avatar_gesture_grab(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    actor_id: String,
+) -> Result<Vec<RuntimeCommand>, String> {
     let runtime = state.runtime.lock().await.clone();
     let commands = runtime
-        .send_avatar_gesture_drop(
-            TAURI_SURFACE_ID,
-            &finished.actor_id,
-            finished.moved_distance,
-        )
+        .send_avatar_gesture_grab(TAURI_SURFACE_ID, &actor_id)
         .await
         .map_err(to_message)?;
-    let snapshot = runtime.snapshot().map_err(to_message)?;
-    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
+    app.emit("yuukei-snapshot", runtime.snapshot().map_err(to_message)?)
+        .map_err(to_message)?;
+    Ok(commands)
+}
+
+#[tauri::command]
+async fn notify_avatar_gesture_drop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    actor_id: String,
+    moved_distance: u64,
+) -> Result<Vec<RuntimeCommand>, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let commands = runtime
+        .send_avatar_gesture_drop(TAURI_SURFACE_ID, &actor_id, moved_distance)
+        .await
+        .map_err(to_message)?;
+    app.emit("yuukei-snapshot", runtime.snapshot().map_err(to_message)?)
+        .map_err(to_message)?;
     Ok(commands)
 }
 
@@ -875,9 +902,12 @@ pub fn run() {
             send_conversation_text,
             send_conversation_choice,
             send_avatar_gesture_poke,
-            begin_avatar_drag,
-            move_avatar_drag,
-            finish_avatar_drag,
+            begin_actor_window_drag,
+            move_actor_window_drag,
+            finish_actor_window_drag,
+            cancel_actor_window_drag,
+            notify_avatar_gesture_grab,
+            notify_avatar_gesture_drop,
             select_world_pack_directory,
             inspect_world_pack_zip,
             import_world_pack_zip,

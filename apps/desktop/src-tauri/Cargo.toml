@@ -26,6 +26,7 @@ serde_json.workspace = true
 tauri = { version = "2.2.0", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2.2.0"
 tokio.workspace = true
+uuid.workspace = true
 yuukei-device-host = { path = "../../../crates/yuukei-device-host" }
 yuukei-protocol = { path = "../../../crates/yuukei-protocol" }
 yuukei-resident-home = { path = "../../../crates/yuukei-resident-home" }

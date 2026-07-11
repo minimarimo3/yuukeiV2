@@ -360,6 +360,9 @@ export type DesktopStageState = {
   bubbles: StageBubble[];
 };
 
+export type ActorWindowDragStarted = { sessionId: string };
+export type ActorWindowDragFinished = { actorId: string; movedDistance: number };
+
 export type YuukeiClient = {
   attachSurface(): Promise<ResidentSnapshot>;
   getSnapshot(): Promise<ResidentSnapshot>;
@@ -418,9 +421,12 @@ export type YuukeiClient = {
   sendAvatarGesturePoke(
     gesture: AvatarGesturePokeInput
   ): Promise<RuntimeCommand[]>;
-  beginAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
-  moveAvatarDrag(actorId: string, dx: number, dy: number): Promise<void>;
-  finishAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
+  beginActorWindowDrag(actorId: string): Promise<ActorWindowDragStarted>;
+  moveActorWindowDrag(actorId: string, sessionId: string, dx: number, dy: number): Promise<void>;
+  finishActorWindowDrag(actorId: string, sessionId: string): Promise<ActorWindowDragFinished>;
+  cancelActorWindowDrag(actorId: string, sessionId: string): Promise<void>;
+  notifyAvatarGestureGrab(actorId: string): Promise<RuntimeCommand[]>;
+  notifyAvatarGestureDrop(actorId: string, movedDistance: number): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openWorldPackZip(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
@@ -545,12 +551,18 @@ export const tauriYuukeiClient: YuukeiClient = {
     }),
   sendAvatarGesturePoke: (gesture: AvatarGesturePokeInput) =>
     invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
-  beginAvatarDrag: (actorId: string) =>
-    invoke<RuntimeCommand[]>("begin_avatar_drag", { actorId }),
-  moveAvatarDrag: (actorId: string, dx: number, dy: number) =>
-    invoke<void>("move_avatar_drag", { actorId, dx, dy }),
-  finishAvatarDrag: (actorId: string) =>
-    invoke<RuntimeCommand[]>("finish_avatar_drag", { actorId }),
+  beginActorWindowDrag: (actorId: string) =>
+    invoke<ActorWindowDragStarted>("begin_actor_window_drag", { actorId }),
+  moveActorWindowDrag: (actorId: string, sessionId: string, dx: number, dy: number) =>
+    invoke<void>("move_actor_window_drag", { actorId, sessionId, dx, dy }),
+  finishActorWindowDrag: (actorId: string, sessionId: string) =>
+    invoke<ActorWindowDragFinished>("finish_actor_window_drag", { actorId, sessionId }),
+  cancelActorWindowDrag: (actorId: string, sessionId: string) =>
+    invoke<void>("cancel_actor_window_drag", { actorId, sessionId }),
+  notifyAvatarGestureGrab: (actorId: string) =>
+    invoke<RuntimeCommand[]>("notify_avatar_gesture_grab", { actorId }),
+  notifyAvatarGestureDrop: (actorId: string, movedDistance: number) =>
+    invoke<RuntimeCommand[]>("notify_avatar_gesture_drop", { actorId, movedDistance }),
   openWorldPackDirectory: async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;

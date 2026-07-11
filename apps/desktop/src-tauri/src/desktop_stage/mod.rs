@@ -1,17 +1,36 @@
-use std::{collections::{BTreeMap, BTreeSet}, sync::RwLock};
-use serde::{Deserialize, Serialize}; use serde_json::Value;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
-use yuukei_device_host::{DesktopWindowFrame, DesktopWindowObservation, StageFootAnchor, DEFAULT_ACTOR_SCALE_PERCENT}; use yuukei_protocol::RuntimeCommand;
 use crate::DesktopActorSurfaceAssetCatalog;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::RwLock,
+};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
+use yuukei_device_host::{
+    DesktopWindowFrame, DesktopWindowObservation, StageFootAnchor, DEFAULT_ACTOR_SCALE_PERCENT,
+};
+use yuukei_protocol::RuntimeCommand;
 
-mod drag; mod geometry; mod layout; mod windows;
-#[cfg(windows)] mod windows_caption;
-#[cfg(test)] mod tests;
-use drag::{begin_actor_drag_in_state, move_actor_drag_in_state, ActiveActorDrag}; use geometry::*; use layout::*;
-use windows::{create_actor_window, create_stage_overlay_window, monitor_snapshots};
-#[allow(unused_imports)]
-pub use windows::{actor_webview_windows, actor_window_label, is_actor_window_label, is_stage_overlay_label, stage_overlay_window_label};
+mod drag;
+mod geometry;
+mod layout;
+#[cfg(test)]
+mod tests;
+mod windows;
+#[cfg(windows)]
+mod windows_caption;
+use drag::{
+    begin_actor_drag_in_state, move_actor_drag_in_state, take_actor_drag_in_state, ActiveActorDrag,
+};
+use geometry::*;
+use layout::*;
 pub(crate) use windows::enforce_borderless;
+#[allow(unused_imports)]
+pub use windows::{
+    actor_webview_windows, actor_window_label, is_actor_window_label, is_stage_overlay_label,
+    stage_overlay_window_label,
+};
+use windows::{create_actor_window, create_stage_overlay_window, monitor_snapshots};
 
 const ACTOR_WINDOW_LABEL_PREFIX: &str = "actor-";
 const STAGE_OVERLAY_LABEL_PREFIX: &str = "stage-overlay-";
@@ -137,11 +156,18 @@ pub struct StagePerchEnded {
     pub reason: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StageDragFinished {
     pub actor_id: String,
     pub anchor: StageFootAnchor,
     pub moved_distance: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorWindowDragStarted {
+    pub session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -303,19 +329,20 @@ impl DesktopStageManager {
         app: &AppHandle,
         window: &WebviewWindow,
         actor_id: &str,
-    ) -> Result<Option<StagePerchEnded>, String> {
+    ) -> Result<(ActorWindowDragStarted, Option<StagePerchEnded>), String> {
         let bounds = window_bounds(window)?;
+        let session_id = uuid::Uuid::new_v4().to_string();
         let ended = {
             let mut state = self
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            begin_actor_drag_in_state(&mut state, actor_id, bounds)?
+            begin_actor_drag_in_state(&mut state, actor_id, &session_id, bounds)?
         };
         if ended.is_some() {
             self.emit_state(app)?;
         }
-        Ok(ended)
+        Ok((ActorWindowDragStarted { session_id }, ended))
     }
 
     pub fn finish_actor_drag(
@@ -323,6 +350,7 @@ impl DesktopStageManager {
         app: &AppHandle,
         window: &WebviewWindow,
         actor_id: &str,
+        session_id: &str,
     ) -> Result<StageDragFinished, String> {
         let actual_bounds = window_bounds(window)?;
         let (bounds, result) = {
@@ -330,11 +358,7 @@ impl DesktopStageManager {
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            let start = state
-                .active_drags
-                .remove(actor_id)
-                .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?
-                .start_bounds;
+            let start = take_actor_drag_in_state(&mut state, actor_id, session_id)?.start_bounds;
             let size = actor_window_size(state.actor_scale_percent);
             let bounds = normalize_actor_window_bounds(actual_bounds, &state.monitors, size);
             let anchor = foot_anchor(&bounds);
@@ -362,11 +386,40 @@ impl DesktopStageManager {
         Ok(result)
     }
 
+    pub fn cancel_actor_drag(
+        &self,
+        app: &AppHandle,
+        window: &WebviewWindow,
+        actor_id: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let actual_bounds = window_bounds(window)?;
+        let bounds = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            take_actor_drag_in_state(&mut state, actor_id, session_id)?;
+            let size = actor_window_size(state.actor_scale_percent);
+            let bounds = normalize_actor_window_bounds(actual_bounds, &state.monitors, size);
+            let actor = state
+                .actors
+                .get_mut(actor_id)
+                .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+            actor.bounds = bounds.clone();
+            actor.anchor = default_actor_anchor(&bounds);
+            bounds
+        };
+        apply_actor_window_bounds(window, &bounds)?;
+        self.emit_state(app)
+    }
+
     pub fn move_actor_drag(
         &self,
         app: &AppHandle,
         window: &WebviewWindow,
         actor_id: &str,
+        session_id: &str,
         dx: f64,
         dy: f64,
     ) -> Result<(), String> {
@@ -378,7 +431,7 @@ impl DesktopStageManager {
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            move_actor_drag_in_state(&mut state, actor_id, dx, dy)?
+            move_actor_drag_in_state(&mut state, actor_id, session_id, dx, dy)?
         };
         apply_actor_window_bounds(window, &bounds)?;
         self.emit_state(app)

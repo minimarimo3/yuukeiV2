@@ -8,7 +8,6 @@ import {
   expressionPresetFor,
   loadInitialActorSurfaceState,
   normalizeMotionId,
-  shouldSendAvatarPokeOnRelease,
   shouldStartAvatarGrab
 } from "./ActorApp";
 import {
@@ -278,8 +277,6 @@ describe("ActorApp renderer helpers", () => {
     expect(shouldStartAvatarGrab(499, 0)).toBe(false);
     expect(shouldStartAvatarGrab(500, 6)).toBe(true);
     expect(shouldStartAvatarGrab(500, 6.01)).toBe(false);
-    expect(shouldSendAvatarPokeOnRelease(false)).toBe(true);
-    expect(shouldSendAvatarPokeOnRelease(true)).toBe(false);
   });
 
   it("places actor bubbles on the side with more space", () => {
