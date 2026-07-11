@@ -1,0 +1,56 @@
+pub(super) fn begin_actor_drag_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    bounds: StageRect,
+) -> Result<Option<StagePerchEnded>, String> {
+    let actor = state
+        .actors
+        .get_mut(actor_id)
+        .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+    actor.bounds = bounds.clone();
+    actor.anchor = default_actor_anchor(&bounds);
+    state.active_drags.insert(
+        actor_id.to_string(),
+        ActiveActorDrag {
+            start_bounds: bounds,
+        },
+    );
+    Ok(state.perches.remove(actor_id).map(|perch| StagePerchEnded {
+        actor_id: actor_id.to_string(),
+        window_key: perch.window_key,
+        reason: "user-drag",
+    }))
+}
+
+pub(super) fn move_actor_drag_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    dx: f64,
+    dy: f64,
+) -> Result<StageRect, String> {
+    let start_bounds = state
+        .active_drags
+        .get(actor_id)
+        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?
+        .start_bounds
+        .clone();
+    let bounds = StageRect {
+        x: start_bounds.x + dx,
+        y: start_bounds.y + dy,
+        width: start_bounds.width,
+        height: start_bounds.height,
+    };
+    let actor = state
+        .actors
+        .get_mut(actor_id)
+        .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+    actor.bounds = bounds.clone();
+    actor.anchor = default_actor_anchor(&bounds);
+    Ok(bounds)
+}
+use super::*;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ActiveActorDrag {
+    pub(super) start_bounds: StageRect,
+}
