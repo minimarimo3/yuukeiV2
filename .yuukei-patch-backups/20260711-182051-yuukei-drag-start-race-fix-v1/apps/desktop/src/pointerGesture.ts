@@ -43,8 +43,6 @@ export type PointerGestureState =
       type: "startingDrag";
       actorId: string;
       startScreen: Point;
-      // Keep movement that occurs while Device Host is creating the drag session.
-      latestScreen: Point;
       releaseIntent: "none" | "finish" | "cancel";
     })
   // Device Host returned an active session that accepts pointerMoved.
@@ -269,12 +267,6 @@ export function reducePointerGesture(
           : []
       };
     }
-    if (state.type === "startingDrag") {
-      return {
-        state: { ...state, latestScreen: event.screen },
-        effects: []
-      };
-    }
     if (state.type === "dragging") {
       return {
         state,
@@ -312,7 +304,6 @@ export function reducePointerGesture(
         pointerId: state.pointerId,
         actorId: state.actorHit.actorId,
         startScreen: state.startScreen,
-        latestScreen: state.startScreen,
         releaseIntent: "none"
       },
       effects: [
@@ -346,21 +337,6 @@ export function reducePointerGesture(
       gestureId: state.gestureId,
       actorId: state.actorId
     };
-    const pendingDx = state.latestScreen.x - state.startScreen.x;
-    const pendingDy = state.latestScreen.y - state.startScreen.y;
-    const catchUpMove: PointerGestureEffect[] =
-      pendingDx === 0 && pendingDy === 0
-        ? []
-        : [
-            {
-              type: "moveWindowDrag",
-              gestureId: state.gestureId,
-              actorId: state.actorId,
-              sessionId: event.sessionId,
-              dx: pendingDx,
-              dy: pendingDy
-            }
-          ];
     if (state.releaseIntent === "finish") {
       return {
         state: {
@@ -371,7 +347,6 @@ export function reducePointerGesture(
         },
         effects: [
           notifyGrab,
-          ...catchUpMove,
           {
             type: "finishWindowDrag",
             gestureId: state.gestureId,
@@ -408,7 +383,7 @@ export function reducePointerGesture(
         sessionId: event.sessionId,
         startScreen: state.startScreen
       },
-      effects: [notifyGrab, ...catchUpMove]
+      effects: [notifyGrab]
     };
   }
 
