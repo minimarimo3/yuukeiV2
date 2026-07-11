@@ -42,7 +42,7 @@ struct DesktopStageState {
     perches: BTreeMap<String, StagePerch>,
     terrain_windows: BTreeMap<String, DesktopWindowFrame>,
     persisted_anchors: BTreeMap<String, StageFootAnchor>,
-    active_drags: BTreeMap<String, StageFootAnchor>,
+    active_drags: BTreeMap<String, ActiveActorDrag>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
 }
@@ -152,6 +152,11 @@ pub struct StageDragFinished {
 #[derive(Clone, Debug, PartialEq)]
 struct StagePerch {
     window_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveActorDrag {
+    start_bounds: StageRect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -351,11 +356,14 @@ impl DesktopStageManager {
             let start = state
                 .active_drags
                 .remove(actor_id)
-                .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?;
+                .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?
+                .start_bounds;
             let size = actor_window_size(state.actor_scale_percent);
             let bounds = normalize_actor_window_bounds(actual_bounds, &state.monitors, size);
             let anchor = foot_anchor(&bounds);
-            let moved_distance = ((anchor.x - start.x).hypot(anchor.y - start.y)).round() as u64;
+            let start_anchor = foot_anchor(&start);
+            let moved_distance =
+                ((anchor.x - start_anchor.x).hypot(anchor.y - start_anchor.y)).round() as u64;
             let actor = state
                 .actors
                 .get_mut(actor_id)
@@ -375,6 +383,28 @@ impl DesktopStageManager {
         apply_actor_window_bounds(window, &bounds)?;
         self.emit_state(app)?;
         Ok(result)
+    }
+
+    pub fn move_actor_drag(
+        &self,
+        app: &AppHandle,
+        window: &WebviewWindow,
+        actor_id: &str,
+        dx: f64,
+        dy: f64,
+    ) -> Result<(), String> {
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err("actor drag delta must be finite".to_string());
+        }
+        let bounds = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            move_actor_drag_in_state(&mut state, actor_id, dx, dy)?
+        };
+        apply_actor_window_bounds(window, &bounds)?;
+        self.emit_state(app)
     }
 
     pub fn set_window_observation_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -775,14 +805,44 @@ fn begin_actor_drag_in_state(
         .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
     actor.bounds = bounds.clone();
     actor.anchor = default_actor_anchor(&bounds);
-    state
-        .active_drags
-        .insert(actor_id.to_string(), foot_anchor(&bounds));
+    state.active_drags.insert(
+        actor_id.to_string(),
+        ActiveActorDrag {
+            start_bounds: bounds,
+        },
+    );
     Ok(state.perches.remove(actor_id).map(|perch| StagePerchEnded {
         actor_id: actor_id.to_string(),
         window_key: perch.window_key,
         reason: "user-drag",
     }))
+}
+
+fn move_actor_drag_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    dx: f64,
+    dy: f64,
+) -> Result<StageRect, String> {
+    let start_bounds = state
+        .active_drags
+        .get(actor_id)
+        .ok_or_else(|| format!("actor drag was not active: {actor_id}"))?
+        .start_bounds
+        .clone();
+    let bounds = StageRect {
+        x: start_bounds.x + dx,
+        y: start_bounds.y + dy,
+        width: start_bounds.width,
+        height: start_bounds.height,
+    };
+    let actor = state
+        .actors
+        .get_mut(actor_id)
+        .ok_or_else(|| format!("unknown stage actor: {actor_id}"))?;
+    actor.bounds = bounds.clone();
+    actor.anchor = default_actor_anchor(&bounds);
+    Ok(bounds)
 }
 
 impl DesktopStageState {
@@ -1990,6 +2050,47 @@ mod tests {
         assert!(state.perches.is_empty());
         assert_eq!(
             state.active_drags.get("yuukei"),
+            Some(&ActiveActorDrag {
+                start_bounds: StageRect {
+                    x: 120.0,
+                    y: 80.0,
+                    width: ACTOR_WINDOW_WIDTH,
+                    height: ACTOR_WINDOW_HEIGHT,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn moving_actor_drag_uses_start_bounds_without_clamping_or_persisting() {
+        let spec = test_specs(&["yuukei"]).remove(0);
+        let start_bounds = StageRect {
+            x: 120.0,
+            y: 80.0,
+            width: ACTOR_WINDOW_WIDTH,
+            height: ACTOR_WINDOW_HEIGHT,
+        };
+        let mut state = DesktopStageState {
+            monitors: vec![test_monitor(1000.0, 700.0)],
+            actors: BTreeMap::from([(
+                "yuukei".to_string(),
+                actor_from_spec(&spec, start_bounds.clone(), true),
+            )]),
+            persisted_anchors: BTreeMap::from([(
+                "yuukei".to_string(),
+                StageFootAnchor { x: 330.0, y: 640.0 },
+            )]),
+            ..DesktopStageState::default()
+        };
+        begin_actor_drag_in_state(&mut state, "yuukei", start_bounds).expect("begin actor drag");
+
+        let moved = move_actor_drag_in_state(&mut state, "yuukei", 2_000.0, -300.0)
+            .expect("move actor drag");
+
+        assert_eq!(moved.x, 2_120.0);
+        assert_eq!(moved.y, -220.0);
+        assert_eq!(
+            state.persisted_anchors.get("yuukei"),
             Some(&StageFootAnchor { x: 330.0, y: 640.0 })
         );
     }

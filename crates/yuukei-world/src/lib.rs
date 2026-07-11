@@ -2464,6 +2464,55 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn default_pack_all_authored_daihon_signals_are_allowlisted() -> Result<()> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root");
+        let world = WorldPack::load_from_dir(repo_root.join("packs").join("default-yuukei"))?;
+        let allowed = world
+            .signals
+            .allow
+            .iter()
+            .map(|signal| canonical_signal_id(signal).to_string())
+            .collect::<BTreeSet<_>>();
+        let mut missing = Vec::new();
+
+        for source in &world.daihon.loaded_scripts {
+            for script in parse_scripts(&source.source).expect("default pack script parses") {
+                for scene in &script.event.scenes {
+                    let signals = if scene.metadata.signals.is_empty() {
+                        vec![script.event.name.value.as_str()]
+                    } else {
+                        scene
+                            .metadata
+                            .signals
+                            .iter()
+                            .map(|signal| signal.name.value.as_str())
+                            .collect()
+                    };
+                    for signal in signals {
+                        let canonical = canonical_signal_id(signal).to_string();
+                        if !allowed.contains(&canonical) {
+                            missing.push(format!(
+                                "{}:{} uses {signal} ({canonical})",
+                                source.path, scene.name.value
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "default pack Daihon signals missing from signals.allow: {}",
+            missing.join(", ")
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn yuukei_adapter_runs_loaded_daihon_script_for_allowed_text() -> Result<()> {
         let world = pack();

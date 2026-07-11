@@ -58,6 +58,7 @@ type VrmStageProps = {
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
   onAvatarGestureGrab(actorId: string): Promise<void>;
+  onAvatarGestureMove(actorId: string, dx: number, dy: number): Promise<void>;
   onAvatarGestureDrop(actorId: string): Promise<void>;
 };
 
@@ -147,6 +148,12 @@ export function ActorApp({
     },
     [client]
   );
+  const moveAvatarDrag = useCallback(
+    async (draggedActorId: string, dx: number, dy: number) => {
+      await client.moveAvatarDrag(draggedActorId, dx, dy);
+    },
+    [client]
+  );
   const reportStageAnchor = useCallback(
     async (reportedActorId: string, anchor: StageAnchor) => {
       await client.reportActorStageAnchor(reportedActorId, anchor);
@@ -163,6 +170,7 @@ export function ActorApp({
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
         onAvatarGestureGrab={beginAvatarDrag}
+        onAvatarGestureMove={moveAvatarDrag}
         onAvatarGestureDrop={finishAvatarDrag}
       />
       {visibleStatus ? (
@@ -195,6 +203,7 @@ function VrmStage({
   onHitTestChange,
   onAvatarGesturePoke,
   onAvatarGestureGrab,
+  onAvatarGestureMove,
   onAvatarGestureDrop
 }: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -226,6 +235,15 @@ function VrmStage({
       poke: AvatarGesturePokeInput;
       grabbed: boolean;
       holdTimer: number;
+      startScreenX: number;
+      startScreenY: number;
+      dx: number;
+      dy: number;
+      dragStarted: boolean;
+      finishRequested: boolean;
+      finishSent: boolean;
+      moveFrame: number;
+      moveQueue: Promise<void>;
     } | null = null;
 
     const actorRoot = new THREE.Group();
@@ -370,7 +388,16 @@ function VrmStage({
         maxDistancePx: 0,
         poke,
         grabbed: false,
-        holdTimer: 0
+        holdTimer: 0,
+        startScreenX: event.screenX,
+        startScreenY: event.screenY,
+        dx: 0,
+        dy: 0,
+        dragStarted: false,
+        finishRequested: false,
+        finishSent: false,
+        moveFrame: 0,
+        moveQueue: Promise.resolve()
       };
       activePointer = pointer;
       checkedCanvas.setPointerCapture(event.pointerId);
@@ -378,29 +405,66 @@ function VrmStage({
         if (activePointer !== pointer) return;
         if (!shouldStartAvatarGrab(AVATAR_GRAB_HOLD_MS, pointer.maxDistancePx)) return;
         pointer.grabbed = true;
-        if (checkedCanvas.hasPointerCapture(pointer.pointerId)) {
-          checkedCanvas.releasePointerCapture(pointer.pointerId);
-        }
         void (async () => {
           try {
             await onAvatarGestureGrab(pointer.poke.actorId);
-            try {
-              await getCurrentWindow().startDragging();
-            } finally {
-              await onAvatarGestureDrop(pointer.poke.actorId);
+            pointer.dragStarted = true;
+            if (pointer.finishRequested) {
+              enqueuePointerDragMove(pointer);
+              finishPointerDrag(pointer);
+            } else {
+              schedulePointerDragMove(pointer);
             }
           } catch (error) {
             console.warn("Failed to drag avatar window", error);
-          } finally {
             if (activePointer === pointer) activePointer = null;
           }
         })();
       }, AVATAR_GRAB_HOLD_MS);
     }
 
+    function schedulePointerDragMove(pointer: NonNullable<typeof activePointer>) {
+      if (!pointer.dragStarted || pointer.finishRequested || pointer.moveFrame) return;
+      pointer.moveFrame = window.requestAnimationFrame(() => {
+        pointer.moveFrame = 0;
+        if (!pointer.dragStarted || pointer.finishRequested) return;
+        enqueuePointerDragMove(pointer);
+      });
+    }
+
+    function enqueuePointerDragMove(pointer: NonNullable<typeof activePointer>) {
+      const { actorId } = pointer.poke;
+      const { dx, dy } = pointer;
+      pointer.moveQueue = pointer.moveQueue.then(async () => {
+        await onAvatarGestureMove(actorId, dx, dy);
+      }).catch((error) => {
+        console.warn("Failed to move avatar window", error);
+      });
+    }
+
+    function finishPointerDrag(pointer: NonNullable<typeof activePointer>) {
+      if (!pointer.dragStarted || pointer.finishSent) return;
+      pointer.finishSent = true;
+      if (pointer.moveFrame) {
+        window.cancelAnimationFrame(pointer.moveFrame);
+        pointer.moveFrame = 0;
+      }
+      void pointer.moveQueue.then(async () => {
+        await onAvatarGestureDrop(pointer.poke.actorId);
+      }).catch((error) => {
+        console.warn("Failed to finish avatar drag", error);
+      });
+    }
+
     function handlePointerMove(event: PointerEvent) {
       const pointer = activePointer;
-      if (!pointer || pointer.pointerId !== event.pointerId || pointer.grabbed) return;
+      if (!pointer || pointer.pointerId !== event.pointerId) return;
+      if (pointer.grabbed) {
+        pointer.dx = event.screenX - pointer.startScreenX;
+        pointer.dy = event.screenY - pointer.startScreenY;
+        schedulePointerDragMove(pointer);
+        return;
+      }
       const distance = Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY);
       pointer.maxDistancePx = Math.max(pointer.maxDistancePx, distance);
       if (pointer.maxDistancePx > AVATAR_GRAB_MOVE_THRESHOLD_PX) {
@@ -412,14 +476,22 @@ function VrmStage({
       const pointer = activePointer;
       if (!pointer || pointer.pointerId !== event.pointerId) return;
       window.clearTimeout(pointer.holdTimer);
+      if (pointer.grabbed) {
+        pointer.dx = event.screenX - pointer.startScreenX;
+        pointer.dy = event.screenY - pointer.startScreenY;
+        if (pointer.dragStarted) enqueuePointerDragMove(pointer);
+      }
+      activePointer = null;
       if (checkedCanvas.hasPointerCapture(pointer.pointerId)) {
         checkedCanvas.releasePointerCapture(pointer.pointerId);
       }
       if (shouldSendAvatarPokeOnRelease(pointer.grabbed)) {
-        activePointer = null;
         void onAvatarGesturePoke(pointer.poke).catch((error) => {
           console.warn("Failed to send avatar gesture", error);
         });
+      } else {
+        pointer.finishRequested = true;
+        finishPointerDrag(pointer);
       }
     }
 
@@ -427,7 +499,16 @@ function VrmStage({
       const pointer = activePointer;
       if (!pointer || pointer.pointerId !== event.pointerId) return;
       window.clearTimeout(pointer.holdTimer);
+      if (pointer.grabbed) {
+        pointer.dx = event.screenX - pointer.startScreenX;
+        pointer.dy = event.screenY - pointer.startScreenY;
+        if (pointer.dragStarted) enqueuePointerDragMove(pointer);
+      }
       activePointer = null;
+      if (pointer.grabbed) {
+        pointer.finishRequested = true;
+        finishPointerDrag(pointer);
+      }
     }
 
     window.addEventListener("resize", resize);
@@ -451,7 +532,12 @@ function VrmStage({
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", handlePointerUp);
       canvas.removeEventListener("pointercancel", handlePointerCancel);
-      if (activePointer) window.clearTimeout(activePointer.holdTimer);
+      if (activePointer) {
+        window.clearTimeout(activePointer.holdTimer);
+        if (activePointer.moveFrame) {
+          window.cancelAnimationFrame(activePointer.moveFrame);
+        }
+      }
       window.cancelAnimationFrame(animationFrame);
       window.clearInterval(hitTestTimer);
       rendererRef.current = null;
@@ -465,6 +551,7 @@ function VrmStage({
     assets,
     onAvatarGestureDrop,
     onAvatarGestureGrab,
+    onAvatarGestureMove,
     onAvatarGesturePoke,
     onHitTestChange,
     onStageAnchorReport

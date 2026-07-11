@@ -199,6 +199,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(),
     beginAvatarDrag: vi.fn(),
+    moveAvatarDrag: vi.fn(),
     finishAvatarDrag: vi.fn(),
     openWorldPackDirectory: vi.fn(),
     openExtensionDirectory: vi.fn(),

@@ -506,6 +506,23 @@ async fn begin_avatar_drag(
 }
 
 #[tauri::command]
+fn move_avatar_drag(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    actor_id: String,
+    dx: f64,
+    dy: f64,
+) -> Result<(), String> {
+    if window.label() != desktop_stage::actor_window_label(&actor_id) {
+        return Err("actor drag must move in its own actor window".to_string());
+    }
+    state
+        .stage
+        .move_actor_drag(&app, &window, &actor_id, dx, dy)
+}
+
+#[tauri::command]
 async fn finish_avatar_drag(
     app: AppHandle,
     window: WebviewWindow,
@@ -859,6 +876,7 @@ pub fn run() {
             send_conversation_choice,
             send_avatar_gesture_poke,
             begin_avatar_drag,
+            move_avatar_drag,
             finish_avatar_drag,
             select_world_pack_directory,
             inspect_world_pack_zip,

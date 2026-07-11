@@ -419,6 +419,7 @@ export type YuukeiClient = {
     gesture: AvatarGesturePokeInput
   ): Promise<RuntimeCommand[]>;
   beginAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
+  moveAvatarDrag(actorId: string, dx: number, dy: number): Promise<void>;
   finishAvatarDrag(actorId: string): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openWorldPackZip(): Promise<string | null>;
@@ -546,6 +547,8 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
   beginAvatarDrag: (actorId: string) =>
     invoke<RuntimeCommand[]>("begin_avatar_drag", { actorId }),
+  moveAvatarDrag: (actorId: string, dx: number, dy: number) =>
+    invoke<void>("move_avatar_drag", { actorId, dx, dy }),
   finishAvatarDrag: (actorId: string) =>
     invoke<RuntimeCommand[]>("finish_avatar_drag", { actorId }),
   openWorldPackDirectory: async () => {
