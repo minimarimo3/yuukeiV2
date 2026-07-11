@@ -58,6 +58,5 @@ src-tauri/*.log
 src-tauri/target/
 target/
 tmp/
-tools/codex-thread-id.txt
 yarn-debug.log*
 yarn-error.log*

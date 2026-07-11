@@ -1,31 +1,34 @@
 ---
 name: codex
-description: 実装タスクをローカルCodex(app-server)へ委任する。仕様書の書き方、codex-bridge.mjsの実行と監視、レート制限対応、成果物の検証手順。Yuukeiで実装作業が発生したら必ずこの手順を使う。
+description: 実装タスクをローカルCodex(codex@openai-codexプラグインの/codex:rescue)へ委任する。仕様書の書き方、モデル/努力度の使い分け、実行と監視、成果物の検証手順。Yuukeiで実装作業が発生したら必ずこの手順を使う。
 ---
 
 # Codexへの実装委任
 
-Yuukeiのコード実装はローカルCodexへ委任する。Claudeの役割は仕様書作成・監視・検証・コミット。
+Yuukeiのコード実装はローカルCodexへ委任する。Claudeの役割は仕様書作成・監視・検証・コミット。委任は `codex@openai-codex` プラグインの `/codex:rescue`(内部で `codex:codex-rescue` サブエージェント → `codex-companion.mjs task` を叩く)を使う。ランタイムは初回コマンドでオンデマンド起動されるので、事前起動やポート待ち受けの確認は不要。
 
 ## モデル選択(ユーザー確定方針、2026-07-11)
 
-タスクの難度で使い分ける。`BRIDGE_MODEL` と `BRIDGE_EFFORT` で指定する。
+タスクの難度で使い分ける。`--model` と `--effort` を `/codex:rescue` に渡す(`gpt-5.6-terra` / `gpt-5.6-sol` はそのまま `--model` に渡せる正式モデルID)。
 
 | タスク | モデル | 指定 |
 |---|---|---|
-| 基本(既定) | gpt-5.6 Terra High | `BRIDGE_MODEL=gpt-5.6-terra BRIDGE_EFFORT=high`(どちらも既定値なので省略可) |
-| 難しいタスク(設計をまたぐ大物、境界が繊細な変更) | gpt-5.6 Sol High | `BRIDGE_MODEL=gpt-5.6-sol BRIDGE_EFFORT=high` |
-| 単純作業(機械的な置換、fixture更新など) | gpt-5.6 Terra Medium | `BRIDGE_EFFORT=medium` |
+| 基本(既定) | gpt-5.6 Terra High | `--model gpt-5.6-terra --effort high` |
+| 難しいタスク(設計をまたぐ大物、境界が繊細な変更) | gpt-5.6 Sol High | `--model gpt-5.6-sol --effort high` |
+| 単純作業(機械的な置換、fixture更新など) | gpt-5.6 Terra Medium | `--model gpt-5.6-terra --effort medium` |
+
+`--effort` の取りうる値は `none|minimal|low|medium|high|xhigh`。
 
 ## 前提の確認
 
-1. `codex app-server` が `ws://127.0.0.1:4500` で待ち受けていること。確認: `lsof -i :4500 -sTCP:LISTEN`。落ちていたらバックグラウンドで起動する: `codex app-server --listen ws://127.0.0.1:4500`
-2. **Codexのsandboxはネットワーク不可。** 仕様書が新しい依存(crate/npm)を要求するなら、先にこちらで `cargo add <crate> && cargo fetch`(または `pnpm add`)を実行し、ロックファイルとキャッシュを整えてから渡す(notifyで実績あり)
+1. Codexが利用可能で認証済みであること。未確認なら `/codex:setup` で確認する(初回のみ)
+2. **Codexのsandboxはネットワーク不可。** 仕様書が新しい依存(crate/npm)を要求するなら、先にこちらで `cargo add <crate> && cargo fetch`(または `pnpm add`)を実行し、ロックファイルとキャッシュを整えてから渡す
 3. Codexはコミットできない(`.git/index.lock`を作れない)。コミットは必ずClaude側で行う
+4. `/codex:rescue` は既定で書き込み可(`--write` 相当)。実装タスクはそのままでよい
 
 ## 仕様書の書き方
 
-仕様書はscratchpadに `spec-<名前>.md` として書く。構成は次の8節。確定済み設計判断は「変更しないこと」と明記すると精度が上がる。
+仕様書はscratchpadに `spec-<名前>.md` として書き、**その本文をそのまま `/codex:rescue` のタスクテキストとして渡す**(Codexはリポジトリ外のscratchpadを読めないことがあるため、パスを渡すのではなく本文を渡す)。構成は次の8節。確定済み設計判断は「変更しないこと」と明記すると精度が上がる。
 
 ```markdown
 # <タスク名>
@@ -60,30 +63,16 @@ Yuukeiのコード実装はローカルCodexへ委任する。Claudeの役割は
 
 ## 実行と監視
 
-```bash
-# 新規スレッド
-node tools/codex-bridge.mjs <仕様書パス>
-# 既存スレッドへ追いタスク(文脈を引き継ぐ。同一機能の続きはこちら)
-node tools/codex-bridge.mjs <仕様書パス> <threadId>
-```
-
-- **必ず `run_in_background: true` で実行**し、ログを定期的に確認する(重いターンは20〜30分かかる)
-- 環境変数: `BRIDGE_TIMEOUT_MIN`(既定45分)、`BRIDGE_MODEL`(既定gpt-5.6-terra)、`BRIDGE_EFFORT`(既定high)。使い分けは冒頭「モデル選択」参照
-- ログの読み方: `THREAD <id>` → `TURN_STARTED` → `PLAN`/`ITEM_STARTED`/`CMD_DONE`/`FILE_CHANGE` → `AGENT_MESSAGE_BEGIN...END`(Codexの報告) → `TURN_COMPLETED`
-- threadIdは `tools/codex-thread-id.txt` に追記される。直近スプリントのスレッドもそこにある
-- `APPROVAL ... -> denied` が出たら、Codexが安全リスト外のコマンドを要求した。内容を見て、必要ならこちらで代行するか仕様書を直して再投入
+- 委任: `codex:codex-rescue` サブエージェント(Agentツールの `subagent_type: "codex:codex-rescue"`)に、先頭へモデル/努力度フラグを付けた仕様書本文をpromptとして渡す。例: `--model gpt-5.6-terra --effort high\n\n<仕様書本文>`。ユーザーが自分で叩く場合は `/codex:rescue --model ... --effort ... <仕様書本文>`
+- 重いターンは20〜30分かかる。長時間タスクは `--background` を付けて背景実行し、`/codex:status` で進捗、完了後 `/codex:result` で最終出力を確認する(前景で待つなら `--wait`)
+- 同一機能の続き・追いタスクは `--resume`(直近スレッドを継続)。まっさらからやり直すときは `--fresh`
+- 承認要求で安全リスト外のコマンドが拒否されたら、内容を見て必要ならこちらで代行するか仕様書を直して再投入する
 
 ## レート制限への対応
 
-- 重いターン1回でprimary枠(5時間窓)を100%消費した実績あり(26分/18.7Mトークン)
-- `NOTIF account/rateLimits/updated` の `resetsAt` を読む。枯渇したら ScheduleWakeup(またはsleep)で回復を待ち、`thread/resume` で自動再投入する
+- 重いターン1回でprimaryレート枠(5時間窓)を使い切ることがある
+- 枯渇したら時間を置き、回復後に `--resume` で追タスクを再投入する。回復待ちは ScheduleWakeup を使うとよい
 - **Codexレート枯渇時もClaude直接実装は最終手段**(ユーザー指示)。待って再開が原則
-
-## プロトコルの語彙(実サーバーで確認済み、メモとずれやすい点)
-
-- `approvalPolicy`: `untrusted|on-failure|on-request|granular|never`
-- `thread/start` の `sandbox` はkebab-case(`workspace-write`)、`turn/start` の `sandboxPolicy.type` はcamelCase(`workspaceWrite`)
-- 1フレーム1メッセージのJSON-RPC、`jsonrpc`フィールドは省略
 
 ## 成果物の検証(省略禁止)
 
@@ -91,5 +80,5 @@ node tools/codex-bridge.mjs <仕様書パス> <threadId>
 2. AGENTS.mdの境界ルール違反を確認(Resident HomeにOS API/Tauri/WebViewが入っていないか、Extension同士の直接呼び出しがないか、defaultの焼き込みがないか)
 3. `cargo test` / `pnpm -r test` を実行。仕様書のVerification節のコマンドも実行
 4. docsの更新漏れを確認(仕様変更なら01〜08の該当ファイル、構文追加なら08)
-5. 小さな問題はこちらで直し、大きな手戻りは `thread/resume` で修正タスクを追い投入
+5. 小さな問題はこちらで直し、大きな手戻りは `--resume` で修正タスクを追い投入
 6. 機能単位で日本語コミット(feat/fix/docs/chore prefix)
