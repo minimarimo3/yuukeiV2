@@ -784,11 +784,17 @@ async fn set_app_actor_scale_percent(
 
 #[tauri::command]
 async fn set_app_conversation_send_shortcut(
+    app: AppHandle,
     state: State<'_, AppState>,
     shortcut: ConversationSendShortcut,
 ) -> Result<AppSettingsState, String> {
-    LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(state.env.clone(), shortcut)
-        .map_err(to_message)
+    let settings = LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(
+        state.env.clone(),
+        shortcut,
+    )
+    .map_err(to_message)?;
+    app.emit("yuukei-app-settings", &settings).map_err(to_message)?;
+    Ok(settings)
 }
 
 #[tauri::command]

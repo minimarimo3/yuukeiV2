@@ -1,12 +1,17 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { StageOverlayApp } from "./StageOverlayApp";
+import { StageOverlayApp, stageOverlayPassthrough } from "./StageOverlayApp";
 import type { DesktopStageState, YuukeiClient } from "./yuukeiClient";
 
 describe("StageOverlayApp", () => {
   afterEach(() => {
     cleanup();
+  });
+
+  it("keeps transparent overlay space click-through around interactive content", () => {
+    expect(stageOverlayPassthrough(false)).toBe(true);
+    expect(stageOverlayPassthrough(true)).toBe(false);
   });
 
   it("renders stage bubbles from desktop stage state", async () => {
@@ -178,6 +183,7 @@ describe("StageOverlayApp", () => {
     const state = stageState();
     state.conversationComposer = {
       actorId: "yuukei",
+      monitorId: "monitor-0",
       anchor: { x: 450, y: 190, visible: true }
     };
     const client = clientFixture(state);
@@ -192,13 +198,14 @@ describe("StageOverlayApp", () => {
       expect(client.sendConversationText).toHaveBeenCalledWith("こんにちは");
       expect(client.closeConversationComposer).toHaveBeenCalled();
     });
-    expect(client.setStageOverlayClickThrough).toHaveBeenCalledWith(false);
+    expect(client.setStageOverlayClickThrough).toHaveBeenCalled();
   });
 
   it("does not render a composer belonging to another monitor", async () => {
     const state = stageState();
     state.conversationComposer = {
       actorId: "yuukei",
+      monitorId: "monitor-other",
       anchor: { x: 2450, y: 190, visible: true }
     };
 
@@ -207,6 +214,35 @@ describe("StageOverlayApp", () => {
     await waitFor(() => {
       expect(screen.queryByRole("textbox", { name: "住人に話しかける" })).not.toBeInTheDocument();
     });
+  });
+
+  it("refreshes the send shortcut when a composer opens", async () => {
+    const state = stageState();
+    state.conversationComposer = {
+      actorId: "yuukei",
+      monitorId: "monitor-0",
+      anchor: { x: 450, y: 190, visible: true }
+    };
+    const client = clientFixture(state);
+    let publishSettings: ((settings: Awaited<ReturnType<YuukeiClient["getAppSettings"]>>) => void) | undefined;
+    client.onAppSettings = vi.fn(async (callback) => {
+      publishSettings = callback;
+      return () => undefined;
+    });
+
+    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+
+    expect(await screen.findByText("Ctrl+Enterで送信")).toBeInTheDocument();
+    act(() => {
+      publishSettings?.({
+        talkIntervalMinutes: 5,
+        actorScalePercent: 100,
+        conversationSendShortcut: "shiftEnter",
+        settingsPath: "/tmp/yuukei-v2/settings/app.json"
+      });
+    });
+
+    expect(await screen.findByText("Shift+Enterで送信")).toBeInTheDocument();
   });
 });
 
@@ -269,6 +305,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     onSnapshot: vi.fn(async () => () => undefined),
     onWorldPackStatus: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
+    onAppSettings: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined)
   };
   return partial as unknown as YuukeiClient;

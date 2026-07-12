@@ -448,10 +448,7 @@ impl ObservationSettingsRegistry {
         }
     }
 
-    pub(crate) fn set(
-        &mut self,
-        next: ObservationSettingsUpdate,
-    ) -> Result<ObservationSettingsState> {
+    pub(crate) fn set(&mut self, next: ObservationSettingsUpdate) -> Result<ObservationSettingsState> {
         self.stored.windows = next.windows;
         self.stored.folders = next.folders;
         self.stored.downloads = next.downloads;

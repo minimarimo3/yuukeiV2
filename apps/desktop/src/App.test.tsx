@@ -397,6 +397,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     onOnboardingDismissed: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined),
+    onAppSettings: vi.fn(async () => () => undefined),
     ...overrides
   };
 }

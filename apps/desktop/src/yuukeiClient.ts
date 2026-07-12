@@ -368,6 +368,7 @@ export type DesktopStageState = {
 
 export type DesktopConversationComposer = {
   actorId: string;
+  monitorId: string;
   anchor: StageAnchor;
 };
 
@@ -489,6 +490,7 @@ export type YuukeiClient = {
     callback: (catalog: ActorSurfaceAssetCatalog) => void
   ): Promise<() => void>;
   onStageState(callback: (state: DesktopStageState) => void): Promise<() => void>;
+  onAppSettings(callback: (settings: AppSettingsState) => void): Promise<() => void>;
 };
 
 export const tauriYuukeiClient: YuukeiClient = {
@@ -703,6 +705,12 @@ export const tauriYuukeiClient: YuukeiClient = {
         callback(event.payload);
       }
     );
+    return unlisten;
+  },
+  onAppSettings: async (callback) => {
+    const unlisten = await listen<AppSettingsState>("yuukei-app-settings", (event) => {
+      callback(event.payload);
+    });
     return unlisten;
   }
 };

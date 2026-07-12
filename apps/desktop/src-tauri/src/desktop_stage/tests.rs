@@ -41,6 +41,28 @@ fn conversation_composer_rejects_unknown_actor() {
 }
 
 #[test]
+fn conversation_composer_uses_actor_fallback_anchor_and_monitor() {
+    let mut state = bubble_state(&["yuukei"]);
+    state.monitors = vec![test_monitor(1000.0, 700.0)];
+    state.actors.get_mut("yuukei").expect("actor").anchor = StageAnchor {
+        x: -500.0,
+        y: -500.0,
+        visible: false,
+    };
+
+    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
+    let composer = state
+        .snapshot()
+        .conversation_composer
+        .expect("composer snapshot");
+
+    assert_eq!(composer.monitor_id, "monitor-0");
+    assert!(composer.anchor.visible);
+    assert!(composer.anchor.x >= 0.0);
+    assert!(composer.anchor.y >= 0.0);
+}
+
+#[test]
 fn actor_window_labels_hex_encode_actor_ids() {
     assert_eq!(actor_window_label("yuukei"), "actor-7975756b6569");
     assert_eq!(actor_window_label("partner"), "actor-706172746e6572");

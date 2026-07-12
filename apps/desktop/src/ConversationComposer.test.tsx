@@ -37,6 +37,16 @@ describe("ConversationComposer", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
+  it("inserts a newline when plain Enter is not the configured shortcut", async () => {
+    const user = userEvent.setup();
+    renderComposer("ctrlEnter", vi.fn(async () => undefined), vi.fn());
+    const input = screen.getByRole("textbox", { name: "住人に話しかける" });
+
+    await user.type(input, "一行目{Enter}二行目");
+
+    expect(input).toHaveValue("一行目\n二行目");
+  });
+
   it("does not submit while the IME is composing", () => {
     const submit = vi.fn(async () => undefined);
     renderComposer("enter", submit, vi.fn());
@@ -85,6 +95,25 @@ describe("ConversationComposer", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("送信できませんでした");
     expect(input).toHaveValue("あとでもう一度");
     expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it("prevents duplicate submissions while the first send is pending", async () => {
+    let finish: (() => void) | undefined;
+    const submit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    renderComposer("ctrlEnter", submit, vi.fn());
+    const input = screen.getByRole("textbox", { name: "住人に話しかける" });
+    fireEvent.change(input, { target: { value: "一度だけ" } });
+
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    finish?.();
   });
 });
 

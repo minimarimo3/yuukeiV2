@@ -359,7 +359,7 @@ function VrmStage({
     }
 
     function handlePointerDown(event: PointerEvent) {
-      if (event.button !== 0 || !acceptsNewPointerInput(gesture)) return;
+      if (!shouldBeginActorPointerGesture(event) || !acceptsNewPointerInput(gesture)) return;
       const actorHit = actorAtPointer(
         event,
         renderer.domElement,
@@ -751,6 +751,12 @@ export async function openConversationFromContextMenu(
 ): Promise<void> {
   event.preventDefault();
   await open(actorId);
+}
+
+export function shouldBeginActorPointerGesture(
+  event: Pick<PointerEvent, "button" | "ctrlKey">
+): boolean {
+  return event.button === 0 && !event.ctrlKey;
 }
 
 async function loadMotionActions(

@@ -174,6 +174,7 @@ pub struct DesktopStageSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct DesktopConversationComposer {
     pub actor_id: String,
+    pub monitor_id: String,
     pub anchor: StageAnchor,
 }
 
@@ -663,12 +664,12 @@ impl DesktopStageManager {
                 actor.anchor = anchor.clone();
                 actor.visible = window.is_visible().unwrap_or(true);
             }
-            if let Some(composer) = state
+            if state
                 .conversation_composer
-                .as_mut()
-                .filter(|composer| composer.actor_id == actor_id)
+                .as_ref()
+                .is_some_and(|composer| composer.actor_id == actor_id)
             {
-                composer.anchor = anchor;
+                open_conversation_composer_in_state(&mut state, &actor_id)?;
             }
         }
         self.emit_state(app)
@@ -1070,11 +1071,42 @@ fn open_conversation_composer_in_state(
         .actors
         .get(actor_id)
         .ok_or_else(|| format!("unknown actor for conversation composer: {actor_id}"))?;
+    let monitor = state
+        .monitors
+        .iter()
+        .find(|monitor| point_is_inside(&actor.anchor, &monitor.bounds))
+        .or_else(|| {
+            state
+                .monitors
+                .iter()
+                .find(|monitor| rects_intersect(&actor.bounds, &monitor.bounds))
+        })
+        .or_else(|| state.monitors.first());
+    let anchor = match monitor {
+        Some(monitor) if point_is_inside(&actor.anchor, &monitor.bounds) => actor.anchor.clone(),
+        _ => default_actor_anchor(&actor.bounds),
+    };
     state.conversation_composer = Some(DesktopConversationComposer {
         actor_id: actor_id.to_string(),
-        anchor: actor.anchor.clone(),
+        monitor_id: monitor.map(|monitor| monitor.id.clone()).unwrap_or_default(),
+        anchor,
     });
     Ok(())
+}
+
+fn point_is_inside(point: &StageAnchor, rect: &StageRect) -> bool {
+    point.visible
+        && point.x >= rect.x
+        && point.x <= rect.x + rect.width
+        && point.y >= rect.y
+        && point.y <= rect.y + rect.height
+}
+
+fn rects_intersect(first: &StageRect, second: &StageRect) -> bool {
+    first.x < second.x + second.width
+        && first.x + first.width > second.x
+        && first.y < second.y + second.height
+        && first.y + first.height > second.y
 }
 
 fn close_conversation_composer_in_state(state: &mut DesktopStageState) {

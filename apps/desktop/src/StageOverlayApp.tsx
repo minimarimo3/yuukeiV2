@@ -68,6 +68,9 @@ export function StageOverlayApp({
       unlisteners.push(await client.onStageState((nextState) => {
         setStageState(nextState);
       }));
+      unlisteners.push(await client.onAppSettings((nextSettings) => {
+        setAppSettings(nextSettings);
+      }));
       const [initialState, initialSettings] = await Promise.all([
         client.getDesktopStageState(),
         client.getAppSettings()
@@ -110,7 +113,7 @@ export function StageOverlayApp({
     interactingBubbleIds,
     onTick: () => setTimerTick((tick) => tick + 1)
   });
-  useStageOverlayHitTesting(client, renderItems.length, Boolean(composer));
+  useStageOverlayHitTesting(client, renderItems.length + (composer ? 1 : 0));
 
   const updateBubbleSize = useCallback(
     (bubbleId: string, size: StageBubbleSize) => {
@@ -382,16 +385,15 @@ function useBubbleExpiry({
 
 function useStageOverlayHitTesting(
   client: YuukeiClient,
-  activeBubbleCount: number,
-  forceInteractive: boolean
+  activeInteractiveCount: number
 ) {
   useEffect(() => {
     let disposed = false;
     let lastPassthrough: boolean | null = null;
 
     async function update() {
-      const solid = activeBubbleCount > 0 && (await pointerHitsStageSolid());
-      const passthrough = !forceInteractive && !solid;
+      const solid = activeInteractiveCount > 0 && (await pointerHitsStageSolid());
+      const passthrough = stageOverlayPassthrough(solid);
       if (!disposed && lastPassthrough !== passthrough) {
         lastPassthrough = passthrough;
         await client.setStageOverlayClickThrough(passthrough);
@@ -407,7 +409,11 @@ function useStageOverlayHitTesting(
       window.clearInterval(interval);
       void client.setStageOverlayClickThrough(true);
     };
-  }, [activeBubbleCount, client, forceInteractive]);
+  }, [activeInteractiveCount, client]);
+}
+
+export function stageOverlayPassthrough(pointerHitsInteractiveContent: boolean): boolean {
+  return !pointerHitsInteractiveContent;
 }
 
 function composerForMonitor(
@@ -415,7 +421,14 @@ function composerForMonitor(
   monitor: StageMonitor | null
 ): { left: number; top: number } | null {
   const composer = stageState?.conversationComposer;
-  if (!composer || !composer.anchor.visible || !monitor) return null;
+  if (
+    !composer ||
+    !composer.anchor.visible ||
+    !monitor ||
+    (composer.monitorId && composer.monitorId !== monitor.id)
+  ) {
+    return null;
+  }
   const { bounds } = monitor;
   if (
     composer.anchor.x < bounds.x ||

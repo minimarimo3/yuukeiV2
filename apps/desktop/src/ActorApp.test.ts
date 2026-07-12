@@ -10,6 +10,7 @@ import {
   loadInitialActorSurfaceState,
   normalizeMotionId,
   openConversationFromContextMenu,
+  shouldBeginActorPointerGesture,
   shouldStartAvatarGrab
 } from "./ActorApp";
 import {
@@ -40,6 +41,12 @@ describe("ActorApp renderer helpers", () => {
 
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(open).toHaveBeenCalledWith("yuukei");
+  });
+
+  it("does not begin a poke or drag for a macOS Control-click", () => {
+    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: true })).toBe(false);
+    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: false })).toBe(true);
+    expect(shouldBeginActorPointerGesture({ button: 2, ctrlKey: false })).toBe(false);
   });
 
   it("normalizes authored motion aliases to renderer motion ids", () => {
