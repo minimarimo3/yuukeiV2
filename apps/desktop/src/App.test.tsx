@@ -644,6 +644,24 @@ describe("App", () => {
     });
   });
 
+  it("changes the conversation send shortcut from the key settings category", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("tab", { name: "キー設定" }));
+    const select = screen.getByRole("combobox", { name: "会話を送信" });
+    expect(select).toHaveValue("ctrlEnter");
+
+    await userEvent.selectOptions(select, "shiftEnter");
+
+    await waitFor(() => {
+      expect(client.setAppConversationSendShortcut).toHaveBeenCalledWith(
+        "shiftEnter"
+      );
+    });
+  });
+
   it("toggles login autostart settings", async () => {
     const client = clientFixture();
 
