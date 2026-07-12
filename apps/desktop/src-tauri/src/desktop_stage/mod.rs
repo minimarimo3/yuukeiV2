@@ -2,7 +2,7 @@ use crate::DesktopActorSurfaceAssetCatalog;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::RwLock,
 };
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
@@ -41,8 +41,8 @@ const ACTOR_WINDOW_WIDTH: f64 = 420.0;
 const ACTOR_WINDOW_HEIGHT: f64 = 560.0;
 const ACTOR_WINDOW_MARGIN: f64 = 24.0;
 const ACTOR_COLLISION_PADDING: f64 = 16.0;
-const DEFAULT_BUBBLE_DURATION_MS: u64 = 9_000;
 const MIN_BUBBLE_DURATION_MS: u64 = 2_500;
+const MAX_READING_BUBBLE_DURATION_MS: u64 = 9_000;
 const MAX_BUBBLE_DURATION_MS: u64 = 30_000;
 const STAGE_STATE_EVENT: &str = "yuukei-stage-state";
 
@@ -56,6 +56,8 @@ struct DesktopStageState {
     monitors: Vec<StageMonitor>,
     actors: BTreeMap<String, StageActor>,
     bubbles: BTreeMap<String, StageBubble>,
+    bubble_queues: BTreeMap<String, VecDeque<QueuedStageBubble>>,
+    bubble_scene_keys: BTreeMap<String, Option<String>>,
     perches: BTreeMap<String, StagePerch>,
     terrain_windows: BTreeMap<String, DesktopWindowFrame>,
     persisted_anchors: BTreeMap<String, StageFootAnchor>,
@@ -71,6 +73,8 @@ impl Default for DesktopStageState {
             monitors: Vec::new(),
             actors: BTreeMap::new(),
             bubbles: BTreeMap::new(),
+            bubble_queues: BTreeMap::new(),
+            bubble_scene_keys: BTreeMap::new(),
             perches: BTreeMap::new(),
             terrain_windows: BTreeMap::new(),
             persisted_anchors: BTreeMap::new(),
@@ -136,6 +140,14 @@ pub struct StageBubble {
     pub choice: Option<StageBubbleChoice>,
     pub created_at_ms: u64,
     pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedStageBubble {
+    bubble_id: String,
+    text: String,
+    duration_ms: u64,
+    scene_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -293,15 +305,7 @@ impl DesktopStageManager {
             let terrain_windows = state.terrain_windows.clone();
             reapply_perches_to_state(&mut state, &terrain_windows);
             let actor_ids = state.actors.keys().cloned().collect::<BTreeSet<_>>();
-            state
-                .bubbles
-                .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
-            state
-                .perches
-                .retain(|actor_id, _| actor_ids.contains(actor_id));
-            state
-                .active_walks
-                .retain(|actor_id, _| actor_ids.contains(actor_id));
+            retain_stage_state_for_actors(&mut state, &actor_ids);
         }
         self.emit_state(app)
     }
@@ -634,7 +638,7 @@ impl DesktopStageManager {
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            state.bubbles.remove(&bubble_id);
+            dismiss_bubble_in_state(&mut state, &bubble_id, now_ms());
         }
         self.emit_state(app)
     }
@@ -698,85 +702,21 @@ impl DesktopStageManager {
                     .state
                     .write()
                     .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-                for bubble in state.bubbles.values_mut() {
-                    if bubble.actor_id == actor_id
-                        && bubble
-                            .choice
-                            .as_ref()
-                            .is_some_and(|choice| choice.choice_id == choice_id)
-                    {
-                        bubble.choice = None;
-                    }
-                }
+                clear_dialogue_choice_in_state(&mut state, &actor_id, choice_id);
             }
             return self.emit_state(app);
         }
 
         if command.kind == "dialogue.choices" {
-            let Some(choice_id) = command.payload.get("choiceId").and_then(Value::as_str) else {
-                return Ok(());
-            };
-            let Some(choices) = command.payload.get("choices").and_then(Value::as_array) else {
-                return Ok(());
-            };
-            let choices = choices
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-            if choices.is_empty() {
-                return Ok(());
-            }
-            let timeout_seconds = command
-                .payload
-                .get("timeoutSeconds")
-                .and_then(Value::as_u64)
-                .unwrap_or(30);
-            {
+            let handled = {
                 let mut state = self
                     .state
                     .write()
                     .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-                if !state.actors.contains_key(&actor_id) {
-                    return Ok(());
-                }
-                for bubble in state.bubbles.values_mut() {
-                    if bubble.actor_id == actor_id {
-                        bubble.choice = None;
-                    }
-                }
-                let latest_bubble_id = state
-                    .bubbles
-                    .values()
-                    .filter(|bubble| bubble.actor_id == actor_id)
-                    .max_by_key(|bubble| bubble.created_at_ms)
-                    .map(|bubble| bubble.bubble_id.clone());
-                let choice = StageBubbleChoice {
-                    choice_id: choice_id.to_string(),
-                    choices,
-                    timeout_seconds,
-                };
-                if let Some(bubble_id) = latest_bubble_id {
-                    if let Some(bubble) = state.bubbles.get_mut(&bubble_id) {
-                        bubble.choice = Some(choice);
-                        bubble.duration_ms =
-                            bubble.duration_ms.max(timeout_seconds.saturating_mul(1000));
-                    }
-                } else {
-                    state.bubbles.insert(
-                        command.id.clone(),
-                        StageBubble {
-                            bubble_id: command.id.clone(),
-                            actor_id,
-                            text: String::new(),
-                            choice: Some(choice),
-                            created_at_ms: now_ms(),
-                            duration_ms: timeout_seconds
-                                .saturating_mul(1000)
-                                .clamp(MIN_BUBBLE_DURATION_MS, MAX_BUBBLE_DURATION_MS),
-                        },
-                    );
-                }
+                apply_dialogue_choices_to_state(&mut state, command, now_ms())
+            };
+            if !handled {
+                return Ok(());
             }
             return self.emit_state(app);
         }
@@ -784,34 +724,15 @@ impl DesktopStageManager {
         if command.kind != "dialogue.say" {
             return Ok(());
         }
-        let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
-            return Ok(());
-        };
-        let duration_ms = command
-            .payload
-            .get("durationMs")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_BUBBLE_DURATION_MS)
-            .clamp(MIN_BUBBLE_DURATION_MS, MAX_BUBBLE_DURATION_MS);
-        {
+        let handled = {
             let mut state = self
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            if !state.actors.contains_key(&actor_id) {
-                return Ok(());
-            }
-            state.bubbles.insert(
-                command.id.clone(),
-                StageBubble {
-                    bubble_id: command.id.clone(),
-                    actor_id,
-                    text: text.to_string(),
-                    choice: None,
-                    created_at_ms: now_ms(),
-                    duration_ms,
-                },
-            );
+            apply_dialogue_say_to_state(&mut state, command, now_ms())
+        };
+        if !handled {
+            return Ok(());
         }
         self.emit_state(app)
     }
@@ -906,6 +827,223 @@ impl DesktopStageManager {
         }
         Ok(())
     }
+}
+
+fn apply_dialogue_say_to_state(
+    state: &mut DesktopStageState,
+    command: &RuntimeCommand,
+    created_at_ms: u64,
+) -> bool {
+    let Some(actor_id) = command_actor_id(command) else {
+        return false;
+    };
+    if !state.actors.contains_key(&actor_id) {
+        return false;
+    }
+    let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
+        return false;
+    };
+    let duration_ms = command
+        .payload
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .map(|duration_ms| duration_ms.clamp(MIN_BUBBLE_DURATION_MS, MAX_BUBBLE_DURATION_MS))
+        .unwrap_or_else(|| {
+            u64::try_from(text.chars().count())
+                .unwrap_or(u64::MAX)
+                .saturating_mul(90)
+                .clamp(MIN_BUBBLE_DURATION_MS, MAX_READING_BUBBLE_DURATION_MS)
+        });
+    let queued = QueuedStageBubble {
+        bubble_id: command.id.clone(),
+        text: text.to_string(),
+        duration_ms,
+        scene_key: command
+            .causality
+            .as_ref()
+            .and_then(|causality| causality.source_event_id.clone()),
+    };
+    let Some(visible_bubble_id) = active_bubble_id_for_actor(state, &actor_id) else {
+        show_queued_bubble(state, actor_id, queued, created_at_ms);
+        return true;
+    };
+    let visible_has_choice = state
+        .bubbles
+        .get(&visible_bubble_id)
+        .is_some_and(|bubble| bubble.choice.is_some());
+    let same_scene = queued.scene_key.is_some()
+        && state.bubble_scene_keys.get(&actor_id) == Some(&queued.scene_key);
+
+    if visible_has_choice {
+        let queue = state.bubble_queues.entry(actor_id).or_default();
+        if !same_scene {
+            queue.clear();
+        }
+        queue.push_back(queued);
+        return true;
+    }
+
+    if same_scene {
+        state
+            .bubble_queues
+            .entry(actor_id)
+            .or_default()
+            .push_back(queued);
+        return true;
+    }
+
+    state.bubbles.remove(&visible_bubble_id);
+    state.bubble_scene_keys.remove(&actor_id);
+    state.bubble_queues.remove(&actor_id);
+    show_queued_bubble(state, actor_id, queued, created_at_ms);
+    true
+}
+
+fn apply_dialogue_choices_to_state(
+    state: &mut DesktopStageState,
+    command: &RuntimeCommand,
+    created_at_ms: u64,
+) -> bool {
+    let Some(actor_id) = command_actor_id(command) else {
+        return false;
+    };
+    if !state.actors.contains_key(&actor_id) {
+        return false;
+    }
+    let Some(choice_id) = command.payload.get("choiceId").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(choices) = command.payload.get("choices").and_then(Value::as_array) else {
+        return false;
+    };
+    let choices = choices
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        return false;
+    }
+    let timeout_seconds = command
+        .payload
+        .get("timeoutSeconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(30)
+        .clamp(5, 600);
+    let choice = StageBubbleChoice {
+        choice_id: choice_id.to_string(),
+        choices,
+        timeout_seconds,
+    };
+    if let Some(bubble_id) = active_bubble_id_for_actor(state, &actor_id) {
+        if let Some(bubble) = state.bubbles.get_mut(&bubble_id) {
+            bubble.choice = Some(choice);
+            bubble.duration_ms = bubble.duration_ms.max(timeout_seconds.saturating_mul(1000));
+        }
+    } else {
+        state.bubbles.insert(
+            command.id.clone(),
+            StageBubble {
+                bubble_id: command.id.clone(),
+                actor_id: actor_id.clone(),
+                text: String::new(),
+                choice: Some(choice),
+                created_at_ms,
+                duration_ms: timeout_seconds.saturating_mul(1000),
+            },
+        );
+        state.bubble_scene_keys.insert(actor_id, None);
+    }
+    true
+}
+
+fn clear_dialogue_choice_in_state(state: &mut DesktopStageState, actor_id: &str, choice_id: &str) {
+    let Some(bubble_id) = active_bubble_id_for_actor(state, actor_id) else {
+        return;
+    };
+    let Some(bubble) = state.bubbles.get_mut(&bubble_id) else {
+        return;
+    };
+    if bubble
+        .choice
+        .as_ref()
+        .is_some_and(|choice| choice.choice_id == choice_id)
+    {
+        bubble.choice = None;
+    }
+}
+
+fn dismiss_bubble_in_state(state: &mut DesktopStageState, bubble_id: &str, created_at_ms: u64) {
+    let Some(bubble) = state.bubbles.remove(bubble_id) else {
+        return;
+    };
+    let actor_id = bubble.actor_id;
+    state.bubble_scene_keys.remove(&actor_id);
+    let next = state
+        .bubble_queues
+        .get_mut(&actor_id)
+        .and_then(VecDeque::pop_front);
+    if state
+        .bubble_queues
+        .get(&actor_id)
+        .is_some_and(VecDeque::is_empty)
+    {
+        state.bubble_queues.remove(&actor_id);
+    }
+    if let Some(next) = next {
+        show_queued_bubble(state, actor_id, next, created_at_ms);
+    }
+}
+
+fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTreeSet<String>) {
+    state
+        .bubbles
+        .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
+    state
+        .bubble_queues
+        .retain(|actor_id, _| actor_ids.contains(actor_id));
+    state
+        .bubble_scene_keys
+        .retain(|actor_id, _| actor_ids.contains(actor_id));
+    state
+        .perches
+        .retain(|actor_id, _| actor_ids.contains(actor_id));
+    state
+        .active_walks
+        .retain(|actor_id, _| actor_ids.contains(actor_id));
+}
+
+fn active_bubble_id_for_actor(state: &DesktopStageState, actor_id: &str) -> Option<String> {
+    state
+        .bubbles
+        .values()
+        .find(|bubble| bubble.actor_id == actor_id)
+        .map(|bubble| bubble.bubble_id.clone())
+}
+
+fn show_queued_bubble(
+    state: &mut DesktopStageState,
+    actor_id: String,
+    queued: QueuedStageBubble,
+    created_at_ms: u64,
+) {
+    state
+        .bubbles
+        .retain(|_, bubble| bubble.actor_id != actor_id);
+    state
+        .bubble_scene_keys
+        .insert(actor_id.clone(), queued.scene_key);
+    state.bubbles.insert(
+        queued.bubble_id.clone(),
+        StageBubble {
+            bubble_id: queued.bubble_id,
+            actor_id,
+            text: queued.text,
+            choice: None,
+            created_at_ms,
+            duration_ms: queued.duration_ms,
+        },
+    );
 }
 
 impl DesktopStageState {

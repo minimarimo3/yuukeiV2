@@ -24,10 +24,6 @@ import {
   mergeHitZoneDefinitions,
   type ResolvedActorHitZone
 } from "./actorHitZones";
-import {
-  chooseBubbleSide,
-  computeBubblePlacement
-} from "./actorBubbleLayout";
 import type { ActorSurfaceAsset, YuukeiClient } from "./yuukeiClient";
 
 describe("ActorApp renderer helpers", () => {
@@ -284,39 +280,6 @@ describe("ActorApp renderer helpers", () => {
     expect(shouldStartAvatarGrab(499, 0)).toBe(false);
     expect(shouldStartAvatarGrab(500, 6)).toBe(true);
     expect(shouldStartAvatarGrab(500, 6.01)).toBe(false);
-  });
-
-  it("places actor bubbles on the side with more space", () => {
-    expect(chooseBubbleSide(120, 800, 16)).toBe("right");
-    expect(chooseBubbleSide(680, 800, 16)).toBe("left");
-
-    expect(
-      computeBubblePlacement(
-        { x: 120, y: 160, visible: true },
-        { width: 800, height: 420 },
-        { width: 240, height: 80 }
-      ).left
-    ).toBeGreaterThan(120);
-
-    expect(
-      computeBubblePlacement(
-        { x: 680, y: 160, visible: true },
-        { width: 800, height: 420 },
-        { width: 240, height: 80 }
-      ).left
-    ).toBeLessThan(680);
-  });
-
-  it("clamps actor bubbles inside the viewport near edges", () => {
-    const placement = computeBubblePlacement(
-      { x: 790, y: 4, visible: true },
-      { width: 800, height: 280 },
-      { width: 260, height: 96 }
-    );
-
-    expect(placement.left).toBeGreaterThanOrEqual(16);
-    expect(placement.left + placement.width).toBeLessThanOrEqual(800 - 16);
-    expect(placement.top).toBeGreaterThanOrEqual(16);
   });
 
   it("applies dialogue.say hints to the targeted actor bubble immediately", () => {

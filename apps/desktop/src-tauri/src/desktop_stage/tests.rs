@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 #[test]
 fn actor_window_labels_hex_encode_actor_ids() {
@@ -318,6 +319,8 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
             ),
         )]),
         bubbles: BTreeMap::new(),
+        bubble_queues: BTreeMap::new(),
+        bubble_scene_keys: BTreeMap::new(),
         perches: BTreeMap::from([(
             "yuukei".to_string(),
             StagePerch {
@@ -676,6 +679,8 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
             ),
         )]),
         bubbles: BTreeMap::new(),
+        bubble_queues: BTreeMap::new(),
+        bubble_scene_keys: BTreeMap::new(),
         perches: BTreeMap::from([(
             "yuukei".to_string(),
             StagePerch {
@@ -761,6 +766,300 @@ fn command_actor_id_prefers_explicit_target() {
     );
 
     assert_eq!(command_actor_id(&command).as_deref(), Some("targeted"));
+}
+
+#[test]
+fn dialogue_say_keeps_one_visible_bubble_and_advances_same_scene_queue() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("first", "yuukei", "一つ目", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("second", "yuukei", "二つ目", Some("scene-a"), None),
+        20,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("third", "yuukei", "三つ目", Some("scene-a"), None),
+        30,
+    );
+
+    assert_eq!(state.bubbles.len(), 1);
+    assert_eq!(only_bubble(&state).text, "一つ目");
+    assert_eq!(state.bubble_queues["yuukei"].len(), 2);
+
+    dismiss_bubble_in_state(&mut state, "first", 100);
+    assert_eq!(only_bubble(&state).text, "二つ目");
+    assert_eq!(only_bubble(&state).created_at_ms, 100);
+    dismiss_bubble_in_state(&mut state, "second", 200);
+    assert_eq!(only_bubble(&state).text, "三つ目");
+    assert_eq!(only_bubble(&state).created_at_ms, 200);
+    dismiss_bubble_in_state(&mut state, "third", 300);
+    assert!(state.bubbles.is_empty());
+}
+
+#[test]
+fn dialogue_say_replaces_visible_bubble_and_discards_queue_for_another_scene_or_no_causality() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("first", "yuukei", "一つ目", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("queued", "yuukei", "待機", Some("scene-a"), None),
+        20,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("replacement", "yuukei", "別シーン", Some("scene-b"), None),
+        30,
+    );
+
+    assert_eq!(state.bubbles.len(), 1);
+    assert_eq!(only_bubble(&state).bubble_id, "replacement");
+    assert!(state
+        .bubble_queues
+        .get("yuukei")
+        .is_none_or(VecDeque::is_empty));
+
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("no-causality", "yuukei", "因果なし", None, None),
+        40,
+    );
+    assert_eq!(only_bubble(&state).bubble_id, "no-causality");
+    assert!(state
+        .bubble_queues
+        .get("yuukei")
+        .is_none_or(VecDeque::is_empty));
+}
+
+#[test]
+fn dialogue_say_preserves_an_unresolved_choice_and_keeps_only_the_latest_other_scene_queue() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("choice-host", "yuukei", "選んで", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_choices_to_state(&mut state, &choices("choice", "yuukei", 120), 20);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("scene-b", "yuukei", "次の場面", Some("scene-b"), None),
+        30,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("scene-c", "yuukei", "最後の場面", Some("scene-c"), None),
+        40,
+    );
+
+    assert_eq!(only_bubble(&state).bubble_id, "choice-host");
+    assert!(only_bubble(&state).choice.is_some());
+    assert_eq!(state.bubble_queues["yuukei"].len(), 1);
+    assert_eq!(
+        state.bubble_queues["yuukei"]
+            .front()
+            .expect("queued")
+            .bubble_id,
+        "scene-c"
+    );
+
+    clear_dialogue_choice_in_state(&mut state, "yuukei", "choice");
+    dismiss_bubble_in_state(&mut state, "choice-host", 100);
+    assert_eq!(only_bubble(&state).bubble_id, "scene-c");
+    assert_eq!(only_bubble(&state).created_at_ms, 100);
+}
+
+#[test]
+fn dialogue_say_uses_reading_time_without_duration_and_clamps_explicit_duration() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("short", "yuukei", "短い", Some("scene-a"), None),
+        10,
+    );
+    assert_eq!(only_bubble(&state).duration_ms, MIN_BUBBLE_DURATION_MS);
+
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("long", "yuukei", &"あ".repeat(200), Some("scene-b"), None),
+        20,
+    );
+    assert_eq!(only_bubble(&state).duration_ms, 9_000);
+
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("explicit-min", "yuukei", "指定", Some("scene-c"), Some(1)),
+        30,
+    );
+    assert_eq!(only_bubble(&state).duration_ms, MIN_BUBBLE_DURATION_MS);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("explicit", "yuukei", "指定", Some("scene-d"), Some(5_000)),
+        40,
+    );
+    assert_eq!(only_bubble(&state).duration_ms, 5_000);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say(
+            "explicit-max",
+            "yuukei",
+            "指定",
+            Some("scene-e"),
+            Some(50_000),
+        ),
+        50,
+    );
+    assert_eq!(only_bubble(&state).duration_ms, MAX_BUBBLE_DURATION_MS);
+}
+
+#[test]
+fn standalone_choices_respect_their_timeout_up_to_six_hundred_seconds() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_choices_to_state(&mut state, &choices("two-minutes", "yuukei", 120), 10);
+    assert_eq!(only_bubble(&state).duration_ms, 120_000);
+
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_choices_to_state(&mut state, &choices("clamped", "yuukei", 700), 10);
+    assert_eq!(only_bubble(&state).duration_ms, 600_000);
+}
+
+#[test]
+fn dialogue_bubbles_are_independent_per_actor_and_actor_removal_discards_queue() {
+    let mut state = bubble_state(&["yuukei", "partner"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("yuukei-visible", "yuukei", "ゆ", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("yuukei-queued", "yuukei", "ゆ待機", Some("scene-a"), None),
+        20,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("partner-visible", "partner", "相手", Some("scene-b"), None),
+        30,
+    );
+
+    assert_eq!(state.bubbles.len(), 2);
+    assert_eq!(state.bubble_queues["yuukei"].len(), 1);
+    retain_stage_state_for_actors(&mut state, &BTreeSet::from(["partner".to_string()]));
+    assert_eq!(state.bubbles.len(), 1);
+    assert_eq!(only_bubble(&state).actor_id, "partner");
+    assert!(!state.bubble_queues.contains_key("yuukei"));
+}
+
+#[test]
+fn stage_snapshot_does_not_expose_bubble_queue_or_scene_state() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("visible", "yuukei", "表示", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("queued", "yuukei", "待機", Some("scene-a"), None),
+        20,
+    );
+
+    let snapshot = serde_json::to_value(state.snapshot()).expect("snapshot JSON");
+    assert!(snapshot.get("bubbles").is_some());
+    assert!(snapshot.get("bubbleQueues").is_none());
+    assert!(snapshot.get("bubbleSceneKeys").is_none());
+}
+
+fn bubble_state(actor_ids: &[&str]) -> DesktopStageState {
+    let specs = test_specs(actor_ids);
+    DesktopStageState {
+        actors: specs
+            .iter()
+            .map(|spec| {
+                (
+                    spec.actor_id.clone(),
+                    actor_from_spec(
+                        spec,
+                        StageRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: ACTOR_WINDOW_WIDTH,
+                            height: ACTOR_WINDOW_HEIGHT,
+                        },
+                        true,
+                    ),
+                )
+            })
+            .collect(),
+        ..DesktopStageState::default()
+    }
+}
+
+fn say(
+    id: &str,
+    actor_id: &str,
+    text: &str,
+    source_event_id: Option<&str>,
+    duration_ms: Option<u64>,
+) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+    command.id = id.to_string();
+    command.target = Some(yuukei_protocol::CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some(actor_id.to_string()),
+    });
+    command
+        .payload
+        .insert("text".to_string(), Value::String(text.to_string()));
+    if let Some(duration_ms) = duration_ms {
+        command
+            .payload
+            .insert("durationMs".to_string(), Value::Number(duration_ms.into()));
+    }
+    command.causality = source_event_id.map(|source_event_id| yuukei_protocol::Causality {
+        source_event_id: Some(source_event_id.to_string()),
+        source_command_id: None,
+        trace_id: None,
+    });
+    command
+}
+
+fn choices(id: &str, actor_id: &str, timeout_seconds: u64) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new("dialogue.choices", "daihon", "resident-default");
+    command.id = format!("command-{id}");
+    command.target = Some(yuukei_protocol::CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some(actor_id.to_string()),
+    });
+    command
+        .payload
+        .insert("choiceId".to_string(), Value::String(id.to_string()));
+    command.payload.insert(
+        "choices".to_string(),
+        Value::Array(vec![
+            Value::String("はい".to_string()),
+            Value::String("いいえ".to_string()),
+        ]),
+    );
+    command.payload.insert(
+        "timeoutSeconds".to_string(),
+        Value::Number(timeout_seconds.into()),
+    );
+    command
+}
+
+fn only_bubble(state: &DesktopStageState) -> &StageBubble {
+    assert_eq!(state.bubbles.len(), 1);
+    state.bubbles.values().next().expect("one bubble")
 }
 
 fn test_catalog(actors: Vec<crate::DesktopActorSurfaceAsset>) -> DesktopActorSurfaceAssetCatalog {
