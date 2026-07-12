@@ -155,6 +155,15 @@ impl LocalYuukeiRuntime {
         registry.complete()
     }
 
+    pub fn dismiss_onboarding() -> Result<OnboardingState> {
+        Self::dismiss_onboarding_in(LocalRuntimeEnvironment::default_local())
+    }
+
+    pub fn dismiss_onboarding_in(env: LocalRuntimeEnvironment) -> Result<OnboardingState> {
+        let mut registry = OnboardingRegistry::open(&env.data_dir)?;
+        registry.dismiss()
+    }
+
     pub fn set_app_talk_interval_minutes(minutes: u64) -> Result<AppSettingsState> {
         Self::set_app_talk_interval_minutes_in(LocalRuntimeEnvironment::default_local(), minutes)
     }

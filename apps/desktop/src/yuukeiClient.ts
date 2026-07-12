@@ -168,6 +168,8 @@ export type ObservationSettingsUpdate = {
 export type OnboardingState = {
   completed: boolean;
   completedAt?: string | null;
+  dismissed: boolean;
+  dismissedAt?: string | null;
   settingsPath: string;
 };
 
@@ -376,6 +378,7 @@ export type YuukeiClient = {
   getObservationSettings(): Promise<ObservationSettingsState>;
   getOnboardingState(): Promise<OnboardingState>;
   completeOnboarding(): Promise<OnboardingState>;
+  dismissOnboarding(): Promise<OnboardingState>;
   setObservationSettings(
     settings: ObservationSettingsUpdate
   ): Promise<ObservationSettingsState>;
@@ -491,6 +494,7 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<ObservationSettingsState>("get_observation_settings"),
   getOnboardingState: () => invoke<OnboardingState>("get_onboarding_state"),
   completeOnboarding: () => invoke<OnboardingState>("complete_onboarding"),
+  dismissOnboarding: () => invoke<OnboardingState>("dismiss_onboarding"),
   setObservationSettings: (settings: ObservationSettingsUpdate) =>
     invoke<ObservationSettingsState>("set_observation_settings", { settings }),
   getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),

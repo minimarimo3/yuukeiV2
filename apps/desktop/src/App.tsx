@@ -539,6 +539,11 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function dismissOnboarding() {
+    setOnboardingDismissed(true);
+    setOnboardingState(await client.dismissOnboarding());
+  }
+
   async function completeOnboarding() {
     setOnboardingState(await client.completeOnboarding());
     setOnboardingStep(0);
@@ -1219,7 +1224,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     (extension) => extension.extensionId === "yuukei-intelligence"
   );
   const showOnboarding =
-    !!onboardingState && !onboardingState.completed && !onboardingDismissed;
+    !!onboardingState &&
+    !onboardingState.completed &&
+    !onboardingState.dismissed &&
+    !onboardingDismissed;
 
   if (showOnboarding) {
     return (
@@ -1242,7 +1250,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           changingObservationSettings={changingObservationSettings}
           onToggleObservation={toggleObservationSetting}
           onStepChange={setOnboardingStep}
-          onDismiss={() => setOnboardingDismissed(true)}
+          onDismiss={() => void dismissOnboarding()}
           onComplete={() => void completeOnboarding()}
         />
       </main>

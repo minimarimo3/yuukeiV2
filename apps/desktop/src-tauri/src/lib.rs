@@ -220,6 +220,11 @@ async fn complete_onboarding(state: State<'_, AppState>) -> Result<OnboardingSta
 }
 
 #[tauri::command]
+async fn dismiss_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    LocalYuukeiRuntime::dismiss_onboarding_in(state.env.clone()).map_err(to_message)
+}
+
+#[tauri::command]
 async fn set_observation_settings(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -826,7 +831,7 @@ pub fn run() {
             );
             let power_observer = PowerObserver::new(runtime.clone());
             let should_show_onboarding = LocalYuukeiRuntime::onboarding_state_in(env.clone())
-                .map(|state| !state.completed)
+                .map(|state| !state.completed && !state.dismissed)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(AppState {
                 env,
@@ -882,6 +887,12 @@ pub fn run() {
             if window.label() == "settings" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
+                    let state = window.app_handle().state::<AppState>();
+                    if let Err(error) =
+                        LocalYuukeiRuntime::dismiss_onboarding_in(state.env.clone())
+                    {
+                        eprintln!("Yuukei onboarding dismiss error: {error}");
+                    }
                     let _ = window.emit("yuukei-onboarding-dismissed", ());
                     let _ = window.hide();
                 }
@@ -900,6 +911,7 @@ pub fn run() {
             get_observation_settings,
             get_onboarding_state,
             complete_onboarding,
+            dismiss_onboarding,
             set_observation_settings,
             get_capability_usage,
             list_resident_memories,

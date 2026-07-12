@@ -184,6 +184,8 @@ function onboardingState(
   return {
     completed: true,
     completedAt: "2026-07-07T00:00:00.000Z",
+    dismissed: false,
+    dismissedAt: null,
     settingsPath: "/tmp/yuukei-v2/settings/onboarding.json",
     ...overrides
   };
@@ -297,6 +299,14 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     getObservationSettings: vi.fn(async () => observationSettings()),
     getOnboardingState: vi.fn(async () => onboardingState()),
     completeOnboarding: vi.fn(async () => onboardingState()),
+    dismissOnboarding: vi.fn(async () =>
+      onboardingState({
+        completed: false,
+        completedAt: null,
+        dismissed: true,
+        dismissedAt: "2026-07-12T00:00:00.000Z"
+      })
+    ),
     setObservationSettings: vi.fn(async (settings) =>
       observationSettings(settings)
     ),
@@ -466,6 +476,47 @@ describe("App", () => {
       "true"
     );
     expect(screen.queryByRole("heading", { name: "完了" })).not.toBeInTheDocument();
+  });
+
+  it("persists dismissal when あとで is clicked during onboarding", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({ completed: false, completedAt: null })
+      )
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "あとで" }));
+
+    await waitFor(() => expect(client.dismissOnboarding).toHaveBeenCalled());
+    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+  });
+
+  it("does not show onboarding when it was dismissed before", async () => {
+    const client = clientFixture({
+      getOnboardingState: vi.fn(async () =>
+        onboardingState({
+          completed: false,
+          completedAt: null,
+          dismissed: true,
+          dismissedAt: "2026-07-12T00:00:00.000Z"
+        })
+      )
+    });
+
+    render(<App client={client} />);
+
+    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(
+      screen.queryByRole("heading", { name: "ようこそ" })
+    ).not.toBeInTheDocument();
   });
 
   it("switches settings categories without leaving the app surface", async () => {

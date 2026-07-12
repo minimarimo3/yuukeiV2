@@ -459,6 +459,9 @@ pub struct OnboardingState {
     pub completed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
+    pub dismissed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
     pub settings_path: PathBuf,
 }
 
@@ -475,6 +478,8 @@ struct StoredOnboardingState {
     completed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissed_at: Option<String>,
 }
 
 impl OnboardingRegistry {
@@ -496,6 +501,8 @@ impl OnboardingRegistry {
         OnboardingState {
             completed: self.stored.completed,
             completed_at: self.stored.completed_at.clone(),
+            dismissed: self.stored.dismissed_at.is_some(),
+            dismissed_at: self.stored.dismissed_at.clone(),
             settings_path: self.settings_path.clone(),
         }
     }
@@ -504,6 +511,14 @@ impl OnboardingRegistry {
         self.stored.completed = true;
         self.stored.completed_at = Some(now_timestamp());
         self.save()?;
+        Ok(self.state())
+    }
+
+    pub(crate) fn dismiss(&mut self) -> Result<OnboardingState> {
+        if !self.stored.completed && self.stored.dismissed_at.is_none() {
+            self.stored.dismissed_at = Some(now_timestamp());
+            self.save()?;
+        }
         Ok(self.state())
     }
 
@@ -704,6 +719,8 @@ mod tests {
             OnboardingState {
                 completed: false,
                 completed_at: None,
+                dismissed: false,
+                dismissed_at: None,
                 settings_path: settings_path.clone(),
             }
         );
@@ -721,6 +738,47 @@ mod tests {
         let reopened = OnboardingRegistry::open(data.path())?;
         assert!(reopened.state().completed);
         assert_eq!(reopened.state().settings_path, settings_path);
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_dismissal_persists_without_completing(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let settings_path = data.path().join("settings").join("onboarding.json");
+        let mut registry = OnboardingRegistry::open(data.path())?;
+
+        let dismissed = registry.dismiss()?;
+        assert!(!dismissed.completed);
+        assert!(dismissed.dismissed);
+        assert!(dismissed.dismissed_at.is_some());
+        assert!(settings_path.exists());
+
+        let reopened = OnboardingRegistry::open(data.path())?;
+        assert!(reopened.state().dismissed);
+        assert!(!reopened.state().completed);
+
+        // 却下は冪等: 2回目はタイムスタンプを上書きしない
+        let first_dismissed_at = dismissed.dismissed_at.clone();
+        let mut reopened = reopened;
+        let again = reopened.dismiss()?;
+        assert_eq!(again.dismissed_at, first_dismissed_at);
+        Ok(())
+    }
+
+    #[test]
+    fn onboarding_completion_after_dismissal_keeps_completed(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = OnboardingRegistry::open(data.path())?;
+
+        registry.dismiss()?;
+        let completed = registry.complete()?;
+        assert!(completed.completed);
+
+        // 完了後のdismissは何も変えない
+        let after = registry.dismiss()?;
+        assert!(after.completed);
         Ok(())
     }
 
