@@ -241,8 +241,21 @@ impl DesktopStageManager {
             .write()
             .map_err(|_| "desktop stage lock is poisoned".to_string())?;
         open_conversation_composer_in_state(&mut state, actor_id)?;
+        let overlay_label = state.conversation_composer.as_ref().and_then(|composer| {
+            state
+                .monitors
+                .iter()
+                .find(|monitor| monitor.id == composer.monitor_id)
+                .map(|monitor| monitor.label.clone())
+        });
         drop(state);
-        self.emit_state(app)
+        self.emit_state(app)?;
+        if let Some(window) = overlay_label.and_then(|label| app.get_webview_window(&label)) {
+            window.set_ignore_cursor_events(false).map_err(to_message)?;
+            window.show().map_err(to_message)?;
+            window.set_focus().map_err(to_message)?;
+        }
+        Ok(())
     }
 
     pub fn close_conversation_composer(&self, app: &AppHandle) -> Result<(), String> {
@@ -250,7 +263,32 @@ impl DesktopStageManager {
             .state
             .write()
             .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        close_conversation_composer_in_state(&mut state);
+        let changed = close_conversation_composer_in_state(&mut state);
+        drop(state);
+        if changed {
+            self.emit_state(app)?;
+        }
+        Ok(())
+    }
+
+    pub fn close_conversation_composer_for_overlay(
+        &self,
+        app: &AppHandle,
+        overlay_label: &str,
+    ) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        let owns_composer = state.conversation_composer.as_ref().is_some_and(|composer| {
+            state
+                .monitors
+                .iter()
+                .any(|monitor| monitor.id == composer.monitor_id && monitor.label == overlay_label)
+        });
+        if !owns_composer || !close_conversation_composer_in_state(&mut state) {
+            return Ok(());
+        }
         drop(state);
         self.emit_state(app)
     }
@@ -1084,7 +1122,8 @@ fn open_conversation_composer_in_state(
         .or_else(|| state.monitors.first());
     let anchor = match monitor {
         Some(monitor) if point_is_inside(&actor.anchor, &monitor.bounds) => actor.anchor.clone(),
-        _ => default_actor_anchor(&actor.bounds),
+        Some(monitor) => clamp_anchor_to_monitor(default_actor_anchor(&actor.bounds), &monitor.bounds),
+        None => default_actor_anchor(&actor.bounds),
     };
     state.conversation_composer = Some(DesktopConversationComposer {
         actor_id: actor_id.to_string(),
@@ -1109,8 +1148,20 @@ fn rects_intersect(first: &StageRect, second: &StageRect) -> bool {
         && first.y + first.height > second.y
 }
 
-fn close_conversation_composer_in_state(state: &mut DesktopStageState) {
-    state.conversation_composer = None;
+fn close_conversation_composer_in_state(state: &mut DesktopStageState) -> bool {
+    state.conversation_composer.take().is_some()
+}
+
+fn clamp_anchor_to_monitor(mut anchor: StageAnchor, bounds: &StageRect) -> StageAnchor {
+    let inset = 12.0;
+    let min_x = bounds.x + inset;
+    let max_x = (bounds.x + bounds.width - inset).max(min_x);
+    let min_y = bounds.y + inset;
+    let max_y = (bounds.y + bounds.height - inset).max(min_y);
+    anchor.x = anchor.x.clamp(min_x, max_x);
+    anchor.y = anchor.y.clamp(min_y, max_y);
+    anchor.visible = true;
+    anchor
 }
 
 fn active_bubble_id_for_actor(state: &DesktopStageState, actor_id: &str) -> Option<String> {

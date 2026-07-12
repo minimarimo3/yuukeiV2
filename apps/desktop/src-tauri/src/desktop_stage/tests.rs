@@ -44,7 +44,10 @@ fn conversation_composer_rejects_unknown_actor() {
 fn conversation_composer_uses_actor_fallback_anchor_and_monitor() {
     let mut state = bubble_state(&["yuukei"]);
     state.monitors = vec![test_monitor(1000.0, 700.0)];
-    state.actors.get_mut("yuukei").expect("actor").anchor = StageAnchor {
+    let actor = state.actors.get_mut("yuukei").expect("actor");
+    actor.bounds.x = -900.0;
+    actor.bounds.y = -900.0;
+    actor.anchor = StageAnchor {
         x: -500.0,
         y: -500.0,
         visible: false,
@@ -60,6 +63,17 @@ fn conversation_composer_uses_actor_fallback_anchor_and_monitor() {
     assert!(composer.anchor.visible);
     assert!(composer.anchor.x >= 0.0);
     assert!(composer.anchor.y >= 0.0);
+    assert!(composer.anchor.x <= 1000.0);
+    assert!(composer.anchor.y <= 700.0);
+}
+
+#[test]
+fn closing_conversation_composer_reports_only_real_changes() {
+    let mut state = bubble_state(&["yuukei"]);
+    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
+
+    assert!(close_conversation_composer_in_state(&mut state));
+    assert!(!close_conversation_composer_in_state(&mut state));
 }
 
 #[test]

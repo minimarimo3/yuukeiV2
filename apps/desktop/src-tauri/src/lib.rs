@@ -902,6 +902,18 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if desktop_stage::is_stage_overlay_label(window.label())
+                && matches!(event, WindowEvent::Focused(false))
+            {
+                let app_handle = window.app_handle().clone();
+                let state = app_handle.state::<AppState>();
+                if let Err(error) = state
+                    .stage
+                    .close_conversation_composer_for_overlay(&app_handle, window.label())
+                {
+                    eprintln!("Yuukei conversation composer blur error: {error}");
+                }
+            }
             if desktop_stage::is_actor_window_label(window.label())
                 && matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
             {
