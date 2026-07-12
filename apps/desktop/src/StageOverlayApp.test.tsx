@@ -184,6 +184,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getAppSettings: vi.fn(async () => ({
       talkIntervalMinutes: 5,
       actorScalePercent: 100,
+      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json"
     })),
     getExtensionSettings: vi.fn(),
@@ -214,13 +215,16 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) => ({
       talkIntervalMinutes: minutes,
       actorScalePercent: 100,
+      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json"
     })),
     setAppActorScalePercent: vi.fn(async (percent: number) => ({
       talkIntervalMinutes: 5,
       actorScalePercent: percent,
+      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json"
     })),
+    setAppConversationSendShortcut: vi.fn(),
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),

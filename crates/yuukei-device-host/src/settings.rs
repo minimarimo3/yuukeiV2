@@ -5,7 +5,17 @@ use super::*;
 pub struct AppSettingsState {
     pub talk_interval_minutes: u64,
     pub actor_scale_percent: u16,
+    pub conversation_send_shortcut: ConversationSendShortcut,
     pub settings_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationSendShortcut {
+    #[default]
+    CtrlEnter,
+    Enter,
+    ShiftEnter,
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +31,8 @@ struct StoredAppSettings {
     talk_interval_minutes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     actor_scale_percent: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_send_shortcut: Option<ConversationSendShortcut>,
 }
 
 impl Default for StoredAppSettings {
@@ -29,6 +41,7 @@ impl Default for StoredAppSettings {
             schema_version: 1,
             talk_interval_minutes: DEFAULT_TALK_INTERVAL_MINUTES,
             actor_scale_percent: None,
+            conversation_send_shortcut: None,
         }
     }
 }
@@ -72,6 +85,7 @@ impl AppSettingsRegistry {
                 .actor_scale_percent
                 .map(clamp_actor_scale_percent)
                 .unwrap_or(DEFAULT_ACTOR_SCALE_PERCENT),
+            conversation_send_shortcut: self.stored.conversation_send_shortcut.unwrap_or_default(),
             settings_path: self.settings_path.clone(),
         }
     }
@@ -84,6 +98,15 @@ impl AppSettingsRegistry {
 
     pub(crate) fn set_actor_scale_percent(&mut self, percent: u16) -> Result<AppSettingsState> {
         self.stored.actor_scale_percent = Some(clamp_actor_scale_percent(percent));
+        self.save()?;
+        Ok(self.state())
+    }
+
+    pub(crate) fn set_conversation_send_shortcut(
+        &mut self,
+        shortcut: ConversationSendShortcut,
+    ) -> Result<AppSettingsState> {
+        self.stored.conversation_send_shortcut = Some(shortcut);
         self.save()?;
         Ok(self.state())
     }
@@ -425,7 +448,10 @@ impl ObservationSettingsRegistry {
         }
     }
 
-    pub(crate) fn set(&mut self, next: ObservationSettingsUpdate) -> Result<ObservationSettingsState> {
+    pub(crate) fn set(
+        &mut self,
+        next: ObservationSettingsUpdate,
+    ) -> Result<ObservationSettingsState> {
         self.stored.windows = next.windows;
         self.stored.folders = next.folders;
         self.stored.downloads = next.downloads;
@@ -534,7 +560,6 @@ impl OnboardingRegistry {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +600,30 @@ mod tests {
         assert_eq!(
             registry.state().actor_scale_percent,
             DEFAULT_ACTOR_SCALE_PERCENT
+        );
+        assert_eq!(
+            registry.state().conversation_send_shortcut,
+            ConversationSendShortcut::CtrlEnter
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_settings_persist_conversation_send_shortcut(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let data = tempdir()?;
+        let mut registry = AppSettingsRegistry::open(data.path())?;
+
+        assert_eq!(
+            registry.state().conversation_send_shortcut,
+            ConversationSendShortcut::CtrlEnter
+        );
+        registry.set_conversation_send_shortcut(ConversationSendShortcut::ShiftEnter)?;
+
+        let reopened = AppSettingsRegistry::open(data.path())?;
+        assert_eq!(
+            reopened.state().conversation_send_shortcut,
+            ConversationSendShortcut::ShiftEnter
         );
         Ok(())
     }
@@ -781,5 +830,4 @@ mod tests {
         assert!(after.completed);
         Ok(())
     }
-
 }

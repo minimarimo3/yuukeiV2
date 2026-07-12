@@ -188,6 +188,14 @@ impl LocalYuukeiRuntime {
         registry.set_actor_scale_percent(percent)
     }
 
+    pub fn set_app_conversation_send_shortcut_in(
+        env: LocalRuntimeEnvironment,
+        shortcut: ConversationSendShortcut,
+    ) -> Result<AppSettingsState> {
+        let mut registry = AppSettingsRegistry::open(&env.data_dir)?;
+        registry.set_conversation_send_shortcut(shortcut)
+    }
+
     pub fn set_runtime_settings(settings: RuntimeSettingsUpdate) -> Result<RuntimeSettingsState> {
         Self::set_runtime_settings_in(LocalRuntimeEnvironment::default_local(), settings)
     }

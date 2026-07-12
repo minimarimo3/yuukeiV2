@@ -122,8 +122,11 @@ export type ExtensionSettingsChangeResult = {
 export type AppSettingsState = {
   talkIntervalMinutes: number;
   actorScalePercent: number;
+  conversationSendShortcut: ConversationSendShortcut;
   settingsPath: string;
 };
+
+export type ConversationSendShortcut = "ctrlEnter" | "enter" | "shiftEnter";
 
 export type RuntimeSettingsState = {
   llmTimeoutMs: number;
@@ -461,6 +464,9 @@ export type YuukeiClient = {
   restartExtensionProcess(extensionId: string): Promise<ExtensionSettingsState>;
   setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
   setAppActorScalePercent(percent: number): Promise<AppSettingsState>;
+  setAppConversationSendShortcut(
+    shortcut: ConversationSendShortcut
+  ): Promise<AppSettingsState>;
   setRuntimeSettings(
     settings: RuntimeSettingsUpdate
   ): Promise<RuntimeSettingsState>;
@@ -638,6 +644,8 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),
   setAppActorScalePercent: (percent: number) =>
     invoke<AppSettingsState>("set_app_actor_scale_percent", { percent }),
+  setAppConversationSendShortcut: (shortcut: ConversationSendShortcut) =>
+    invoke<AppSettingsState>("set_app_conversation_send_shortcut", { shortcut }),
   setRuntimeSettings: (settings: RuntimeSettingsUpdate) =>
     invoke<RuntimeSettingsState>("set_runtime_settings", { settings }),
   resetSceneHistory: () => invoke<SceneHistoryState>("reset_scene_history"),

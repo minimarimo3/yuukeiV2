@@ -20,13 +20,13 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
-    DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
-    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
-    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
-    ResidentEventLogPage, RuntimeSettingsState, RuntimeSettingsUpdate, SceneHistoryState,
-    StageSettingsRegistry, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
-    TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, ConversationSendShortcut,
+    DesktopFolderObservationState, DesktopWindowObservationState, EventLogDeleteResult,
+    EventLogPrivacyCategoryFilter, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
+    ObservationSettingsUpdate, OnboardingState, ResidentEventLogPage, RuntimeSettingsState,
+    RuntimeSettingsUpdate, SceneHistoryState, StageSettingsRegistry, WorldPackSelectionState,
+    WorldPackSwitchResult, WorldPackZipInspection, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -769,6 +769,15 @@ async fn set_app_actor_scale_percent(
 }
 
 #[tauri::command]
+async fn set_app_conversation_send_shortcut(
+    state: State<'_, AppState>,
+    shortcut: ConversationSendShortcut,
+) -> Result<AppSettingsState, String> {
+    LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(state.env.clone(), shortcut)
+        .map_err(to_message)
+}
+
+#[tauri::command]
 async fn set_runtime_settings(
     state: State<'_, AppState>,
     settings: RuntimeSettingsUpdate,
@@ -953,6 +962,7 @@ pub fn run() {
             restart_extension_process,
             set_app_talk_interval_minutes,
             set_app_actor_scale_percent,
+            set_app_conversation_send_shortcut,
             set_runtime_settings,
             reset_scene_history
         ])

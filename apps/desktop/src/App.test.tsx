@@ -133,6 +133,7 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   return {
     talkIntervalMinutes,
     actorScalePercent: 100,
+    conversationSendShortcut: "ctrlEnter",
     settingsPath: "/tmp/yuukei-v2/settings/app.json"
   };
 }
@@ -381,6 +382,10 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setAppActorScalePercent: vi.fn(async (percent: number) => ({
       ...appSettings(),
       actorScalePercent: percent
+    })),
+    setAppConversationSendShortcut: vi.fn(async (shortcut) => ({
+      ...appSettings(),
+      conversationSendShortcut: shortcut
     })),
     setRuntimeSettings: vi.fn(async (settings) => runtimeSettings(settings)),
     resetSceneHistory: vi.fn(async () => sceneHistory([])),
