@@ -115,7 +115,7 @@ export function ExtensionSettingsForm({
       const nonSecretValues: Record<string, unknown> = {};
       for (const field of fields) {
         if (field.type === "secret") continue;
-        const hasSavedValue = Object.prototype.hasOwnProperty.call(
+        const hasSavedValue = Object.hasOwn(
           extension.settingValues,
           field.key,
         );
