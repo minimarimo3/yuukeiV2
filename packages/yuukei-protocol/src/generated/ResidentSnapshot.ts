@@ -4,4 +4,13 @@ import type { CapabilityRouteSummary } from "./CapabilityRouteSummary";
 import type { ExtensionSummary } from "./ExtensionSummary";
 import type { SurfaceSession } from "./SurfaceSession";
 
-export type ResidentSnapshot = { residentId: string, worldPackId: string, activeSurfaceId?: string, actors: { [key in string]?: ActorSnapshot }, surfaces: { [key in string]?: SurfaceSession }, capabilities: { [key in string]?: CapabilityRouteSummary }, extensions: { [key in string]?: ExtensionSummary }, recentEventCursor: string, };
+export type ResidentSnapshot = {
+  residentId: string;
+  worldPackId: string;
+  activeSurfaceId?: string;
+  actors: { [key in string]?: ActorSnapshot };
+  surfaces: { [key in string]?: SurfaceSession };
+  capabilities: { [key in string]?: CapabilityRouteSummary };
+  extensions: { [key in string]?: ExtensionSummary };
+  recentEventCursor: string;
+};

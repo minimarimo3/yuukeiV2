@@ -11,7 +11,7 @@ describe("ConversationComposer", () => {
   it.each([
     ["ctrlEnter", { ctrlKey: true }],
     ["enter", {}],
-    ["shiftEnter", { shiftKey: true }]
+    ["shiftEnter", { shiftKey: true }],
   ] as const)("submits with %s", async (shortcut, modifiers) => {
     const submit = vi.fn(async () => undefined);
     const dismiss = vi.fn();
@@ -39,7 +39,11 @@ describe("ConversationComposer", () => {
 
   it("inserts a newline when plain Enter is not the configured shortcut", async () => {
     const user = userEvent.setup();
-    renderComposer("ctrlEnter", vi.fn(async () => undefined), vi.fn());
+    renderComposer(
+      "ctrlEnter",
+      vi.fn(async () => undefined),
+      vi.fn(),
+    );
     const input = screen.getByRole("textbox", { name: "住人に話しかける" });
 
     await user.type(input, "一行目{Enter}二行目");
@@ -71,11 +75,15 @@ describe("ConversationComposer", () => {
 
   it("dismisses with Escape", () => {
     const dismiss = vi.fn();
-    renderComposer("ctrlEnter", vi.fn(async () => undefined), dismiss);
+    renderComposer(
+      "ctrlEnter",
+      vi.fn(async () => undefined),
+      dismiss,
+    );
 
     fireEvent.keyDown(
       screen.getByRole("textbox", { name: "住人に話しかける" }),
-      { key: "Escape" }
+      { key: "Escape" },
     );
 
     expect(dismiss).toHaveBeenCalledOnce();
@@ -92,7 +100,9 @@ describe("ConversationComposer", () => {
     fireEvent.change(input, { target: { value: "あとでもう一度" } });
     fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("送信できませんでした");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "送信できませんでした",
+    );
     expect(input).toHaveValue("あとでもう一度");
     expect(dismiss).not.toHaveBeenCalled();
   });
@@ -103,7 +113,7 @@ describe("ConversationComposer", () => {
       () =>
         new Promise<void>((resolve) => {
           finish = resolve;
-        })
+        }),
     );
     renderComposer("ctrlEnter", submit, vi.fn());
     const input = screen.getByRole("textbox", { name: "住人に話しかける" });
@@ -120,13 +130,13 @@ describe("ConversationComposer", () => {
 function renderComposer(
   shortcut: ConversationSendShortcut,
   onSubmit: (text: string) => Promise<void>,
-  onDismiss: () => void
+  onDismiss: () => void,
 ) {
   return render(
     <ConversationComposer
       shortcut={shortcut}
       onSubmit={onSubmit}
       onDismiss={onDismiss}
-    />
+    />,
   );
 }

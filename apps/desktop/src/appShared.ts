@@ -2,10 +2,10 @@ import type { EventLogRecord, InstalledExtension } from "./yuukeiClient";
 
 export function orderExtensionsForHook(
   extensions: InstalledExtension[],
-  orderedIds: string[]
+  orderedIds: string[],
 ): InstalledExtension[] {
   const byId = new Map(
-    extensions.map((extension) => [extension.extensionId, extension])
+    extensions.map((extension) => [extension.extensionId, extension]),
   );
   const ordered = orderedIds
     .map((extensionId) => byId.get(extensionId))
@@ -19,11 +19,15 @@ export function orderExtensionsForHook(
   return ordered;
 }
 
-export function subscribesToBeforeCommandEmit(extension: InstalledExtension): boolean {
+export function subscribesToBeforeCommandEmit(
+  extension: InstalledExtension,
+): boolean {
   return extension.hooks.some((hook) => hook.hookPoint === "beforeCommandEmit");
 }
 
-export function extensionRuntimeStatusLabel(extension: InstalledExtension): string {
+export function extensionRuntimeStatusLabel(
+  extension: InstalledExtension,
+): string {
   if (!extension.enabled) return "状態: 無効";
   const status = extension.runtimeStatus;
   if (!status) return "状態: 正常";
@@ -34,7 +38,9 @@ export function extensionRuntimeStatusLabel(extension: InstalledExtension): stri
   return "状態: 正常";
 }
 
-export function voicevoxCreditText(extension: InstalledExtension): string | null {
+export function voicevoxCreditText(
+  extension: InstalledExtension,
+): string | null {
   if (extension.extensionId !== "yuukei-voicevox") return null;
   return "音声合成にVOICEVOXを使用します。生成音声の利用は各キャラクターの規約に従ってください(既定の声: VOICEVOX:四国めたん / VOICEVOX:ずんだもん)";
 }
@@ -58,7 +64,7 @@ export function formatMemoryTimestamp(value: string): string {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
   });
 }
 
@@ -76,7 +82,7 @@ export function eventLogSummary(record: EventLogRecord): string {
     "app",
     "windowKey",
     "reason",
-    "deleted"
+    "deleted",
   ];
   for (const key of preferredKeys) {
     const value = payload[key];
@@ -101,27 +107,27 @@ export type ExtensionPermissionRow = {
 };
 
 export function extensionPermissionRows(
-  extension: InstalledExtension
+  extension: InstalledExtension,
 ): ExtensionPermissionRow[] {
   const rows: ExtensionPermissionRow[] = [];
   const broadEventSubscription =
     extension.permissions.broadEventSubscription ||
     extension.eventSubscriptions.some((subscription) =>
-      subscription.eventTypes.some((eventType) => eventType.trim() === "*")
+      subscription.eventTypes.some((eventType) => eventType.trim() === "*"),
     );
 
   if (broadEventSubscription) {
     rows.push({
       label: "全イベント購読",
       value: "全イベントを受け取ります",
-      warning: true
+      warning: true,
     });
   }
   if (extension.permissions.eventLogRead) {
     const permission = extension.permissions.eventLogRead;
     rows.push({
       label: "event log読み出し",
-      value: `${joinOrAll(permission.eventTypes)} / max ${permission.maxRecords}`
+      value: `${joinOrAll(permission.eventTypes)} / max ${permission.maxRecords}`,
     });
   }
   if (extension.capabilities.length > 0) {
@@ -129,13 +135,13 @@ export function extensionPermissionRows(
       label: "capability提供",
       value: extension.capabilities
         .map((capability) => capability.capability)
-        .join(", ")
+        .join(", "),
     });
   }
   if (extension.emittedEvents.length > 0) {
     rows.push({
       label: "発行イベント",
-      value: extension.emittedEvents.join(", ")
+      value: extension.emittedEvents.join(", "),
     });
   }
 

@@ -2,4 +2,16 @@
 import type { Causality } from "./Causality";
 import type { Privacy } from "./Privacy";
 
-export type RuntimeEvent = { id: string, type: string, timestamp: string, source: string, residentId: string, payload: { [key: string]: unknown }, causality?: Causality, deviceId?: string, surfaceId?: string, actorId?: string, privacy?: Privacy, };
+export type RuntimeEvent = {
+  id: string;
+  type: string;
+  timestamp: string;
+  source: string;
+  residentId: string;
+  payload: { [key: string]: unknown };
+  causality?: Causality;
+  deviceId?: string;
+  surfaceId?: string;
+  actorId?: string;
+  privacy?: Privacy;
+};

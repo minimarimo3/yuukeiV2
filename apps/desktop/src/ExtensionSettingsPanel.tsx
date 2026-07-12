@@ -4,7 +4,7 @@ import type {
   ExtensionCapabilityUsage,
   ExtensionSettingsChangeResult,
   InstalledExtension,
-  YuukeiClient
+  YuukeiClient,
 } from "./yuukeiClient";
 
 export type ExtensionSettingsFormProps = {
@@ -23,8 +23,8 @@ export function ExtensionUsageSection({ usage }: ExtensionUsageSectionProps) {
     usage?.capabilities.flatMap((capability) =>
       capability.models.map((model) => ({
         capability: capability.capability,
-        ...model
-      }))
+        ...model,
+      })),
     ) ?? [];
   if (rows.length === 0) {
     return null;
@@ -84,10 +84,10 @@ export function ExtensionSettingsForm({
   extension,
   client,
   disabled,
-  onResult
+  onResult,
 }: ExtensionSettingsFormProps) {
   const [draft, setDraft] = useState<Record<string, unknown>>(() =>
-    initialSettingDraft(extension)
+    initialSettingDraft(extension),
   );
   const [secretDraft, setSecretDraft] = useState<Record<string, string>>({});
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set());
@@ -99,7 +99,11 @@ export function ExtensionSettingsForm({
     setSecretDraft({});
     setDirtyKeys(new Set());
     setError(null);
-  }, [extension.extensionId, extension.settingsSchema, extension.settingValues]);
+  }, [
+    extension.extensionId,
+    extension.settingsSchema,
+    extension.settingValues,
+  ]);
 
   const fields = extension.settingsSchema?.fields ?? [];
   const visibleFields = fields.filter((field) => fieldIsVisible(field, draft));
@@ -113,7 +117,7 @@ export function ExtensionSettingsForm({
         if (field.type === "secret") continue;
         const hasSavedValue = Object.prototype.hasOwnProperty.call(
           extension.settingValues,
-          field.key
+          field.key,
         );
         if (!hasSavedValue && !dirtyKeys.has(field.key)) continue;
         if (
@@ -128,7 +132,7 @@ export function ExtensionSettingsForm({
       }
       let result = await client.setExtensionSettingValues(
         extension.extensionId,
-        nonSecretValues
+        nonSecretValues,
       );
       for (const field of fields) {
         if (field.type !== "secret") continue;
@@ -137,7 +141,7 @@ export function ExtensionSettingsForm({
           result = await client.setExtensionSecret(
             extension.extensionId,
             field.key,
-            value
+            value,
           );
         }
       }
@@ -158,7 +162,7 @@ export function ExtensionSettingsForm({
       const result = await client.setExtensionSecret(
         extension.extensionId,
         key,
-        null
+        null,
       );
       setSecretDraft((current) => ({ ...current, [key]: "" }));
       onResult(result);
@@ -226,7 +230,7 @@ export function ExtensionSettingControl({
   disabled,
   onValueChange,
   onSecretChange,
-  onSecretClear
+  onSecretClear,
 }: ExtensionSettingControlProps) {
   const id = `extension-setting-${field.key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
   return (
@@ -309,7 +313,9 @@ export function ExtensionSettingControl({
   );
 }
 
-function initialSettingDraft(extension: InstalledExtension): Record<string, unknown> {
+function initialSettingDraft(
+  extension: InstalledExtension,
+): Record<string, unknown> {
   const draft: Record<string, unknown> = {};
   for (const field of extension.settingsSchema?.fields ?? []) {
     if (field.type === "secret") continue;
@@ -336,7 +342,7 @@ function formatNumber(value: number): string {
 
 function fieldIsVisible(
   field: ExtensionSettingField,
-  values: Record<string, unknown>
+  values: Record<string, unknown>,
 ): boolean {
   if (!("visibleWhen" in field) || !field.visibleWhen) {
     return true;

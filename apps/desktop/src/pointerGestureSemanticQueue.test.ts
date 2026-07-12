@@ -8,7 +8,7 @@ describe("pointer gesture semantic notification queue", () => {
       () =>
         new Promise<void>((resolve) => {
           resolveGrab = resolve;
-        })
+        }),
     );
     const drop = vi.fn(async () => undefined);
     const queue = createPointerGestureSemanticQueue();

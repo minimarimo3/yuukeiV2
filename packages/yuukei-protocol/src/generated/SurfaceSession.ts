@@ -2,4 +2,11 @@
 import type { SurfaceKind } from "./SurfaceKind";
 import type { SurfacePresentation } from "./SurfacePresentation";
 
-export type SurfaceSession = { surfaceId: string, deviceId: string, kind: SurfaceKind, active: boolean, capabilities: Array<string>, presentation: SurfacePresentation, };
+export type SurfaceSession = {
+  surfaceId: string;
+  deviceId: string;
+  kind: SurfaceKind;
+  active: boolean;
+  capabilities: Array<string>;
+  presentation: SurfacePresentation;
+};

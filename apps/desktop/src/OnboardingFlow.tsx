@@ -6,7 +6,7 @@ import type {
   ObservationSettingsState,
   ObservationSettingsUpdate,
   WorldPackSelectionState,
-  YuukeiClient
+  YuukeiClient,
 } from "./yuukeiClient";
 
 export type OnboardingFlowProps = {
@@ -24,7 +24,7 @@ export type OnboardingFlowProps = {
   changingObservationSettings: boolean;
   onToggleObservation: (
     key: keyof ObservationSettingsUpdate,
-    enabled: boolean
+    enabled: boolean,
   ) => void;
   onStepChange: (step: number) => void;
   onDismiss: () => void;
@@ -47,7 +47,7 @@ export function OnboardingFlow({
   onToggleObservation,
   onStepChange,
   onDismiss,
-  onComplete
+  onComplete,
 }: OnboardingFlowProps) {
   const clampedStep = Math.max(0, Math.min(step, 3));
   return (
@@ -66,7 +66,7 @@ export function OnboardingFlow({
           <span
             className={[
               "onboarding-progress-step",
-              index === clampedStep ? "is-active" : ""
+              index === clampedStep ? "is-active" : "",
             ]
               .filter(Boolean)
               .join(" ")}
@@ -184,7 +184,9 @@ export function OnboardingFlow({
                 description="ファイル名と種類を記録します(場所は記録しません)"
                 checked={observationSettings?.downloads ?? false}
                 disabled={changingObservationSettings}
-                onChange={(checked) => onToggleObservation("downloads", checked)}
+                onChange={(checked) =>
+                  onToggleObservation("downloads", checked)
+                }
               />
             </div>
             <div className="settings-actions">

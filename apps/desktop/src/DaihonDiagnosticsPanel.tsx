@@ -9,7 +9,7 @@ export type DaihonDiagnosticsPanelProps = {
 export function DaihonDiagnosticsPanel({
   diagnostics,
   expanded,
-  onToggle
+  onToggle,
 }: DaihonDiagnosticsPanelProps) {
   if (diagnostics.length === 0) {
     return null;
@@ -38,7 +38,7 @@ export function DaihonDiagnosticsPanel({
               diagnostic.scriptPath,
               diagnostic.line,
               diagnostic.column,
-              index
+              index,
             ].join(":")}
           >
             <div className="daihon-diagnostic-meta">

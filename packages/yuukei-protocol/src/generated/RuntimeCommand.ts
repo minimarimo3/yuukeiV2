@@ -2,4 +2,13 @@
 import type { Causality } from "./Causality";
 import type { CommandTarget } from "./CommandTarget";
 
-export type RuntimeCommand = { id: string, type: string, timestamp: string, source: string, residentId: string, payload: { [key: string]: unknown }, causality?: Causality, target?: CommandTarget, };
+export type RuntimeCommand = {
+  id: string;
+  type: string;
+  timestamp: string;
+  source: string;
+  residentId: string;
+  payload: { [key: string]: unknown };
+  causality?: Causality;
+  target?: CommandTarget;
+};

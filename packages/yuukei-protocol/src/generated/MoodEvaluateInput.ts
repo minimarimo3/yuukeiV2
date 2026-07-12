@@ -2,4 +2,12 @@
 import type { DialogueGeneratePersona } from "./DialogueGeneratePersona";
 import type { DialogueGenerateRecentContext } from "./DialogueGenerateRecentContext";
 
-export type MoodEvaluateInput = { residentId: string, worldPackId: string, currentTime: string, timePeriod?: string, secondsSinceLastUserActivity?: number, persona: DialogueGeneratePersona, recentContext: Array<DialogueGenerateRecentContext>, };
+export type MoodEvaluateInput = {
+  residentId: string;
+  worldPackId: string;
+  currentTime: string;
+  timePeriod?: string;
+  secondsSinceLastUserActivity?: number;
+  persona: DialogueGeneratePersona;
+  recentContext: Array<DialogueGenerateRecentContext>;
+};

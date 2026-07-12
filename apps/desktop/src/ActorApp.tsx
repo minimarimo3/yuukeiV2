@@ -5,12 +5,12 @@ import {
   VRMHumanBoneName,
   VRMLoaderPlugin,
   VRMUtils,
-  type VRM
+  type VRM,
 } from "@pixiv/three-vrm";
 import {
   createVRMAnimationClip,
   VRMAnimationLoaderPlugin,
-  type VRMAnimation
+  type VRMAnimation,
 } from "@pixiv/three-vrm-animation";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
@@ -20,7 +20,7 @@ import {
   type ActorSurfaceAsset,
   type ActorSurfaceRendererAsset,
   type StageAnchor,
-  type YuukeiClient
+  type YuukeiClient,
 } from "./yuukeiClient";
 import {
   autoHitZoneDefinitions,
@@ -31,7 +31,7 @@ import {
   humanoidBoneNameForObject,
   mergeHitZoneDefinitions,
   type HitSurface,
-  type ResolvedActorHitZone
+  type ResolvedActorHitZone,
 } from "./actorHitZones";
 import {
   POINTER_GESTURE_HOLD_MS,
@@ -44,7 +44,7 @@ import {
   type PointerGestureEffect,
   type PointerGestureEvent,
   type PointerGestureState,
-  type SemanticActorHit
+  type SemanticActorHit,
 } from "./pointerGesture";
 import { createPointerGestureSemanticQueue } from "./pointerGestureSemanticQueue";
 
@@ -73,19 +73,29 @@ type VrmStageProps = {
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
   onConversationOpen(actorId: string): Promise<void>;
-  client: Pick<YuukeiClient, "beginActorWindowDrag" | "moveActorWindowDrag" | "finishActorWindowDrag" | "cancelActorWindowDrag" | "notifyAvatarGestureGrab" | "notifyAvatarGestureDrop">;
+  client: Pick<
+    YuukeiClient,
+    | "beginActorWindowDrag"
+    | "moveActorWindowDrag"
+    | "finishActorWindowDrag"
+    | "cancelActorWindowDrag"
+    | "notifyAvatarGestureGrab"
+    | "notifyAvatarGestureDrop"
+  >;
 };
 
 export const AVATAR_GRAB_HOLD_MS = POINTER_GESTURE_HOLD_MS;
-export const AVATAR_GRAB_MOVE_THRESHOLD_PX =
-  POINTER_GESTURE_MOVE_THRESHOLD_PX;
+export const AVATAR_GRAB_MOVE_THRESHOLD_PX = POINTER_GESTURE_MOVE_THRESHOLD_PX;
 export const shouldStartAvatarGrab = shouldStartPointerGestureDrag;
 
 export function ActorApp({
   actorId,
-  client = tauriYuukeiClient
+  client = tauriYuukeiClient,
 }: ActorAppProps) {
-  const activeActorId = useMemo(() => actorId ?? actorIdFromLocation(), [actorId]);
+  const activeActorId = useMemo(
+    () => actorId ?? actorIdFromLocation(),
+    [actorId],
+  );
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -96,15 +106,21 @@ export function ActorApp({
 
     async function connect() {
       try {
-        unlisteners.push(await client.onSnapshot((nextSnapshot) => {
-          setSnapshot(nextSnapshot);
-        }));
-        unlisteners.push(await client.onCommand((command) => {
-          setSnapshot((current) => applyCommandHint(current, command));
-        }));
-        unlisteners.push(await client.onAssetsChanged((catalog) => {
-          setAssets(catalog.actors);
-        }));
+        unlisteners.push(
+          await client.onSnapshot((nextSnapshot) => {
+            setSnapshot(nextSnapshot);
+          }),
+        );
+        unlisteners.push(
+          await client.onCommand((command) => {
+            setSnapshot((current) => applyCommandHint(current, command));
+          }),
+        );
+        unlisteners.push(
+          await client.onAssetsChanged((catalog) => {
+            setAssets(catalog.actors);
+          }),
+        );
         const { snapshot: initialSnapshot, assets: initialAssets } =
           await loadInitialActorSurfaceState(client);
         if (!disposed) {
@@ -131,30 +147,30 @@ export function ActorApp({
 
   const actorAssets = useMemo(
     () => actorSurfaceAssetsForActor(assets, activeActorId),
-    [assets, activeActorId]
+    [assets, activeActorId],
   );
   const visibleStatus = status ?? (activeActorId ? null : "actorId is missing");
   const setClickThrough = useCallback(
     (passthrough: boolean) => client.setActorWindowClickThrough(passthrough),
-    [client]
+    [client],
   );
   const sendAvatarGesturePoke = useCallback(
     async (gesture: AvatarGesturePokeInput) => {
       await client.sendAvatarGesturePoke(gesture);
     },
-    [client]
+    [client],
   );
   const reportStageAnchor = useCallback(
     async (reportedActorId: string, anchor: StageAnchor) => {
       await client.reportActorStageAnchor(reportedActorId, anchor);
     },
-    [client]
+    [client],
   );
   const openConversation = useCallback(
     async (reportedActorId: string) => {
       await client.openConversationComposer(reportedActorId);
     },
-    [client]
+    [client],
   );
 
   return (
@@ -177,17 +193,19 @@ export function ActorApp({
   );
 }
 
-export async function loadInitialActorSurfaceState(client: YuukeiClient): Promise<{
+export async function loadInitialActorSurfaceState(
+  client: YuukeiClient,
+): Promise<{
   snapshot: ResidentSnapshot;
   assets: ActorSurfaceAsset[];
 }> {
   const [snapshot, catalog] = await Promise.all([
     client.attachSurface(),
-    client.getActorSurfaceAssets()
+    client.getActorSurfaceAssets(),
   ]);
   return {
     snapshot,
-    assets: catalog.actors
+    assets: catalog.actors,
   };
 }
 
@@ -198,7 +216,7 @@ function VrmStage({
   onHitTestChange,
   onAvatarGesturePoke,
   onConversationOpen,
-  client
+  client,
 }: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -253,7 +271,7 @@ function VrmStage({
       alpha: true,
       antialias: true,
       canvas,
-      preserveDrawingBuffer: true
+      preserveDrawingBuffer: true,
     });
     rendererRef.current = renderer;
     renderer.setClearColor(0x000000, 0);
@@ -291,7 +309,7 @@ function VrmStage({
         const humanoidBoneByObject = reverseHumanoidBoneNodes(boneNodes);
         const hitZones = mergeHitZoneDefinitions(
           autoHitZoneDefinitions(new Set(boneNodes.keys())),
-          asset.renderer.hitZones ?? []
+          asset.renderer.hitZones ?? [],
         );
 
         const loaded: LoadedActor = {
@@ -304,7 +322,7 @@ function VrmStage({
           hitZones,
           boneNodes,
           humanoidBoneByObject,
-          mouthOffsetY: estimateMouthOffsetY(vrm.scene)
+          mouthOffsetY: estimateMouthOffsetY(vrm.scene),
         };
         loadedActors.set(asset.actorId, loaded);
         await loadMotionActions(asset.renderer, loaded);
@@ -322,7 +340,7 @@ function VrmStage({
         applyMotion(loaded, actor?.motion);
         loaded.vrm.scene.rotation.y = headingRotationY(
           loaded.baseRotationY,
-          actor?.heading
+          actor?.heading,
         );
         loaded.mixer.update(delta);
         loaded.vrm.update(delta);
@@ -336,7 +354,7 @@ function VrmStage({
       const anchors = projectActorMouthAnchors(
         renderer.domElement,
         camera,
-        loadedActors
+        loadedActors,
       );
       const signature = anchorSignature(anchors);
       if (signature === lastAnchorSignature) return;
@@ -359,13 +377,17 @@ function VrmStage({
     }
 
     function handlePointerDown(event: PointerEvent) {
-      if (!shouldBeginActorPointerGesture(event) || !acceptsNewPointerInput(gesture)) return;
+      if (
+        !shouldBeginActorPointerGesture(event) ||
+        !acceptsNewPointerInput(gesture)
+      )
+        return;
       const actorHit = actorAtPointer(
         event,
         renderer.domElement,
         camera,
         loadedActors,
-        semanticRaycaster
+        semanticRaycaster,
       );
       if (!actorHit) return;
       const hit = semanticHitAtPointer(
@@ -373,21 +395,16 @@ function VrmStage({
         renderer.domElement,
         camera,
         loadedActors,
-        semanticRaycaster
+        semanticRaycaster,
       );
       event.preventDefault();
       const semanticHit: SemanticActorHit | null = hit
         ? {
             actorId: hit.actorId,
-            poke: buildAvatarGesturePokePayload(
-              hit.actorId,
-              hit.zone,
-              event,
-              {
-                hitBone: hit.hitBone,
-                hitSurface: hit.hitSurface
-              }
-            )
+            poke: buildAvatarGesturePokePayload(hit.actorId, hit.zone, event, {
+              hitBone: hit.hitBone,
+              hitSurface: hit.hitSurface,
+            }),
           }
         : null;
       nextGestureId += 1;
@@ -398,7 +415,7 @@ function VrmStage({
         actorHit,
         semanticHit,
         client: { x: event.clientX, y: event.clientY },
-        screen: { x: event.screenX, y: event.screenY }
+        screen: { x: event.screenX, y: event.screenY },
       });
     }
 
@@ -408,20 +425,20 @@ function VrmStage({
         renderer.domElement,
         camera,
         loadedActors,
-        semanticRaycaster
+        semanticRaycaster,
       );
       if (!actorHit) return;
       void openConversationFromContextMenu(
         event,
         actorHit.actorId,
-        onConversationOpen
+        onConversationOpen,
       ).catch((error) => {
         console.warn("Failed to open conversation composer", error);
       });
     }
 
     function schedulePointerDragMove(
-      effect: Extract<PointerGestureEffect, { type: "moveWindowDrag" }>
+      effect: Extract<PointerGestureEffect, { type: "moveWindowDrag" }>,
     ) {
       pendingMoveEffect = effect;
       if (moveFrame) return;
@@ -445,13 +462,13 @@ function VrmStage({
             effect.actorId,
             effect.sessionId,
             effect.dx,
-            effect.dy
+            effect.dy,
           );
           dispatchPointerGesture({
             type: "windowDragMoved",
             gestureId: effect.gestureId,
             actorId: effect.actorId,
-            sessionId: effect.sessionId
+            sessionId: effect.sessionId,
           });
         } catch (error) {
           console.warn("Failed to move avatar window; continuing drag", error);
@@ -460,7 +477,7 @@ function VrmStage({
             gestureId: effect.gestureId,
             actorId: effect.actorId,
             sessionId: effect.sessionId,
-            error
+            error,
           });
         }
       });
@@ -502,7 +519,7 @@ function VrmStage({
           dispatchPointerGesture({
             type: "holdElapsed",
             gestureId: effect.gestureId,
-            pointerId: effect.pointerId
+            pointerId: effect.pointerId,
           });
         }, effect.delayMs);
         holdTimers.set(effect.gestureId, timer);
@@ -522,7 +539,7 @@ function VrmStage({
               gestureId: effect.gestureId,
               pointerId: effect.pointerId,
               actorId: effect.actorId,
-              sessionId: started.sessionId
+              sessionId: started.sessionId,
             });
           },
           (error: unknown) => {
@@ -532,9 +549,9 @@ function VrmStage({
               gestureId: effect.gestureId,
               pointerId: effect.pointerId,
               actorId: effect.actorId,
-              error
+              error,
             });
-          }
+          },
         );
         return;
       }
@@ -549,14 +566,14 @@ function VrmStage({
             await moveQueue;
             const finished = await client.finishActorWindowDrag(
               effect.actorId,
-              effect.sessionId
+              effect.sessionId,
             );
             dispatchPointerGesture({
               type: "windowDragFinished",
               gestureId: effect.gestureId,
               actorId: effect.actorId,
               sessionId: effect.sessionId,
-              movedDistance: finished.movedDistance
+              movedDistance: finished.movedDistance,
             });
           } catch (error) {
             console.warn("Failed to finish avatar window drag", error);
@@ -565,7 +582,7 @@ function VrmStage({
               gestureId: effect.gestureId,
               actorId: effect.actorId,
               sessionId: effect.sessionId,
-              error
+              error,
             });
           }
         })();
@@ -578,13 +595,13 @@ function VrmStage({
             await moveQueue;
             await client.cancelActorWindowDrag(
               effect.actorId,
-              effect.sessionId
+              effect.sessionId,
             );
             dispatchPointerGesture({
               type: "windowDragCancelled",
               gestureId: effect.gestureId,
               actorId: effect.actorId,
-              sessionId: effect.sessionId
+              sessionId: effect.sessionId,
             });
           } catch (error) {
             console.warn("Failed to cancel avatar window drag", error);
@@ -593,7 +610,7 @@ function VrmStage({
               gestureId: effect.gestureId,
               actorId: effect.actorId,
               sessionId: effect.sessionId,
-              error
+              error,
             });
           }
         })();
@@ -601,21 +618,22 @@ function VrmStage({
       }
       if (effect.type === "notifyPoke") {
         const completion = semanticNotificationQueue.enqueue(() =>
-          onAvatarGesturePoke(effect.poke)
+          onAvatarGesturePoke(effect.poke),
         );
         void completion.then(
-          () => dispatchPointerGesture({
-            type: "avatarPokeNotified",
-            gestureId: effect.gestureId
-          }),
+          () =>
+            dispatchPointerGesture({
+              type: "avatarPokeNotified",
+              gestureId: effect.gestureId,
+            }),
           (error: unknown) => {
             console.warn("Failed to notify avatar poke", error);
             dispatchPointerGesture({
               type: "avatarPokeNotifyFailed",
               gestureId: effect.gestureId,
-              error
+              error,
             });
-          }
+          },
         );
         return;
       }
@@ -624,18 +642,19 @@ function VrmStage({
           await client.notifyAvatarGestureGrab(effect.actorId);
         });
         void completion.then(
-          () => dispatchPointerGesture({
-            type: "avatarGrabNotified",
-            gestureId: effect.gestureId
-          }),
+          () =>
+            dispatchPointerGesture({
+              type: "avatarGrabNotified",
+              gestureId: effect.gestureId,
+            }),
           (error: unknown) => {
             console.warn("Failed to notify avatar grab", error);
             dispatchPointerGesture({
               type: "avatarGrabNotifyFailed",
               gestureId: effect.gestureId,
-              error
+              error,
             });
-          }
+          },
         );
         return;
       }
@@ -643,22 +662,23 @@ function VrmStage({
         const completion = semanticNotificationQueue.enqueue(async () => {
           await client.notifyAvatarGestureDrop(
             effect.actorId,
-            effect.movedDistance
+            effect.movedDistance,
           );
         });
         void completion.then(
-          () => dispatchPointerGesture({
-            type: "avatarDropNotified",
-            gestureId: effect.gestureId
-          }),
+          () =>
+            dispatchPointerGesture({
+              type: "avatarDropNotified",
+              gestureId: effect.gestureId,
+            }),
           (error: unknown) => {
             console.warn("Failed to notify avatar drop", error);
             dispatchPointerGesture({
               type: "avatarDropNotifyFailed",
               gestureId: effect.gestureId,
-              error
+              error,
             });
-          }
+          },
         );
         return;
       }
@@ -671,19 +691,19 @@ function VrmStage({
         type: "pointerMoved",
         pointerId: event.pointerId,
         client: { x: event.clientX, y: event.clientY },
-        screen: { x: event.screenX, y: event.screenY }
+        screen: { x: event.screenX, y: event.screenY },
       });
     }
 
     function dispatchPointerEnd(
       event: PointerEvent,
-      type: "pointerReleased" | "pointerCancelled"
+      type: "pointerReleased" | "pointerCancelled",
     ) {
       dispatchPointerGesture({
         type: "pointerMoved",
         pointerId: event.pointerId,
         client: { x: event.clientX, y: event.clientY },
-        screen: { x: event.screenX, y: event.screenY }
+        screen: { x: event.screenX, y: event.screenY },
       });
       dispatchPointerGesture({ type, pointerId: event.pointerId });
     }
@@ -734,7 +754,7 @@ function VrmStage({
     onAvatarGesturePoke,
     onHitTestChange,
     onConversationOpen,
-    onStageAnchorReport
+    onStageAnchorReport,
   ]);
 
   return (
@@ -747,21 +767,21 @@ function VrmStage({
 export async function openConversationFromContextMenu(
   event: Pick<MouseEvent, "preventDefault">,
   actorId: string,
-  open: (actorId: string) => Promise<void>
+  open: (actorId: string) => Promise<void>,
 ): Promise<void> {
   event.preventDefault();
   await open(actorId);
 }
 
 export function shouldBeginActorPointerGesture(
-  event: Pick<PointerEvent, "button" | "ctrlKey">
+  event: Pick<PointerEvent, "button" | "ctrlKey">,
 ): boolean {
   return event.button === 0 && !event.ctrlKey;
 }
 
 async function loadMotionActions(
   renderer: ActorSurfaceRendererAsset,
-  loaded: LoadedActor
+  loaded: LoadedActor,
 ) {
   const motionLoader = new GLTFLoader();
   motionLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
@@ -813,7 +833,7 @@ function applyMotion(loaded: LoadedActor, motion: string | undefined) {
   previous?.fadeOut(0.18);
 
   const next = motionId
-    ? loaded.actions.get(motionId) ?? loaded.actions.get(motion ?? "")
+    ? (loaded.actions.get(motionId) ?? loaded.actions.get(motion ?? ""))
     : undefined;
   if (next) {
     next.reset().fadeIn(0.18).play();
@@ -825,7 +845,7 @@ function applyMotion(loaded: LoadedActor, motion: string | undefined) {
 
 export function headingRotationY(
   baseRotationY: number,
-  heading: string | undefined
+  heading: string | undefined,
 ): number {
   if (heading === "right") return baseRotationY + Math.PI / 2;
   if (heading === "left") return baseRotationY - Math.PI / 2;
@@ -853,13 +873,13 @@ function frameCamera(root: THREE.Object3D, camera: THREE.PerspectiveCamera) {
 }
 
 async function pointerHitsVisibleSurface(
-  renderer: THREE.WebGLRenderer
+  renderer: THREE.WebGLRenderer,
 ): Promise<boolean> {
   const windowHandle = getCurrentWindow();
   const [cursor, outerPosition, innerSize] = await Promise.all([
     cursorPosition(),
     windowHandle.outerPosition(),
-    windowHandle.innerSize()
+    windowHandle.innerSize(),
   ]);
   const scaleX = innerSize.width / Math.max(window.innerWidth, 1);
   const scaleY = innerSize.height / Math.max(window.innerHeight, 1);
@@ -902,7 +922,7 @@ async function pointerHitsVisibleSurface(
       1,
       gl.RGBA,
       gl.UNSIGNED_BYTE,
-      pixel
+      pixel,
     );
     return pixel[3] > 18;
   } catch {
@@ -931,7 +951,7 @@ function humanoidBoneNodes(vrm: VRM): Map<string, THREE.Object3D> {
 }
 
 function reverseHumanoidBoneNodes(
-  boneNodes: ReadonlyMap<string, THREE.Object3D>
+  boneNodes: ReadonlyMap<string, THREE.Object3D>,
 ): Map<THREE.Object3D, string> {
   const byObject = new Map<THREE.Object3D, string>();
   for (const [boneName, node] of boneNodes) {
@@ -945,7 +965,7 @@ function intersectionsAtPointer(
   canvas: HTMLCanvasElement,
   camera: THREE.PerspectiveCamera,
   loadedActors: Map<string, LoadedActor>,
-  raycaster: THREE.Raycaster
+  raycaster: THREE.Raycaster,
 ): THREE.Intersection[] {
   const rect = canvas.getBoundingClientRect();
   if (
@@ -959,24 +979,50 @@ function intersectionsAtPointer(
 
   const pointer = new THREE.Vector2(
     ((event.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1,
-    -(((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 - 1)
+    -(((event.clientY - rect.top) / Math.max(rect.height, 1)) * 2 - 1),
   );
   raycaster.setFromCamera(pointer, camera);
 
-  const actorScenes = [...loadedActors.values()].map((loaded) => loaded.vrm.scene);
+  const actorScenes = [...loadedActors.values()].map(
+    (loaded) => loaded.vrm.scene,
+  );
   return raycaster.intersectObjects(actorScenes, true);
 }
 
-function actorAtPointer(event: PointerEvent, canvas: HTMLCanvasElement, camera: THREE.PerspectiveCamera, loadedActors: Map<string, LoadedActor>, raycaster: THREE.Raycaster): ActorHit | null {
-  for (const intersection of intersectionsAtPointer(event, canvas, camera, loadedActors, raycaster)) {
+function actorAtPointer(
+  event: PointerEvent,
+  canvas: HTMLCanvasElement,
+  camera: THREE.PerspectiveCamera,
+  loadedActors: Map<string, LoadedActor>,
+  raycaster: THREE.Raycaster,
+): ActorHit | null {
+  for (const intersection of intersectionsAtPointer(
+    event,
+    canvas,
+    camera,
+    loadedActors,
+    raycaster,
+  )) {
     const loaded = loadedActorForObject(intersection.object, loadedActors);
     if (loaded) return { actorId: loaded.actorId };
   }
   return null;
 }
 
-function semanticHitAtPointer(event: PointerEvent, canvas: HTMLCanvasElement, camera: THREE.PerspectiveCamera, loadedActors: Map<string, LoadedActor>, raycaster: THREE.Raycaster): SemanticHitZoneResult | null {
-  for (const intersection of intersectionsAtPointer(event, canvas, camera, loadedActors, raycaster)) {
+function semanticHitAtPointer(
+  event: PointerEvent,
+  canvas: HTMLCanvasElement,
+  camera: THREE.PerspectiveCamera,
+  loadedActors: Map<string, LoadedActor>,
+  raycaster: THREE.Raycaster,
+): SemanticHitZoneResult | null {
+  for (const intersection of intersectionsAtPointer(
+    event,
+    canvas,
+    camera,
+    loadedActors,
+    raycaster,
+  )) {
     const loaded = loadedActorForObject(intersection.object, loadedActors);
     if (!loaded) continue;
     const hit = semanticHitZoneForIntersection(loaded, intersection);
@@ -987,7 +1033,7 @@ function semanticHitAtPointer(event: PointerEvent, canvas: HTMLCanvasElement, ca
 
 function loadedActorForObject(
   object: THREE.Object3D,
-  loadedActors: Map<string, LoadedActor>
+  loadedActors: Map<string, LoadedActor>,
 ): LoadedActor | null {
   for (const loaded of loadedActors.values()) {
     if (isDescendantOf(object, loaded.vrm.scene)) {
@@ -999,7 +1045,7 @@ function loadedActorForObject(
 
 function semanticHitZoneForIntersection(
   loaded: LoadedActor,
-  intersection: THREE.Intersection
+  intersection: THREE.Intersection,
 ): Omit<SemanticHitZoneResult, "actorId"> | null {
   const names = objectLineageNames(intersection.object, loaded.vrm.scene);
   const hitSurface = hitSurfaceForIntersection(intersection);
@@ -1008,7 +1054,10 @@ function semanticHitZoneForIntersection(
   return zone ? { zone, hitBone: hitBone ?? undefined, hitSurface } : null;
 }
 
-function objectLineageNames(object: THREE.Object3D, root: THREE.Object3D): string[] {
+function objectLineageNames(
+  object: THREE.Object3D,
+  root: THREE.Object3D,
+): string[] {
   const names: string[] = [];
   let current: THREE.Object3D | null = object;
   while (current) {
@@ -1023,20 +1072,20 @@ function objectLineageNames(object: THREE.Object3D, root: THREE.Object3D): strin
 
 function humanoidBoneNameForIntersection(
   intersection: THREE.Intersection,
-  loaded: LoadedActor
+  loaded: LoadedActor,
 ): string | null {
   const dominantBone = dominantSkinBoneForIntersection(intersection);
   if (dominantBone) {
     const humanoidName = humanoidBoneNameForObject(
       dominantBone,
-      loaded.humanoidBoneByObject
+      loaded.humanoidBoneByObject,
     );
     if (humanoidName) return humanoidName;
   }
 
   return humanoidBoneNameForObject(
     intersection.object,
-    loaded.humanoidBoneByObject
+    loaded.humanoidBoneByObject,
   );
 }
 
@@ -1049,7 +1098,7 @@ function estimateMouthOffsetY(root: THREE.Object3D): number {
 function projectActorMouthAnchors(
   canvas: HTMLCanvasElement,
   camera: THREE.PerspectiveCamera,
-  loadedActors: Map<string, LoadedActor>
+  loadedActors: Map<string, LoadedActor>,
 ): Record<string, StageAnchor> {
   const rect = canvas.getBoundingClientRect();
   const anchors: Record<string, StageAnchor> = {};
@@ -1083,7 +1132,7 @@ function mouthWorldPosition(loaded: LoadedActor): THREE.Vector3 | null {
 function projectWorldPosition(
   worldPosition: THREE.Vector3,
   camera: THREE.PerspectiveCamera,
-  rect: DOMRect
+  rect: DOMRect,
 ): StageAnchor {
   if (rect.width <= 0 || rect.height <= 0) {
     return { x: 0, y: 0, visible: false };
@@ -1131,22 +1180,26 @@ function isDescendantOf(object: THREE.Object3D, root: THREE.Object3D): boolean {
 }
 
 function hasVrmRenderer(
-  asset: ActorSurfaceAsset
+  asset: ActorSurfaceAsset,
 ): asset is ActorSurfaceAsset & { renderer: ActorSurfaceRendererAsset } {
   return asset.renderer?.kind === "vrm";
 }
 
-export function actorIdFromLocation(search = window.location.search): string | null {
+export function actorIdFromLocation(
+  search = window.location.search,
+): string | null {
   const actorId = new URLSearchParams(search).get("actorId");
   return actorId && actorId.length > 0 ? actorId : null;
 }
 
 export function actorSurfaceAssetsForActor(
   assets: ActorSurfaceAsset[],
-  actorId: string | null
+  actorId: string | null,
 ): ActorSurfaceAsset[] {
   if (!actorId) return [];
-  return assets.filter((asset) => asset.actorId === actorId && hasVrmRenderer(asset));
+  return assets.filter(
+    (asset) => asset.actorId === actorId && hasVrmRenderer(asset),
+  );
 }
 
 export function normalizeMotionId(motion: string | undefined): string | null {
@@ -1157,7 +1210,9 @@ export function normalizeMotionId(motion: string | undefined): string | null {
   return trimmed;
 }
 
-export function expressionPresetFor(expression: string | undefined): string | null {
+export function expressionPresetFor(
+  expression: string | undefined,
+): string | null {
   if (!expression) return null;
   switch (expression.trim()) {
     case "happy":
@@ -1183,7 +1238,7 @@ export function expressionPresetFor(expression: string | undefined): string | nu
 
 export function applyCommandHint(
   snapshot: ResidentSnapshot | null,
-  command: RuntimeCommand
+  command: RuntimeCommand,
 ): ResidentSnapshot | null {
   if (!snapshot) return snapshot;
   const actorId =
@@ -1196,16 +1251,19 @@ export function applyCommandHint(
   const actor = snapshot.actors[actorId];
   if (!actor) return snapshot;
 
-  if (command.type === "avatar.motion" && typeof command.payload.motion === "string") {
+  if (
+    command.type === "avatar.motion" &&
+    typeof command.payload.motion === "string"
+  ) {
     return {
       ...snapshot,
       actors: {
         ...snapshot.actors,
         [actorId]: {
           ...actor,
-          motion: command.payload.motion
-        }
-      }
+          motion: command.payload.motion,
+        },
+      },
     };
   }
   if (
@@ -1226,12 +1284,15 @@ export function applyCommandHint(
         [actorId]: {
           ...actor,
           motion: command.payload.motion,
-          heading
-        }
-      }
+          heading,
+        },
+      },
     };
   }
-  if (command.type === "dialogue.say" && typeof command.payload.text === "string") {
+  if (
+    command.type === "dialogue.say" &&
+    typeof command.payload.text === "string"
+  ) {
     return {
       ...snapshot,
       actors: {
@@ -1239,9 +1300,9 @@ export function applyCommandHint(
         [actorId]: {
           ...actor,
           bubble: command.payload.text,
-          speaking: true
-        }
-      }
+          speaking: true,
+        },
+      },
     };
   }
   if (
@@ -1254,9 +1315,9 @@ export function applyCommandHint(
         ...snapshot.actors,
         [actorId]: {
           ...actor,
-          expression: command.payload.expression
-        }
-      }
+          expression: command.payload.expression,
+        },
+      },
     };
   }
   return snapshot;

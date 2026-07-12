@@ -4,7 +4,7 @@ import {
   render,
   screen,
   waitFor,
-  within
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +23,7 @@ import type {
   RuntimeSettingsState,
   SceneHistoryState,
   WorldPackSelectionState,
-  YuukeiClient
+  YuukeiClient,
 } from "./yuukeiClient";
 
 function snapshot(bubble: string | null = null): ResidentSnapshot {
@@ -39,13 +39,13 @@ function snapshot(bubble: string | null = null): ResidentSnapshot {
         heading: "",
         location: "desktop",
         speaking: Boolean(bubble),
-        bubble: bubble ?? undefined
-      }
+        bubble: bubble ?? undefined,
+      },
     },
     surfaces: {},
     capabilities: {},
     extensions: {},
-    recentEventCursor: "1"
+    recentEventCursor: "1",
   };
 }
 
@@ -58,18 +58,18 @@ function command(text: string, id = "cmd_1"): RuntimeCommand {
     residentId: "resident-default",
     payload: {
       text,
-      speakerId: "yuukei"
+      speakerId: "yuukei",
     },
     target: {
       actorId: "yuukei",
-      surfaceId: "surface-main"
-    }
+      surfaceId: "surface-main",
+    },
   };
 }
 
 function worldPackStatus(
   worldPackId = "default-yuukei",
-  fallbackActive = false
+  fallbackActive = false,
 ): WorldPackSelectionState {
   return {
     configuredInstallId: worldPackId,
@@ -78,7 +78,8 @@ function worldPackStatus(
       installId: worldPackId,
       residentId: "resident-default",
       worldPackId,
-      displayName: worldPackId === "default-yuukei" ? "Default Yuukei" : "Custom Yuukei",
+      displayName:
+        worldPackId === "default-yuukei" ? "Default Yuukei" : "Custom Yuukei",
       canonicalRoot:
         worldPackId === "default-yuukei"
           ? "/workspace/packs/default-yuukei"
@@ -86,19 +87,19 @@ function worldPackStatus(
       source:
         worldPackId === "default-yuukei"
           ? "bundledDefault"
-          : "externalDirectory"
+          : "externalDirectory",
     },
     installs: [],
     fallbackActive,
     lastLoadError: fallbackActive ? "pack.json is missing" : undefined,
     daihonDiagnostics: [],
-    settingsPath: "/tmp/yuukei-v2/settings/world-packs.json"
+    settingsPath: "/tmp/yuukei-v2/settings/world-packs.json",
   };
 }
 
 function daihonDiagnostic(
   index: number,
-  overrides: Partial<DaihonDiagnosticEntry> = {}
+  overrides: Partial<DaihonDiagnosticEntry> = {},
 ): DaihonDiagnosticEntry {
   return {
     phase: "loadValidate",
@@ -109,23 +110,23 @@ function daihonDiagnostic(
     line: index,
     column: 1,
     occurredAt: `2026-06-25T00:00:0${index}.000Z`,
-    ...overrides
+    ...overrides,
   };
 }
 
 function extensionSettings(
-  installed: ExtensionSettingsState["installed"] = []
+  installed: ExtensionSettingsState["installed"] = [],
 ): ExtensionSettingsState {
   return {
     installed,
     hookOrder: {
-      beforeCommandEmit: installed.map((extension) => extension.extensionId)
+      beforeCommandEmit: installed.map((extension) => extension.extensionId),
     },
     capabilityDefaults: {},
     settingsPath: "/tmp/yuukei-v2/settings/extensions.json",
     extensionRoot: "/tmp/yuukei-v2/extensions",
     trustedCodeNotice:
-      "Extensionは信頼したローカルコードとして実行されます。Yuukeiは公開protocolへの入力と出力を検証しますが、OSレベルのファイルアクセス隔離はv1では行いません。"
+      "Extensionは信頼したローカルコードとして実行されます。Yuukeiは公開protocolへの入力と出力を検証しますが、OSレベルのファイルアクセス隔離はv1では行いません。",
   };
 }
 
@@ -134,12 +135,12 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
     talkIntervalMinutes,
     actorScalePercent: 100,
     conversationSendShortcut: "ctrlEnter",
-    settingsPath: "/tmp/yuukei-v2/settings/app.json"
+    settingsPath: "/tmp/yuukei-v2/settings/app.json",
   };
 }
 
 function runtimeSettings(
-  overrides: Partial<RuntimeSettingsState> = {}
+  overrides: Partial<RuntimeSettingsState> = {},
 ): RuntimeSettingsState {
   return {
     llmTimeoutMs: 30000,
@@ -147,7 +148,7 @@ function runtimeSettings(
     talkDesireLow: 30,
     talkDesireHigh: 80,
     settingsPath: "/tmp/yuukei-v2/settings/runtime.json",
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -156,31 +157,31 @@ function sceneHistory(
     {
       eventName: "conversation.text",
       sceneName: "greeting",
-      lastExecutedAt: "2026-07-07T00:00:00.000+09:00"
-    }
-  ]
+      lastExecutedAt: "2026-07-07T00:00:00.000+09:00",
+    },
+  ],
 ): SceneHistoryState {
   return {
     installId: "default-yuukei",
     historyPath: "/tmp/yuukei-v2/residents/default-yuukei/scene-history.json",
-    entries
+    entries,
   };
 }
 
 function observationSettings(
-  overrides: Partial<ObservationSettingsState> = {}
+  overrides: Partial<ObservationSettingsState> = {},
 ): ObservationSettingsState {
   return {
     windows: false,
     folders: false,
     downloads: false,
     settingsPath: "/tmp/yuukei-v2/settings/observations.json",
-    ...overrides
+    ...overrides,
   };
 }
 
 function onboardingState(
-  overrides: Partial<OnboardingState> = {}
+  overrides: Partial<OnboardingState> = {},
 ): OnboardingState {
   return {
     completed: true,
@@ -188,12 +189,12 @@ function onboardingState(
     dismissed: false,
     dismissedAt: null,
     settingsPath: "/tmp/yuukei-v2/settings/onboarding.json",
-    ...overrides
+    ...overrides,
   };
 }
 
 function capabilityUsage(
-  extensions: CapabilityUsageState["extensions"] = []
+  extensions: CapabilityUsageState["extensions"] = [],
 ): CapabilityUsageState {
   return { extensions };
 }
@@ -205,24 +206,24 @@ function residentMemories(): ResidentMemoryState {
         id: "fact-1",
         text: "唐揚げが好き。",
         createdAt: "2026-06-25T00:00:00.000Z",
-        updatedAt: "2026-06-25T00:00:00.000Z"
-      }
+        updatedAt: "2026-06-25T00:00:00.000Z",
+      },
     ],
     episodes: [
       {
         id: "episode-1",
         text: "昨日は公園へ行った。",
-        timestamp: "2026-06-26T00:00:00.000Z"
-      }
+        timestamp: "2026-06-26T00:00:00.000Z",
+      },
     ],
-    episodeTotal: 1
+    episodeTotal: 1,
   };
 }
 
 function eventLogRecord(
   sequence: number,
   kind: string,
-  payload: Record<string, unknown> = { text: "こんにちは" }
+  payload: Record<string, unknown> = { text: "こんにちは" },
 ): EventLogRecord {
   return {
     sequence,
@@ -236,31 +237,33 @@ function eventLogRecord(
       ? {
           category: "desktop-observation",
           retention: "short",
-          extensionReadable: false
+          extensionReadable: false,
         }
-      : null
+      : null,
   };
 }
 
-function eventLogPage(records: EventLogRecord[] = [
-  eventLogRecord(3, "desktop.download.completed", {
-    fileName: "photo.png",
-    fileCategory: "image"
-  }),
-  eventLogRecord(2, "dialogue.say", { text: "おはよう" }),
-  eventLogRecord(1, "conversation.text", { text: "hello" })
-]): EventLogPage {
+function eventLogPage(
+  records: EventLogRecord[] = [
+    eventLogRecord(3, "desktop.download.completed", {
+      fileName: "photo.png",
+      fileCategory: "image",
+    }),
+    eventLogRecord(2, "dialogue.say", { text: "おはよう" }),
+    eventLogRecord(1, "conversation.text", { text: "hello" }),
+  ],
+): EventLogPage {
   return {
     records,
     nextCursor: null,
-    total: records.length
+    total: records.length,
   };
 }
 
 function installedExtension(
   extensionId: string,
   displayName = extensionId,
-  enabled = true
+  enabled = true,
 ): ExtensionSettingsState["installed"][number] {
   return {
     extensionId,
@@ -271,8 +274,8 @@ function installedExtension(
     hooks: [
       {
         hookPoint: "beforeCommandEmit",
-        commandTypes: ["dialogue.say"]
-      }
+        commandTypes: ["dialogue.say"],
+      },
     ],
     eventSubscriptions: [],
     emittedEvents: [],
@@ -283,7 +286,7 @@ function installedExtension(
     installedPath: `/tmp/yuukei-v2/extensions/${extensionId}`,
     manifestPath: `/tmp/yuukei-v2/extensions/${extensionId}/manifest.json`,
     installedAt: "2026-06-25T00:00:00.000Z",
-    updatedAt: "2026-06-25T00:00:00.000Z"
+    updatedAt: "2026-06-25T00:00:00.000Z",
   };
 }
 
@@ -305,11 +308,11 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
         completed: false,
         completedAt: null,
         dismissed: true,
-        dismissedAt: "2026-07-12T00:00:00.000Z"
-      })
+        dismissedAt: "2026-07-12T00:00:00.000Z",
+      }),
     ),
     setObservationSettings: vi.fn(async (settings) =>
-      observationSettings(settings)
+      observationSettings(settings),
     ),
     getExtensionSettings: vi.fn(async () => extensionSettings()),
     getCapabilityUsage: vi.fn(async () => capabilityUsage()),
@@ -317,7 +320,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     updateResidentMemory: vi.fn(async () => ({ updated: true })),
     forgetResidentMemories: vi.fn(async () => ({
       removedFacts: 1,
-      removedEpisodes: 0
+      removedEpisodes: 0,
     })),
     readEventLogPage: vi.fn(async () => eventLogPage()),
     countEventLogDeleteBefore: vi.fn(async () => 2),
@@ -328,14 +331,14 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     deleteEventLogAll: vi.fn(async () => ({ deleted: 3 })),
     getActorSurfaceAssets: vi.fn(async () => ({
       worldPackId: "default-yuukei",
-      actors: []
+      actors: [],
     })),
     setActorWindowClickThrough: vi.fn(async () => undefined),
     setStageOverlayClickThrough: vi.fn(async () => undefined),
     getDesktopStageState: vi.fn(async () => ({
       monitors: [],
       actors: [],
-      bubbles: []
+      bubbles: [],
     })),
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),
@@ -344,10 +347,15 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     closeConversationComposer: vi.fn(async () => undefined),
     sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
     sendConversationChoice: vi.fn(async () => []),
-    sendAvatarGesturePoke: vi.fn(async () => [command("つつかれました", "cmd_4")]),
+    sendAvatarGesturePoke: vi.fn(async () => [
+      command("つつかれました", "cmd_4"),
+    ]),
     beginActorWindowDrag: vi.fn(async () => ({ sessionId: "session-1" })),
     moveActorWindowDrag: vi.fn(async () => undefined),
-    finishActorWindowDrag: vi.fn(async (actorId: string) => ({ actorId, movedDistance: 0 })),
+    finishActorWindowDrag: vi.fn(async (actorId: string) => ({
+      actorId,
+      movedDistance: 0,
+    })),
     cancelActorWindowDrag: vi.fn(async () => undefined),
     notifyAvatarGestureGrab: vi.fn(async () => []),
     notifyAvatarGestureDrop: vi.fn(async () => []),
@@ -361,15 +369,15 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       licenseText: "配布条件です。",
       licenseSource: "LICENSE",
       importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
-      replacesExisting: false
+      replacesExisting: false,
     })),
     importWorldPackZip: vi.fn(async () => ({
       status: worldPackStatus("zip-yuukei"),
-      snapshot: snapshot("zipです")
+      snapshot: snapshot("zipです"),
     })),
     resetWorldPackToDefault: vi.fn(async () => ({
       status: worldPackStatus(),
-      snapshot: snapshot("ただいま")
+      snapshot: snapshot("ただいま"),
     })),
     installExtensionDirectory: vi.fn(),
     uninstallExtension: vi.fn(),
@@ -379,15 +387,15 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     setExtensionSecret: vi.fn(),
     restartExtensionProcess: vi.fn(async () => extensionSettings()),
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) =>
-      appSettings(minutes)
+      appSettings(minutes),
     ),
     setAppActorScalePercent: vi.fn(async (percent: number) => ({
       ...appSettings(),
-      actorScalePercent: percent
+      actorScalePercent: percent,
     })),
     setAppConversationSendShortcut: vi.fn(async (shortcut) => ({
       ...appSettings(),
-      conversationSendShortcut: shortcut
+      conversationSendShortcut: shortcut,
     })),
     setRuntimeSettings: vi.fn(async (settings) => runtimeSettings(settings)),
     resetSceneHistory: vi.fn(async () => sceneHistory([])),
@@ -398,7 +406,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     onAssetsChanged: vi.fn(async () => () => undefined),
     onStageState: vi.fn(async () => () => undefined),
     onAppSettings: vi.fn(async () => () => undefined),
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -415,7 +423,7 @@ describe("App", () => {
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
       "aria-selected",
-      "true"
+      "true",
     );
     expect(client.attachSurface).not.toHaveBeenCalled();
     expect(client.sendConversationText).not.toHaveBeenCalled();
@@ -424,84 +432,96 @@ describe("App", () => {
   it("shows onboarding for an initial launch", async () => {
     const client = clientFixture({
       getOnboardingState: vi.fn(async () =>
-        onboardingState({ completed: false, completedAt: null })
-      )
+        onboardingState({ completed: false, completedAt: null }),
+      ),
     });
 
     render(<App client={client} />);
 
-    expect(await screen.findByRole("heading", { name: "ようこそ" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "ようこそ" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
     expect(
-      screen.getByText("この子はあなたのデバイスに住みます。")
+      screen.getByText("この子はあなたのデバイスに住みます。"),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "World Pack" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "World Pack" }),
+    ).not.toBeInTheDocument();
   });
 
   it("skips the AI step when starting without AI", async () => {
     const client = clientFixture({
       getOnboardingState: vi.fn(async () =>
-        onboardingState({ completed: false, completedAt: null })
-      )
+        onboardingState({ completed: false, completedAt: null }),
+      ),
     });
 
     render(<App client={client} />);
 
     await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
     expect(
-      await screen.findByRole("heading", { name: "AI(ことば)の設定" })
+      await screen.findByRole("heading", { name: "AI(ことば)の設定" }),
     ).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "AIなしで始める" }),
+    );
 
     expect(
-      await screen.findByRole("heading", { name: "観測とプライバシー" })
+      await screen.findByRole("heading", { name: "観測とプライバシー" }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
-      )
+        "アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)",
+      ),
     ).toBeInTheDocument();
   });
 
   it("completes onboarding and returns to the normal settings screen", async () => {
     const client = clientFixture({
       getOnboardingState: vi.fn(async () =>
-        onboardingState({ completed: false, completedAt: null })
+        onboardingState({ completed: false, completedAt: null }),
       ),
-      completeOnboarding: vi.fn(async () => onboardingState())
+      completeOnboarding: vi.fn(async () => onboardingState()),
     });
 
     render(<App client={client} />);
 
     await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
-    await userEvent.click(screen.getByRole("button", { name: "AIなしで始める" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "AIなしで始める" }),
+    );
     await userEvent.click(screen.getByRole("button", { name: "次へ" }));
-    await userEvent.click(screen.getByRole("button", { name: "完了して始める" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "完了して始める" }),
+    );
 
     await waitFor(() => expect(client.completeOnboarding).toHaveBeenCalled());
-    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
-    expect(screen.queryByRole("heading", { name: "完了" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("tab", { name: "World Pack" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      screen.queryByRole("heading", { name: "完了" }),
+    ).not.toBeInTheDocument();
   });
 
   it("persists dismissal when あとで is clicked during onboarding", async () => {
     const client = clientFixture({
       getOnboardingState: vi.fn(async () =>
-        onboardingState({ completed: false, completedAt: null })
-      )
+        onboardingState({ completed: false, completedAt: null }),
+      ),
     });
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "あとで" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "あとで" }),
+    );
 
     await waitFor(() => expect(client.dismissOnboarding).toHaveBeenCalled());
-    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
+    expect(
+      await screen.findByRole("tab", { name: "World Pack" }),
+    ).toHaveAttribute("aria-selected", "true");
   });
 
   it("does not show onboarding when it was dismissed before", async () => {
@@ -511,19 +531,18 @@ describe("App", () => {
           completed: false,
           completedAt: null,
           dismissed: true,
-          dismissedAt: "2026-07-12T00:00:00.000Z"
-        })
-      )
+          dismissedAt: "2026-07-12T00:00:00.000Z",
+        }),
+      ),
     });
 
     render(<App client={client} />);
 
-    expect(await screen.findByRole("tab", { name: "World Pack" })).toHaveAttribute(
-      "aria-selected",
-      "true"
-    );
     expect(
-      screen.queryByRole("heading", { name: "ようこそ" })
+      await screen.findByRole("tab", { name: "World Pack" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      screen.queryByRole("heading", { name: "ようこそ" }),
     ).not.toBeInTheDocument();
   });
 
@@ -534,21 +553,21 @@ describe("App", () => {
 
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
     expect(
-      screen.queryByText("0件のExtensionをインストール済み")
+      screen.queryByText("0件のExtensionをインストール済み"),
     ).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
 
     expect(
-      await screen.findByText("0件のExtensionをインストール済み")
+      await screen.findByText("0件のExtensionをインストール済み"),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Extensions" })).toHaveAttribute(
       "aria-selected",
-      "true"
+      "true",
     );
     expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
       "aria-selected",
-      "false"
+      "false",
     );
     expect(screen.queryByText("Default Yuukei")).not.toBeInTheDocument();
   });
@@ -564,21 +583,21 @@ describe("App", () => {
     expect(factRow).not.toBeNull();
 
     await userEvent.click(
-      within(factRow as HTMLElement).getByRole("button", { name: "編集" })
+      within(factRow as HTMLElement).getByRole("button", { name: "編集" }),
     );
     const editor = screen.getByRole("textbox", { name: "fact fact-1" });
     await userEvent.clear(editor);
     await userEvent.type(editor, "唐揚げと散歩が好き。");
     await userEvent.click(
-      within(factRow as HTMLElement).getByRole("button", { name: "保存" })
+      within(factRow as HTMLElement).getByRole("button", { name: "保存" }),
     );
 
     await waitFor(() =>
       expect(client.updateResidentMemory).toHaveBeenCalledWith(
         "fact",
         "fact-1",
-        "唐揚げと散歩が好き。"
-      )
+        "唐揚げと散歩が好き。",
+      ),
     );
   });
 
@@ -593,21 +612,24 @@ describe("App", () => {
     const episodeRow = episodeText.closest("article");
     expect(episodeRow).not.toBeNull();
     await userEvent.click(
-      within(episodeRow as HTMLElement).getByRole("button", { name: "削除" })
+      within(episodeRow as HTMLElement).getByRole("button", { name: "削除" }),
     );
     await waitFor(() =>
       expect(client.forgetResidentMemories).toHaveBeenCalledWith(
         [{ kind: "episode", id: "episode-1" }],
-        false
-      )
+        false,
+      ),
     );
 
     await userEvent.click(screen.getByRole("button", { name: "すべて忘れる" }));
     expect(confirm).toHaveBeenCalledWith(
-      "すべての記憶を忘れます。この操作は取り消せません。続けますか？"
+      "すべての記憶を忘れます。この操作は取り消せません。続けますか？",
     );
     await waitFor(() =>
-      expect(client.forgetResidentMemories).toHaveBeenCalledWith(undefined, true)
+      expect(client.forgetResidentMemories).toHaveBeenCalledWith(
+        undefined,
+        true,
+      ),
     );
     confirm.mockRestore();
   });
@@ -619,7 +641,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "App" }));
     const input = await screen.findByRole("spinbutton", {
-      name: /おしゃべりの間隔/
+      name: /おしゃべりの間隔/,
     });
     await userEvent.clear(input);
     await userEvent.type(input, "12");
@@ -636,7 +658,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "App" }));
     const input = await screen.findByRole("slider", {
-      name: /住人の大きさ/
+      name: /住人の大きさ/,
     });
     fireEvent.change(input, { target: { value: "150" } });
 
@@ -658,7 +680,7 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(client.setAppConversationSendShortcut).toHaveBeenCalledWith(
-        "shiftEnter"
+        "shiftEnter",
       );
     });
   });
@@ -670,7 +692,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "App" }));
     const toggle = await screen.findByRole("checkbox", {
-      name: /ログイン時に自動起動/
+      name: /ログイン時に自動起動/,
     });
     expect(toggle).not.toBeChecked();
 
@@ -693,7 +715,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "App" }));
     const timeoutInput = await screen.findByRole("spinbutton", {
-      name: /AI待ち時間/
+      name: /AI待ち時間/,
     });
     await userEvent.clear(timeoutInput);
     await userEvent.type(timeoutInput, "45000");
@@ -703,12 +725,12 @@ describe("App", () => {
         llmTimeoutMs: 45000,
         recentContextCount: 20,
         talkDesireLow: 30,
-        talkDesireHigh: 80
+        talkDesireHigh: 80,
       });
     });
 
     const contextInput = await screen.findByRole("spinbutton", {
-      name: /直近文脈の件数/
+      name: /直近文脈の件数/,
     });
     await userEvent.clear(contextInput);
     await userEvent.type(contextInput, "8");
@@ -718,7 +740,7 @@ describe("App", () => {
         llmTimeoutMs: 45000,
         recentContextCount: 8,
         talkDesireLow: 30,
-        talkDesireHigh: 80
+        talkDesireHigh: 80,
       });
     });
   });
@@ -730,7 +752,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "App" }));
     const lowInput = await screen.findByRole("spinbutton", {
-      name: /話したい度: 低/
+      name: /話したい度: 低/,
     });
     await userEvent.clear(lowInput);
     await userEvent.type(lowInput, "25");
@@ -740,12 +762,12 @@ describe("App", () => {
         llmTimeoutMs: 30000,
         recentContextCount: 20,
         talkDesireLow: 25,
-        talkDesireHigh: 80
+        talkDesireHigh: 80,
       });
     });
 
     const highInput = await screen.findByRole("spinbutton", {
-      name: /話したい度: 高/
+      name: /話したい度: 高/,
     });
     await userEvent.clear(highInput);
     await userEvent.type(highInput, "75");
@@ -755,7 +777,7 @@ describe("App", () => {
         llmTimeoutMs: 30000,
         recentContextCount: 20,
         talkDesireLow: 25,
-        talkDesireHigh: 75
+        talkDesireHigh: 75,
       });
     });
   });
@@ -766,18 +788,22 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "シーン履歴" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "シーン履歴" }),
+    );
     expect(await screen.findByText("greeting")).toBeInTheDocument();
     expect(screen.getByText("合図: conversation.text")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "全リセット" }));
     expect(confirm).toHaveBeenCalledWith(
-      "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？"
+      "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？",
     );
     await waitFor(() => {
       expect(client.resetSceneHistory).toHaveBeenCalledTimes(1);
     });
-    expect(await screen.findByText("まだ記録されたシーンはありません。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("まだ記録されたシーンはありません。"),
+    ).toBeInTheDocument();
     confirm.mockRestore();
   });
 
@@ -789,9 +815,7 @@ describe("App", () => {
     await userEvent.click(await screen.findByRole("tab", { name: "観測" }));
     expect(await screen.findByText("観測とプライバシー")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "開いた場所の種類だけを記録します(パスは記録しません)"
-      )
+      screen.getByText("開いた場所の種類だけを記録します(パスは記録しません)"),
     ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("checkbox", { name: "フォルダ" }));
@@ -800,7 +824,7 @@ describe("App", () => {
       expect(client.setObservationSettings).toHaveBeenCalledWith({
         windows: false,
         folders: true,
-        downloads: false
+        downloads: false,
       });
     });
   });
@@ -810,7 +834,9 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "生活の記録" }),
+    );
 
     expect(await screen.findByText("fileName: photo.png")).toBeInTheDocument();
     expect(screen.getByText(/desktop.download.completed/)).toBeInTheDocument();
@@ -824,24 +850,30 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "生活の記録" }),
+    );
     const input = await screen.findByLabelText("この日時より前");
     await userEvent.type(input, "2026-07-08T12:00");
-    await userEvent.click(screen.getByRole("button", { name: "期間指定で削除" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "期間指定で削除" }),
+    );
 
     await waitFor(() =>
       expect(client.countEventLogDeleteBefore).toHaveBeenCalledWith(
-        "2026-07-08T03:00:00.000Z"
-      )
+        "2026-07-08T03:00:00.000Z",
+      ),
     );
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 2件"));
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("住人の記憶(要約)には残っている場合があります。")
+      expect.stringContaining("削除予定: 2件"),
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("住人の記憶(要約)には残っている場合があります。"),
     );
     await waitFor(() =>
       expect(client.deleteEventLogBefore).toHaveBeenCalledWith(
-        "2026-07-08T03:00:00.000Z"
-      )
+        "2026-07-08T03:00:00.000Z",
+      ),
     );
     confirm.mockRestore();
   });
@@ -852,11 +884,17 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "生活の記録" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "生活の記録" }),
+    );
     await userEvent.click(screen.getByRole("button", { name: "全削除" }));
 
-    await waitFor(() => expect(client.countEventLogDeleteAll).toHaveBeenCalled());
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("削除予定: 3件"));
+    await waitFor(() =>
+      expect(client.countEventLogDeleteAll).toHaveBeenCalled(),
+    );
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("削除予定: 3件"),
+    );
     await waitFor(() => expect(client.deleteEventLogAll).toHaveBeenCalled());
     confirm.mockRestore();
   });
@@ -864,13 +902,15 @@ describe("App", () => {
   it("ignores a canceled World Pack directory dialog", async () => {
     const client = clientFixture({
       openWorldPackDirectory: vi.fn(async () => null),
-      selectWorldPackDirectory: vi.fn()
+      selectWorldPackDirectory: vi.fn(),
     });
 
     render(<App client={client} />);
 
     await screen.findByText("Default Yuukei");
-    await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "フォルダを選択" }),
+    );
 
     await waitFor(() => {
       expect(client.openWorldPackDirectory).toHaveBeenCalled();
@@ -887,18 +927,20 @@ describe("App", () => {
       openWorldPackDirectory: vi.fn(async () => "/Users/example/custom-pack"),
       selectWorldPackDirectory: vi.fn(async () => ({
         status: worldPackStatus("custom-yuukei"),
-        snapshot: customSnapshot
-      }))
+        snapshot: customSnapshot,
+      })),
     });
 
     render(<App client={client} />);
 
     await screen.findByText("Default Yuukei");
-    await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "フォルダを選択" }),
+    );
 
     await waitFor(() => {
       expect(client.selectWorldPackDirectory).toHaveBeenCalledWith(
-        "/Users/example/custom-pack"
+        "/Users/example/custom-pack",
       );
     });
     expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
@@ -914,34 +956,36 @@ describe("App", () => {
         licenseText: "このPackの配布条件です。",
         licenseSource: "LICENSE",
         importedRoot: "/tmp/yuukei-v2/packs-imported/zip-yuukei",
-        replacesExisting: true
+        replacesExisting: true,
       })),
       importWorldPackZip: vi.fn(async () => ({
         status: worldPackStatus("zip-yuukei"),
-        snapshot: snapshot("zipです")
-      }))
+        snapshot: snapshot("zipです"),
+      })),
     });
 
     render(<App client={client} />);
 
     await screen.findByText("Default Yuukei");
-    await userEvent.click(screen.getByRole("button", { name: "zipから読み込む" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "zipから読み込む" }),
+    );
 
     await waitFor(() =>
       expect(client.inspectWorldPackZip).toHaveBeenCalledWith(
-        "/Users/example/zip-yuukei.zip"
-      )
+        "/Users/example/zip-yuukei.zip",
+      ),
     );
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("このPackの配布条件です。")
+      expect.stringContaining("このPackの配布条件です。"),
     );
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("続行すると置き換えます。")
+      expect.stringContaining("続行すると置き換えます。"),
     );
     await waitFor(() =>
       expect(client.importWorldPackZip).toHaveBeenCalledWith(
-        "/Users/example/zip-yuukei.zip"
-      )
+        "/Users/example/zip-yuukei.zip",
+      ),
     );
     expect(await screen.findByText("Custom Yuukei")).toBeInTheDocument();
     confirm.mockRestore();
@@ -952,13 +996,15 @@ describe("App", () => {
       openWorldPackDirectory: vi.fn(async () => "/Users/example/broken-pack"),
       selectWorldPackDirectory: vi.fn(async () => {
         throw new Error("pack.json is missing");
-      })
+      }),
     });
 
     render(<App client={client} />);
 
     await screen.findByText("Default Yuukei");
-    await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "フォルダを選択" }),
+    );
 
     expect(await screen.findByText("pack.json is missing")).toBeInTheDocument();
     expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
@@ -968,11 +1014,11 @@ describe("App", () => {
     const status = {
       ...worldPackStatus(),
       daihonDiagnostics: [1, 2, 3, 4, 5].map((index) =>
-        daihonDiagnostic(index)
-      )
+        daihonDiagnostic(index),
+      ),
     };
     const client = clientFixture({
-      getWorldPackStatus: vi.fn(async () => status)
+      getWorldPackStatus: vi.fn(async () => status),
     });
 
     render(<App client={client} />);
@@ -990,7 +1036,7 @@ describe("App", () => {
   it("refreshes World Pack diagnostics after a failed selection", async () => {
     const brokenStatus = {
       ...worldPackStatus(),
-      daihonDiagnostics: [daihonDiagnostic(1)]
+      daihonDiagnostics: [daihonDiagnostic(1)],
     };
     const client = clientFixture({
       getWorldPackStatus: vi
@@ -1000,13 +1046,15 @@ describe("App", () => {
       openWorldPackDirectory: vi.fn(async () => "/Users/example/broken-pack"),
       selectWorldPackDirectory: vi.fn(async () => {
         throw new Error("Daihon load failed");
-      })
+      }),
     });
 
     render(<App client={client} />);
 
     await screen.findByText("Default Yuukei");
-    await userEvent.click(screen.getByRole("button", { name: "フォルダを選択" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "フォルダを選択" }),
+    );
 
     expect(await screen.findByText("Daihon load failed")).toBeInTheDocument();
     expect(await screen.findByText("Daihon diagnostic 1")).toBeInTheDocument();
@@ -1018,8 +1066,8 @@ describe("App", () => {
       openExtensionDirectory: vi.fn(async () => "/Users/example/nya-suffix"),
       installExtensionDirectory: vi.fn(async () => ({
         state: extensionSettings([installed]),
-        snapshot: snapshot("Extensionを読み込みました")
-      }))
+        snapshot: snapshot("Extensionを読み込みました"),
+      })),
     });
 
     render(<App client={client} />);
@@ -1030,7 +1078,7 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(client.installExtensionDirectory).toHaveBeenCalledWith(
-        "/Users/example/nya-suffix"
+        "/Users/example/nya-suffix",
       );
     });
     expect(await screen.findByText("Nya Suffix")).toBeInTheDocument();
@@ -1041,28 +1089,28 @@ describe("App", () => {
     const translate = installedExtension("translate-en", "Translate EN");
     const client = clientFixture({
       getExtensionSettings: vi.fn(async () =>
-        extensionSettings([nya, translate])
+        extensionSettings([nya, translate]),
       ),
       setExtensionEnabled: vi.fn(async () => ({
         state: extensionSettings([
           installedExtension("nya-suffix", "Nya Suffix", false),
-          translate
+          translate,
         ]),
-        snapshot: snapshot("無効にしました")
+        snapshot: snapshot("無効にしました"),
       })),
       setExtensionHookOrder: vi.fn(async () => ({
         state: {
           ...extensionSettings([translate, nya]),
           hookOrder: {
-            beforeCommandEmit: ["translate-en", "nya-suffix"]
-          }
+            beforeCommandEmit: ["translate-en", "nya-suffix"],
+          },
         },
-        snapshot: snapshot("順序を変えました")
+        snapshot: snapshot("順序を変えました"),
       })),
       uninstallExtension: vi.fn(async () => ({
         state: extensionSettings([translate]),
-        snapshot: snapshot("削除しました")
-      }))
+        snapshot: snapshot("削除しました"),
+      })),
     });
 
     render(<App client={client} />);
@@ -1073,7 +1121,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.setExtensionEnabled).toHaveBeenCalledWith(
         "nya-suffix",
-        false
+        false,
       );
     });
 
@@ -1081,7 +1129,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(client.setExtensionHookOrder).toHaveBeenCalledWith(
         "beforeCommandEmit",
-        ["translate-en", "nya-suffix"]
+        ["translate-en", "nya-suffix"],
       );
     });
 
@@ -1098,8 +1146,8 @@ describe("App", () => {
         health: "unavailable" as const,
         failureCount: 3,
         suspended: true,
-        message: "timed out"
-      }
+        message: "timed out",
+      },
     };
     const restarted = {
       ...suspended,
@@ -1107,12 +1155,14 @@ describe("App", () => {
         health: "ready" as const,
         failureCount: 0,
         suspended: false,
-        message: null
-      }
+        message: null,
+      },
     };
     const client = clientFixture({
       getExtensionSettings: vi.fn(async () => extensionSettings([suspended])),
-      restartExtensionProcess: vi.fn(async () => extensionSettings([restarted]))
+      restartExtensionProcess: vi.fn(async () =>
+        extensionSettings([restarted]),
+      ),
     });
 
     render(<App client={client} />);
@@ -1138,8 +1188,8 @@ describe("App", () => {
           allowPayloads: true,
           allowReferences: false,
           maxRecords: 50,
-          purpose: "rebuild"
-        }
+          purpose: "rebuild",
+        },
       },
       eventSubscriptions: [{ eventTypes: ["*"] }],
       emittedEvents: ["ext.watcher.activity"],
@@ -1147,12 +1197,12 @@ describe("App", () => {
         {
           capability: "memory.retrieve",
           methods: ["retrieve"],
-          requiredPermissions: []
-        }
-      ]
+          requiredPermissions: [],
+        },
+      ],
     };
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([watcher]))
+      getExtensionSettings: vi.fn(async () => extensionSettings([watcher])),
     });
 
     render(<App client={client} />);
@@ -1172,7 +1222,7 @@ describe("App", () => {
   it("shows VOICEVOX credit text for the bundled speech extension", async () => {
     const voicevox = installedExtension("yuukei-voicevox", "Yuukei VOICEVOX");
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([voicevox]))
+      getExtensionSettings: vi.fn(async () => extensionSettings([voicevox])),
     });
 
     render(<App client={client} />);
@@ -1181,8 +1231,8 @@ describe("App", () => {
     expect(await screen.findByText("Yuukei VOICEVOX")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "音声合成にVOICEVOXを使用します。生成音声の利用は各キャラクターの規約に従ってください(既定の声: VOICEVOX:四国めたん / VOICEVOX:ずんだもん)"
-      )
+        "音声合成にVOICEVOXを使用します。生成音声の利用は各キャラクターの規約に従ってください(既定の声: VOICEVOX:四国めたん / VOICEVOX:ずんだもん)",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -1193,9 +1243,9 @@ describe("App", () => {
         {
           capability: "dialogue.generate",
           methods: ["generate"],
-          requiredPermissions: []
-        }
-      ]
+          requiredPermissions: [],
+        },
+      ],
     };
     const usage = capabilityUsage([
       {
@@ -1210,18 +1260,18 @@ describe("App", () => {
                 allTime: {
                   requests: 3,
                   inputTokens: 1200,
-                  outputTokens: 345
+                  outputTokens: 345,
                 },
                 last7Days: {
                   requests: 1,
                   inputTokens: 400,
-                  outputTokens: 90
-                }
-              }
-            ]
-          }
-        ]
-      }
+                  outputTokens: 90,
+                },
+              },
+            ],
+          },
+        ],
+      },
     ]);
     const refreshedUsage = capabilityUsage([
       {
@@ -1236,34 +1286,42 @@ describe("App", () => {
                 allTime: {
                   requests: 4,
                   inputTokens: 1500,
-                  outputTokens: 444
+                  outputTokens: 444,
                 },
                 last7Days: {
                   requests: 2,
                   inputTokens: 700,
-                  outputTokens: 189
-                }
-              }
-            ]
-          }
-        ]
-      }
+                  outputTokens: 189,
+                },
+              },
+            ],
+          },
+        ],
+      },
     ]);
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      getExtensionSettings: vi.fn(async () =>
+        extensionSettings([intelligence]),
+      ),
       getCapabilityUsage: vi
         .fn()
         .mockResolvedValueOnce(usage)
-        .mockResolvedValueOnce(refreshedUsage)
+        .mockResolvedValueOnce(refreshedUsage),
     });
 
     render(<App client={client} />);
     await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
 
     expect(await screen.findByText("トークン使用量")).toBeInTheDocument();
-    const usageSection = screen.getByLabelText("yuukei-intelligence token usage");
-    expect(within(usageSection).getByText("dialogue.generate")).toBeInTheDocument();
-    expect(within(usageSection).getByText("openai-compatible / local-model")).toBeInTheDocument();
+    const usageSection = screen.getByLabelText(
+      "yuukei-intelligence token usage",
+    );
+    expect(
+      within(usageSection).getByText("dialogue.generate"),
+    ).toBeInTheDocument();
+    expect(
+      within(usageSection).getByText("openai-compatible / local-model"),
+    ).toBeInTheDocument();
     expect(within(usageSection).getByText("リクエスト 3")).toBeInTheDocument();
     expect(within(usageSection).getByText("入力 1,200")).toBeInTheDocument();
     expect(within(usageSection).getByText("出力 345")).toBeInTheDocument();
@@ -1287,23 +1345,23 @@ describe("App", () => {
               { value: "gemini", label: "Gemini" },
               {
                 value: "openai-compatible",
-                label: "OpenAI互換 (LM Studio等)"
-              }
+                label: "OpenAI互換 (LM Studio等)",
+              },
             ],
-            default: "openai-compatible"
+            default: "openai-compatible",
           },
           {
             key: "timeoutMs",
             type: "number" as const,
             label: "タイムアウト(ms)",
             default: 30000,
-            min: 1000
+            min: 1000,
           },
           {
             key: "gemini.apiKey",
             type: "secret" as const,
             label: "Gemini APIキー",
-            visibleWhen: { key: "provider", equals: "gemini" }
+            visibleWhen: { key: "provider", equals: "gemini" },
           },
           {
             key: "openaiCompatible.baseUrl",
@@ -1312,18 +1370,20 @@ describe("App", () => {
             default: "http://127.0.0.1:1234/v1",
             visibleWhen: {
               key: "provider",
-              equals: "openai-compatible"
-            }
-          }
-        ]
+              equals: "openai-compatible",
+            },
+          },
+        ],
       },
       settingValues: {
-        provider: "openai-compatible"
+        provider: "openai-compatible",
       },
-      secretsSet: ["gemini.apiKey"]
+      secretsSet: ["gemini.apiKey"],
     };
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      getExtensionSettings: vi.fn(async () =>
+        extensionSettings([intelligence]),
+      ),
       setExtensionSettingValues: vi.fn(async () => ({
         state: extensionSettings([
           {
@@ -1331,22 +1391,22 @@ describe("App", () => {
             settingValues: {
               provider: "gemini",
               timeoutMs: 45000,
-              "openaiCompatible.baseUrl": "http://127.0.0.1:1234/v1"
-            }
-          }
+              "openaiCompatible.baseUrl": "http://127.0.0.1:1234/v1",
+            },
+          },
         ]),
-        snapshot: snapshot("設定を保存しました")
+        snapshot: snapshot("設定を保存しました"),
       })),
       setExtensionSecret: vi.fn(async () => ({
         state: extensionSettings([
           {
             ...intelligence,
             settingValues: { provider: "gemini", timeoutMs: 45000 },
-            secretsSet: ["gemini.apiKey"]
-          }
+            secretsSet: ["gemini.apiKey"],
+          },
         ]),
-        snapshot: snapshot("secretを保存しました")
-      }))
+        snapshot: snapshot("secretを保存しました"),
+      })),
     });
 
     render(<App client={client} />);
@@ -1354,14 +1414,19 @@ describe("App", () => {
 
     expect(await screen.findByText("Yuukei Intelligence")).toBeInTheDocument();
     expect(screen.getByLabelText("OpenAI互換 Base URL")).toHaveValue(
-      "http://127.0.0.1:1234/v1"
+      "http://127.0.0.1:1234/v1",
     );
     expect(screen.queryByLabelText("Gemini APIキー")).not.toBeInTheDocument();
 
-    await userEvent.selectOptions(screen.getByLabelText("プロバイダ"), "gemini");
+    await userEvent.selectOptions(
+      screen.getByLabelText("プロバイダ"),
+      "gemini",
+    );
     expect(await screen.findByLabelText("Gemini APIキー")).toHaveValue("");
     expect(screen.getByPlaceholderText("設定済み")).toBeInTheDocument();
-    expect(screen.queryByLabelText("OpenAI互換 Base URL")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("OpenAI互換 Base URL"),
+    ).not.toBeInTheDocument();
 
     await userEvent.clear(screen.getByLabelText("タイムアウト(ms)"));
     await userEvent.type(screen.getByLabelText("タイムアウト(ms)"), "45000");
@@ -1373,14 +1438,14 @@ describe("App", () => {
         "yuukei-intelligence",
         expect.objectContaining({
           provider: "gemini",
-          timeoutMs: 45000
-        })
+          timeoutMs: 45000,
+        }),
       );
     });
     expect(client.setExtensionSecret).toHaveBeenCalledWith(
       "yuukei-intelligence",
       "gemini.apiKey",
-      "new-secret"
+      "new-secret",
     );
   });
 
@@ -1395,33 +1460,35 @@ describe("App", () => {
             label: "プロバイダ",
             options: [
               { value: "gemini", label: "Gemini" },
-              { value: "openai-compatible", label: "OpenAI互換" }
+              { value: "openai-compatible", label: "OpenAI互換" },
             ],
-            default: "openai-compatible"
+            default: "openai-compatible",
           },
           {
             key: "timeoutMs",
             type: "number" as const,
             label: "タイムアウト(ms)",
             default: 30000,
-            min: 1000
-          }
-        ]
+            min: 1000,
+          },
+        ],
       },
       settingValues: {},
-      secretsSet: []
+      secretsSet: [],
     };
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      getExtensionSettings: vi.fn(async () =>
+        extensionSettings([intelligence]),
+      ),
       setExtensionSettingValues: vi.fn(async () => ({
         state: extensionSettings([
           {
             ...intelligence,
-            settingValues: { provider: "gemini" }
-          }
+            settingValues: { provider: "gemini" },
+          },
         ]),
-        snapshot: snapshot("設定を保存しました")
-      }))
+        snapshot: snapshot("設定を保存しました"),
+      })),
     });
 
     render(<App client={client} />);
@@ -1429,13 +1496,16 @@ describe("App", () => {
     await screen.findByText("Yuukei Intelligence");
 
     expect(screen.getByLabelText("タイムアウト(ms)")).toHaveValue(30000);
-    await userEvent.selectOptions(screen.getByLabelText("プロバイダ"), "gemini");
+    await userEvent.selectOptions(
+      screen.getByLabelText("プロバイダ"),
+      "gemini",
+    );
     await userEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       expect(client.setExtensionSettingValues).toHaveBeenCalledWith(
         "yuukei-intelligence",
-        { provider: "gemini" }
+        { provider: "gemini" },
       );
     });
   });
@@ -1450,27 +1520,29 @@ describe("App", () => {
             type: "select" as const,
             label: "プロバイダ",
             options: [{ value: "gemini", label: "Gemini" }],
-            default: "gemini"
+            default: "gemini",
           },
           {
             key: "gemini.apiKey",
             type: "secret" as const,
             label: "Gemini APIキー",
-            visibleWhen: { key: "provider", equals: "gemini" }
-          }
-        ]
+            visibleWhen: { key: "provider", equals: "gemini" },
+          },
+        ],
       },
       settingValues: {
-        provider: "gemini"
+        provider: "gemini",
       },
-      secretsSet: ["gemini.apiKey"]
+      secretsSet: ["gemini.apiKey"],
     };
     const client = clientFixture({
-      getExtensionSettings: vi.fn(async () => extensionSettings([intelligence])),
+      getExtensionSettings: vi.fn(async () =>
+        extensionSettings([intelligence]),
+      ),
       setExtensionSecret: vi.fn(async () => ({
         state: extensionSettings([{ ...intelligence, secretsSet: [] }]),
-        snapshot: snapshot("secretを消しました")
-      }))
+        snapshot: snapshot("secretを消しました"),
+      })),
     });
 
     render(<App client={client} />);
@@ -1485,7 +1557,7 @@ describe("App", () => {
       expect(client.setExtensionSecret).toHaveBeenCalledWith(
         "yuukei-intelligence",
         "gemini.apiKey",
-        null
+        null,
       );
     });
   });

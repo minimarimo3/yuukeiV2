@@ -26,7 +26,7 @@ const root = isStageOverlay ? (
 );
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{root}</React.StrictMode>
+  <React.StrictMode>{root}</React.StrictMode>,
 );
 
 function currentWindowLabel() {

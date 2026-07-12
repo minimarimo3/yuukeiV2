@@ -2,4 +2,11 @@
 import type { ExtensionHookPoint } from "./ExtensionHookPoint";
 import type { RuntimeCommand } from "./RuntimeCommand";
 
-export type ExtensionHookInvocation = { id: string, hookPoint: ExtensionHookPoint, extensionId: string, residentId: string, worldPackId: string, command: RuntimeCommand, };
+export type ExtensionHookInvocation = {
+  id: string;
+  hookPoint: ExtensionHookPoint;
+  extensionId: string;
+  residentId: string;
+  worldPackId: string;
+  command: RuntimeCommand;
+};

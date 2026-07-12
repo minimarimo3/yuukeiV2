@@ -4,7 +4,7 @@ import {
   reducePointerGesture,
   type PointerGestureEffect,
   type PointerGestureEvent,
-  type PointerGestureState
+  type PointerGestureState,
 } from "./pointerGesture";
 
 const gestureId = 11;
@@ -18,15 +18,15 @@ const semanticHit = {
     actorId,
     hitZoneId: "head",
     input: { kind: "pointer" as const, button: "primary" },
-    screen: { x: 10, y: 20 }
-  }
+    screen: { x: 10, y: 20 },
+  },
 };
 
 function pointerPressed(
   semantic = true,
   overrides: Partial<
     Extract<PointerGestureEvent, { type: "pointerPressed" }>
-  > = {}
+  > = {},
 ): Extract<PointerGestureEvent, { type: "pointerPressed" }> {
   return {
     type: "pointerPressed",
@@ -36,14 +36,11 @@ function pointerPressed(
     semanticHit: semantic ? semanticHit : null,
     client: { x: 1, y: 2 },
     screen: { x: 10, y: 20 },
-    ...overrides
+    ...overrides,
   };
 }
 
-function transition(
-  state: PointerGestureState,
-  event: PointerGestureEvent
-) {
+function transition(state: PointerGestureState, event: PointerGestureEvent) {
   return reducePointerGesture(state, event);
 }
 
@@ -55,7 +52,7 @@ function startingDrag() {
   return transition(pressing(), {
     type: "holdElapsed",
     gestureId,
-    pointerId
+    pointerId,
   }).state;
 }
 
@@ -65,17 +62,17 @@ function dragging() {
     gestureId,
     pointerId,
     actorId,
-    sessionId
+    sessionId,
   }).state;
 }
 
 function effectsOfType<T extends PointerGestureEffect["type"]>(
   effects: PointerGestureEffect[],
-  type: T
+  type: T,
 ) {
   return effects.filter(
     (effect): effect is Extract<PointerGestureEffect, { type: T }> =>
-      effect.type === type
+      effect.type === type,
   );
 }
 
@@ -88,7 +85,7 @@ describe("pointer gesture state machine", () => {
         type: "pressing",
         gestureId,
         pointerId,
-        holdStatus: "scheduled"
+        holdStatus: "scheduled",
       });
       expect(effectsOfType(result.effects, "scheduleHold")).toHaveLength(1);
     });
@@ -96,7 +93,7 @@ describe("pointer gesture state machine", () => {
     it("returns from pressing to idle on pointerReleased", () => {
       const result = transition(pressing(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -105,18 +102,18 @@ describe("pointer gesture state machine", () => {
     it("emits notifyPoke for a semantic short press", () => {
       const result = transition(pressing(true), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
 
       expect(effectsOfType(result.effects, "notifyPoke")).toEqual([
-        { type: "notifyPoke", gestureId, poke: semanticHit.poke }
+        { type: "notifyPoke", gestureId, poke: semanticHit.poke },
       ]);
     });
 
     it("does not emit notifyPoke without a semantic hit", () => {
       const result = transition(pressing(false), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
 
       expect(effectsOfType(result.effects, "notifyPoke")).toEqual([]);
@@ -126,17 +123,17 @@ describe("pointer gesture state machine", () => {
       const first = transition(pressing(false), {
         type: "holdElapsed",
         gestureId,
-        pointerId
+        pointerId,
       });
       const repeated = transition(first.state, {
         type: "holdElapsed",
         gestureId,
-        pointerId
+        pointerId,
       });
 
       expect(first.state).toMatchObject({
         type: "startingDrag",
-        releaseIntent: "none"
+        releaseIntent: "none",
       });
       expect(effectsOfType(first.effects, "beginWindowDrag")).toHaveLength(1);
       expect(repeated.effects).toEqual([]);
@@ -147,23 +144,23 @@ describe("pointer gesture state machine", () => {
         type: "pointerMoved",
         pointerId,
         client: { x: 8, y: 2 },
-        screen: { x: 17, y: 20 }
+        screen: { x: 17, y: 20 },
       });
       const laterMove = transition(firstMove.state, {
         type: "pointerMoved",
         pointerId,
         client: { x: 9, y: 2 },
-        screen: { x: 18, y: 20 }
+        screen: { x: 18, y: 20 },
       });
       const elapsed = transition(laterMove.state, {
         type: "holdElapsed",
         gestureId,
-        pointerId
+        pointerId,
       });
 
       expect(firstMove.state).toMatchObject({
         type: "pressing",
-        holdStatus: "cancelledByMovement"
+        holdStatus: "cancelledByMovement",
       });
       expect(effectsOfType(firstMove.effects, "cancelHold")).toHaveLength(1);
       expect(effectsOfType(laterMove.effects, "cancelHold")).toHaveLength(0);
@@ -177,7 +174,7 @@ describe("pointer gesture state machine", () => {
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(result.state).toMatchObject({
@@ -185,7 +182,7 @@ describe("pointer gesture state machine", () => {
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
       expect(effectsOfType(result.effects, "notifyGrab")).toHaveLength(1);
     });
@@ -195,7 +192,7 @@ describe("pointer gesture state machine", () => {
         type: "pointerMoved",
         pointerId,
         client: { x: 4, y: 5 },
-        screen: { x: 25, y: 45 }
+        screen: { x: 25, y: 45 },
       });
 
       expect(effectsOfType(result.effects, "moveWindowDrag")).toEqual([
@@ -205,22 +202,22 @@ describe("pointer gesture state machine", () => {
           actorId,
           sessionId,
           dx: 15,
-          dy: 25
-        }
+          dy: 25,
+        },
       ]);
     });
 
     it("moves from dragging to endingDrag on pointerReleased", () => {
       const result = transition(dragging(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
 
       expect(result.state).toEqual({
         type: "endingDrag",
         gestureId,
         actorId,
-        sessionId
+        sessionId,
       });
       expect(effectsOfType(result.effects, "finishWindowDrag")).toHaveLength(1);
     });
@@ -228,19 +225,19 @@ describe("pointer gesture state machine", () => {
     it("returns to idle before emitting notifyDrop on windowDragFinished", () => {
       const ending = transition(dragging(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       }).state;
       const result = transition(ending, {
         type: "windowDragFinished",
         gestureId,
         actorId,
         sessionId,
-        movedDistance: 42
+        movedDistance: 42,
       });
 
       expect(result.state).toEqual(idlePointerGesture());
       expect(effectsOfType(result.effects, "notifyDrop")).toEqual([
-        { type: "notifyDrop", gestureId, actorId, movedDistance: 42 }
+        { type: "notifyDrop", gestureId, actorId, movedDistance: 42 },
       ]);
     });
   });
@@ -249,7 +246,7 @@ describe("pointer gesture state machine", () => {
     it("returns pressing to idle without poke on pointerCancelled", () => {
       const result = transition(pressing(), {
         type: "pointerCancelled",
-        pointerId
+        pointerId,
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -259,14 +256,14 @@ describe("pointer gesture state machine", () => {
     it("moves dragging to cancellingDrag and requests cancel", () => {
       const result = transition(dragging(), {
         type: "pointerCancelled",
-        pointerId
+        pointerId,
       });
 
       expect(result.state).toEqual({
         type: "cancellingDrag",
         gestureId,
         actorId,
-        sessionId
+        sessionId,
       });
       expect(effectsOfType(result.effects, "cancelWindowDrag")).toHaveLength(1);
       expect(effectsOfType(result.effects, "notifyDrop")).toEqual([]);
@@ -275,13 +272,13 @@ describe("pointer gesture state machine", () => {
     it("returns cancellingDrag to idle when Device Host cancellation succeeds", () => {
       const cancelling = transition(dragging(), {
         type: "pointerCancelled",
-        pointerId
+        pointerId,
       }).state;
       const result = transition(cancelling, {
         type: "windowDragCancelled",
         gestureId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -291,14 +288,14 @@ describe("pointer gesture state machine", () => {
     it("returns cancellingDrag to idle when Device Host cancellation fails", () => {
       const cancelling = transition(dragging(), {
         type: "pointerCancelled",
-        pointerId
+        pointerId,
       }).state;
       const result = transition(cancelling, {
         type: "windowDragCancelFailed",
         gestureId,
         actorId,
         sessionId,
-        error: new Error("cancel failed")
+        error: new Error("cancel failed"),
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -311,14 +308,14 @@ describe("pointer gesture state machine", () => {
         type: "pointerMoved",
         pointerId,
         client: { x: 30, y: 35 },
-        screen: { x: 40, y: 55 }
+        screen: { x: 40, y: 55 },
       });
       const started = transition(moved.state, {
         type: "windowDragStarted",
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(started.state).toMatchObject({
@@ -326,7 +323,7 @@ describe("pointer gesture state machine", () => {
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
       expect(effectsOfType(started.effects, "moveWindowDrag")).toEqual([
         {
@@ -335,8 +332,8 @@ describe("pointer gesture state machine", () => {
           actorId,
           sessionId,
           dx: 30,
-          dy: 35
-        }
+          dy: 35,
+        },
       ]);
     });
 
@@ -345,18 +342,18 @@ describe("pointer gesture state machine", () => {
         type: "pointerMoved",
         pointerId,
         client: { x: 70, y: 15 },
-        screen: { x: 80, y: 35 }
+        screen: { x: 80, y: 35 },
       });
       const released = transition(moved.state, {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
       const started = transition(released.state, {
         type: "windowDragStarted",
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(started.state.type).toBe("endingDrag");
@@ -367,14 +364,14 @@ describe("pointer gesture state machine", () => {
           actorId,
           sessionId,
           dx: 70,
-          dy: 15
-        }
+          dy: 15,
+        },
       ]);
       const moveIndex = started.effects.findIndex(
-        (effect) => effect.type === "moveWindowDrag"
+        (effect) => effect.type === "moveWindowDrag",
       );
       const finishIndex = started.effects.findIndex(
-        (effect) => effect.type === "finishWindowDrag"
+        (effect) => effect.type === "finishWindowDrag",
       );
       expect(moveIndex).toBeGreaterThanOrEqual(0);
       expect(finishIndex).toBeGreaterThan(moveIndex);
@@ -383,43 +380,47 @@ describe("pointer gesture state machine", () => {
     it("records finish intent while start is pending and finishes after start", () => {
       const released = transition(startingDrag(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
       const started = transition(released.state, {
         type: "windowDragStarted",
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(released.state).toMatchObject({
         type: "startingDrag",
-        releaseIntent: "finish"
+        releaseIntent: "finish",
       });
       expect(started.state.type).toBe("endingDrag");
-      expect(effectsOfType(started.effects, "finishWindowDrag")).toHaveLength(1);
+      expect(effectsOfType(started.effects, "finishWindowDrag")).toHaveLength(
+        1,
+      );
     });
 
     it("records cancel intent while start is pending and cancels after start", () => {
       const cancelled = transition(startingDrag(), {
         type: "pointerCancelled",
-        pointerId
+        pointerId,
       });
       const started = transition(cancelled.state, {
         type: "windowDragStarted",
         gestureId,
         pointerId,
         actorId,
-        sessionId
+        sessionId,
       });
 
       expect(cancelled.state).toMatchObject({
         type: "startingDrag",
-        releaseIntent: "cancel"
+        releaseIntent: "cancel",
       });
       expect(started.state.type).toBe("cancellingDrag");
-      expect(effectsOfType(started.effects, "cancelWindowDrag")).toHaveLength(1);
+      expect(effectsOfType(started.effects, "cancelWindowDrag")).toHaveLength(
+        1,
+      );
       expect(effectsOfType(started.effects, "notifyGrab")).toHaveLength(0);
     });
 
@@ -429,7 +430,7 @@ describe("pointer gesture state machine", () => {
         gestureId,
         pointerId,
         actorId,
-        error: new Error("begin failed")
+        error: new Error("begin failed"),
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -438,14 +439,14 @@ describe("pointer gesture state machine", () => {
     it("returns endingDrag to idle on windowDragFinishFailed", () => {
       const ending = transition(dragging(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       }).state;
       const result = transition(ending, {
         type: "windowDragFinishFailed",
         gestureId,
         actorId,
         sessionId,
-        error: new Error("finish failed")
+        error: new Error("finish failed"),
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -458,7 +459,7 @@ describe("pointer gesture state machine", () => {
         gestureId,
         actorId,
         sessionId,
-        error: new Error("move failed")
+        error: new Error("move failed"),
       });
 
       expect(result.state).toEqual(active);
@@ -470,7 +471,7 @@ describe("pointer gesture state machine", () => {
       const result = transition(active, {
         type: "avatarGrabNotifyFailed",
         gestureId,
-        error: new Error("grab notification failed")
+        error: new Error("grab notification failed"),
       });
 
       expect(result.state).toEqual(active);
@@ -480,7 +481,7 @@ describe("pointer gesture state machine", () => {
       const result = transition(idlePointerGesture(), {
         type: "avatarDropNotifyFailed",
         gestureId,
-        error: new Error("drop notification failed")
+        error: new Error("drop notification failed"),
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -490,7 +491,7 @@ describe("pointer gesture state machine", () => {
       const result = transition(idlePointerGesture(), {
         type: "avatarPokeNotifyFailed",
         gestureId,
-        error: new Error("poke notification failed")
+        error: new Error("poke notification failed"),
       });
 
       expect(result.state).toEqual(idlePointerGesture());
@@ -501,7 +502,7 @@ describe("pointer gesture state machine", () => {
     it("ignores pointerReleased while idle", () => {
       const result = transition(idlePointerGesture(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       });
 
       expect(result).toEqual({ state: idlePointerGesture(), effects: [] });
@@ -514,7 +515,7 @@ describe("pointer gesture state machine", () => {
         gestureId: gestureId + 1,
         pointerId,
         actorId,
-        sessionId: "stale-session"
+        sessionId: "stale-session",
       });
 
       expect(result).toEqual({ state: active, effects: [] });
@@ -526,7 +527,7 @@ describe("pointer gesture state machine", () => {
         type: "pointerMoved",
         pointerId: pointerId + 1,
         client: { x: 50, y: 50 },
-        screen: { x: 50, y: 50 }
+        screen: { x: 50, y: 50 },
       });
 
       expect(result).toEqual({ state: active, effects: [] });
@@ -535,14 +536,14 @@ describe("pointer gesture state machine", () => {
     it("does not accept a new pointerPressed while endingDrag", () => {
       const ending = transition(dragging(), {
         type: "pointerReleased",
-        pointerId
+        pointerId,
       }).state;
       const result = transition(
         ending,
         pointerPressed(true, {
           gestureId: gestureId + 1,
-          pointerId: pointerId + 1
-        })
+          pointerId: pointerId + 1,
+        }),
       );
 
       expect(result).toEqual({ state: ending, effects: [] });

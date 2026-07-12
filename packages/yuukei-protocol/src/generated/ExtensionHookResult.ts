@@ -2,4 +2,8 @@
 import type { ExtensionHookAction } from "./ExtensionHookAction";
 import type { RuntimeCommand } from "./RuntimeCommand";
 
-export type ExtensionHookResult = { action: ExtensionHookAction, command?: RuntimeCommand, metadata?: { [key: string]: unknown }, };
+export type ExtensionHookResult = {
+  action: ExtensionHookAction;
+  command?: RuntimeCommand;
+  metadata?: { [key: string]: unknown };
+};

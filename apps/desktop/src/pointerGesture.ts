@@ -5,7 +5,7 @@ export const POINTER_GESTURE_MOVE_THRESHOLD_PX = 6;
 
 export function shouldStartPointerGestureDrag(
   elapsedMs: number,
-  maxDistancePx: number
+  maxDistancePx: number,
 ): boolean {
   return (
     elapsedMs >= POINTER_GESTURE_HOLD_MS &&
@@ -207,7 +207,7 @@ export function acceptsNewPointerInput(state: PointerGestureState): boolean {
 
 export function reducePointerGesture(
   state: PointerGestureState,
-  event: PointerGestureEvent
+  event: PointerGestureEvent,
 ): PointerGestureTransition {
   if (event.type === "pointerPressed") {
     if (!acceptsNewPointerInput(state)) return unchanged(state);
@@ -221,21 +221,21 @@ export function reducePointerGesture(
         startClient: event.client,
         startScreen: event.screen,
         maxDistancePx: 0,
-        holdStatus: "scheduled"
+        holdStatus: "scheduled",
       },
       effects: [
         {
           type: "capturePointer",
           gestureId: event.gestureId,
-          pointerId: event.pointerId
+          pointerId: event.pointerId,
         },
         {
           type: "scheduleHold",
           gestureId: event.gestureId,
           pointerId: event.pointerId,
-          delayMs: POINTER_GESTURE_HOLD_MS
-        }
-      ]
+          delayMs: POINTER_GESTURE_HOLD_MS,
+        },
+      ],
     };
   }
 
@@ -244,7 +244,7 @@ export function reducePointerGesture(
     if (state.type === "pressing") {
       const distance = Math.hypot(
         event.client.x - state.startClient.x,
-        event.client.y - state.startClient.y
+        event.client.y - state.startClient.y,
       );
       const maxDistancePx = Math.max(state.maxDistancePx, distance);
       const crossedThreshold =
@@ -256,23 +256,23 @@ export function reducePointerGesture(
           maxDistancePx,
           holdStatus: crossedThreshold
             ? "cancelledByMovement"
-            : state.holdStatus
+            : state.holdStatus,
         },
         effects: crossedThreshold
           ? [
               {
                 type: "cancelHold",
                 gestureId: state.gestureId,
-                pointerId: state.pointerId
-              }
+                pointerId: state.pointerId,
+              },
             ]
-          : []
+          : [],
       };
     }
     if (state.type === "startingDrag") {
       return {
         state: { ...state, latestScreen: event.screen },
-        effects: []
+        effects: [],
       };
     }
     if (state.type === "dragging") {
@@ -285,9 +285,9 @@ export function reducePointerGesture(
             actorId: state.actorId,
             sessionId: state.sessionId,
             dx: event.screen.x - state.startScreen.x,
-            dy: event.screen.y - state.startScreen.y
-          }
-        ]
+            dy: event.screen.y - state.startScreen.y,
+          },
+        ],
       };
     }
     return unchanged(state);
@@ -300,7 +300,7 @@ export function reducePointerGesture(
       state.holdStatus !== "scheduled" ||
       !shouldStartPointerGestureDrag(
         POINTER_GESTURE_HOLD_MS,
-        state.maxDistancePx
+        state.maxDistancePx,
       )
     ) {
       return unchanged(state);
@@ -313,16 +313,16 @@ export function reducePointerGesture(
         actorId: state.actorHit.actorId,
         startScreen: state.startScreen,
         latestScreen: state.startScreen,
-        releaseIntent: "none"
+        releaseIntent: "none",
       },
       effects: [
         {
           type: "beginWindowDrag",
           gestureId: state.gestureId,
           pointerId: state.pointerId,
-          actorId: state.actorHit.actorId
-        }
-      ]
+          actorId: state.actorHit.actorId,
+        },
+      ],
     };
   }
 
@@ -335,16 +335,13 @@ export function reducePointerGesture(
   }
 
   if (event.type === "windowDragStarted") {
-    if (
-      state.type !== "startingDrag" ||
-      !matchesDragStart(state, event)
-    ) {
+    if (state.type !== "startingDrag" || !matchesDragStart(state, event)) {
       return unchanged(state);
     }
     const notifyGrab: PointerGestureEffect = {
       type: "notifyGrab",
       gestureId: state.gestureId,
-      actorId: state.actorId
+      actorId: state.actorId,
     };
     const pendingDx = state.latestScreen.x - state.startScreen.x;
     const pendingDy = state.latestScreen.y - state.startScreen.y;
@@ -358,8 +355,8 @@ export function reducePointerGesture(
               actorId: state.actorId,
               sessionId: event.sessionId,
               dx: pendingDx,
-              dy: pendingDy
-            }
+              dy: pendingDy,
+            },
           ];
     if (state.releaseIntent === "finish") {
       return {
@@ -367,7 +364,7 @@ export function reducePointerGesture(
           type: "endingDrag",
           gestureId: state.gestureId,
           actorId: state.actorId,
-          sessionId: event.sessionId
+          sessionId: event.sessionId,
         },
         effects: [
           notifyGrab,
@@ -376,9 +373,9 @@ export function reducePointerGesture(
             type: "finishWindowDrag",
             gestureId: state.gestureId,
             actorId: state.actorId,
-            sessionId: event.sessionId
-          }
-        ]
+            sessionId: event.sessionId,
+          },
+        ],
       };
     }
     if (state.releaseIntent === "cancel") {
@@ -387,16 +384,16 @@ export function reducePointerGesture(
           type: "cancellingDrag",
           gestureId: state.gestureId,
           actorId: state.actorId,
-          sessionId: event.sessionId
+          sessionId: event.sessionId,
         },
         effects: [
           {
             type: "cancelWindowDrag",
             gestureId: state.gestureId,
             actorId: state.actorId,
-            sessionId: event.sessionId
-          }
-        ]
+            sessionId: event.sessionId,
+          },
+        ],
       };
     }
     return {
@@ -406,17 +403,14 @@ export function reducePointerGesture(
         pointerId: state.pointerId,
         actorId: state.actorId,
         sessionId: event.sessionId,
-        startScreen: state.startScreen
+        startScreen: state.startScreen,
       },
-      effects: [notifyGrab, ...catchUpMove]
+      effects: [notifyGrab, ...catchUpMove],
     };
   }
 
   if (event.type === "windowDragStartFailed") {
-    if (
-      state.type !== "startingDrag" ||
-      !matchesDragStart(state, event)
-    ) {
+    if (state.type !== "startingDrag" || !matchesDragStart(state, event)) {
       return unchanged(state);
     }
     return {
@@ -425,9 +419,9 @@ export function reducePointerGesture(
         {
           type: "releasePointerCapture",
           gestureId: state.gestureId,
-          pointerId: state.pointerId
-        }
-      ]
+          pointerId: state.pointerId,
+        },
+      ],
     };
   }
 
@@ -454,9 +448,9 @@ export function reducePointerGesture(
           type: "notifyDrop",
           gestureId: state.gestureId,
           actorId: event.actorId,
-          movedDistance: event.movedDistance
-        }
-      ]
+          movedDistance: event.movedDistance,
+        },
+      ],
     };
   }
 
@@ -471,10 +465,7 @@ export function reducePointerGesture(
     event.type === "windowDragCancelled" ||
     event.type === "windowDragCancelFailed"
   ) {
-    if (
-      state.type !== "cancellingDrag" ||
-      !matchesDragSession(state, event)
-    ) {
+    if (state.type !== "cancellingDrag" || !matchesDragSession(state, event)) {
       return unchanged(state);
     }
     return { state: idlePointerGesture(), effects: [] };
@@ -503,28 +494,28 @@ function releasePointer(
     PointerGestureEvent,
     { type: "pointerReleased" | "pointerCancelled" }
   >,
-  intent: "finish" | "cancel"
+  intent: "finish" | "cancel",
 ): PointerGestureTransition {
   if (!matchesPointer(state, event)) return unchanged(state);
   const releaseCapture: PointerGestureEffect = {
     type: "releasePointerCapture",
     gestureId: state.gestureId,
-    pointerId: state.pointerId
+    pointerId: state.pointerId,
   };
   if (state.type === "pressing") {
     const effects: PointerGestureEffect[] = [
       {
         type: "cancelHold",
         gestureId: state.gestureId,
-        pointerId: state.pointerId
+        pointerId: state.pointerId,
       },
-      releaseCapture
+      releaseCapture,
     ];
     if (intent === "finish" && state.semanticHit) {
       effects.push({
         type: "notifyPoke",
         gestureId: state.gestureId,
-        poke: state.semanticHit.poke
+        poke: state.semanticHit.poke,
       });
     }
     return { state: idlePointerGesture(), effects };
@@ -532,27 +523,24 @@ function releasePointer(
   if (state.type === "startingDrag") {
     return {
       state: { ...state, releaseIntent: intent },
-      effects: [releaseCapture]
+      effects: [releaseCapture],
     };
   }
   if (state.type === "dragging") {
     const common = {
       gestureId: state.gestureId,
       actorId: state.actorId,
-      sessionId: state.sessionId
+      sessionId: state.sessionId,
     };
     if (intent === "finish") {
       return {
         state: { type: "endingDrag", ...common },
-        effects: [
-          releaseCapture,
-          { type: "finishWindowDrag", ...common }
-        ]
+        effects: [releaseCapture, { type: "finishWindowDrag", ...common }],
       };
     }
     return {
       state: { type: "cancellingDrag", ...common },
-      effects: [releaseCapture, { type: "cancelWindowDrag", ...common }]
+      effects: [releaseCapture, { type: "cancelWindowDrag", ...common }],
     };
   }
   return unchanged(state);
@@ -560,7 +548,7 @@ function releasePointer(
 
 function matchesPointer(
   state: PointerGestureState,
-  event: { pointerId: number }
+  event: { pointerId: number },
 ): state is Extract<
   PointerGestureState,
   { type: "pressing" | "startingDrag" | "dragging" }
@@ -570,19 +558,17 @@ function matchesPointer(
 
 function matchesActiveGesture(
   state: PointerGestureState,
-  event: ActivePointerGesture
+  event: ActivePointerGesture,
 ): state is Extract<
   PointerGestureState,
   { type: "pressing" | "startingDrag" | "dragging" }
 > {
-  return (
-    matchesPointer(state, event) && state.gestureId === event.gestureId
-  );
+  return matchesPointer(state, event) && state.gestureId === event.gestureId;
 }
 
 function matchesDragStart(
   state: Extract<PointerGestureState, { type: "startingDrag" }>,
-  event: { gestureId: number; pointerId: number; actorId: string }
+  event: { gestureId: number; pointerId: number; actorId: string },
 ): boolean {
   return (
     state.gestureId === event.gestureId &&
@@ -596,7 +582,7 @@ function matchesDragSession(
     PointerGestureState,
     { type: "dragging" | "endingDrag" | "cancellingDrag" }
   >,
-  event: { gestureId: number; actorId: string; sessionId: string }
+  event: { gestureId: number; actorId: string; sessionId: string },
 ): boolean {
   return (
     state.gestureId === event.gestureId &&

@@ -7,4 +7,16 @@ import type { ExtensionPermissions } from "./ExtensionPermissions";
 import type { ExtensionRuntimeKind } from "./ExtensionRuntimeKind";
 import type { ExtensionSignalAlias } from "./ExtensionSignalAlias";
 
-export type ExtensionSummary = { extensionId: string, displayName: string, runtime: ExtensionRuntimeKind, permissions: ExtensionPermissions, hooks: Array<ExtensionHookSubscription>, eventSubscriptions: Array<ExtensionEventSubscription>, emittedEvents: Array<string>, capabilities: Array<ExtensionCapabilityDeclaration>, signalAliases: Array<ExtensionSignalAlias>, location: ExecutionLocation, enabled: boolean, };
+export type ExtensionSummary = {
+  extensionId: string;
+  displayName: string;
+  runtime: ExtensionRuntimeKind;
+  permissions: ExtensionPermissions;
+  hooks: Array<ExtensionHookSubscription>;
+  eventSubscriptions: Array<ExtensionEventSubscription>;
+  emittedEvents: Array<string>;
+  capabilities: Array<ExtensionCapabilityDeclaration>;
+  signalAliases: Array<ExtensionSignalAlias>;
+  location: ExecutionLocation;
+  enabled: boolean;
+};

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computeStageBubblePlacement,
   rectsOverlap,
-  type StageRect
+  type StageRect,
 } from "./stageBubbleLayout";
 
 describe("stageBubbleLayout", () => {
@@ -10,7 +10,7 @@ describe("stageBubbleLayout", () => {
     const placement = computeStageBubblePlacement(
       { x: 790, y: 8, visible: true },
       { width: 800, height: 260 },
-      { width: 260, height: 92 }
+      { width: 260, height: 92 },
     );
 
     expect(placement.left).toBeGreaterThanOrEqual(16);
@@ -24,13 +24,13 @@ describe("stageBubbleLayout", () => {
       x: 80,
       y: 40,
       width: 420,
-      height: 560
+      height: 560,
     };
     const placement = computeStageBubblePlacement(
       { x: 260, y: 160, visible: true },
       { width: 980, height: 680 },
       { width: 240, height: 80 },
-      [actorObstacle]
+      [actorObstacle],
     );
 
     expect(rectsOverlap(placement.rect, actorObstacle)).toBe(false);
@@ -40,13 +40,13 @@ describe("stageBubbleLayout", () => {
     const first = computeStageBubblePlacement(
       { x: 180, y: 120, visible: true },
       { width: 800, height: 420 },
-      { width: 240, height: 80 }
+      { width: 240, height: 80 },
     );
     const second = computeStageBubblePlacement(
       { x: 180, y: 120, visible: true },
       { width: 800, height: 420 },
       { width: 240, height: 80 },
-      [first.rect]
+      [first.rect],
     );
 
     expect(rectsOverlap(first.rect, second.rect)).toBe(false);
@@ -62,9 +62,9 @@ describe("stageBubbleLayout", () => {
           x: 240,
           y: 200,
           width: 420,
-          height: 420
-        }
-      ]
+          height: 420,
+        },
+      ],
     );
 
     expect(placement.side).toBe("above");

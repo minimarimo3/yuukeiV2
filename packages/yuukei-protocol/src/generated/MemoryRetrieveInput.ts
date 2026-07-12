@@ -2,4 +2,9 @@
 import type { MemoryRetrieveLimits } from "./MemoryRetrieveLimits";
 import type { MemoryRetrieveQuery } from "./MemoryRetrieveQuery";
 
-export type MemoryRetrieveInput = { residentId: string, worldPackId: string, query: MemoryRetrieveQuery, limits: MemoryRetrieveLimits, };
+export type MemoryRetrieveInput = {
+  residentId: string;
+  worldPackId: string;
+  query: MemoryRetrieveQuery;
+  limits: MemoryRetrieveLimits;
+};

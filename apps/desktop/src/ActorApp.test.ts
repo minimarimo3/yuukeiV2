@@ -11,7 +11,7 @@ import {
   normalizeMotionId,
   openConversationFromContextMenu,
   shouldBeginActorPointerGesture,
-  shouldStartAvatarGrab
+  shouldStartAvatarGrab,
 } from "./ActorApp";
 import {
   autoHitZoneDefinitions,
@@ -24,7 +24,7 @@ import {
   hitZoneForLineageOrHumanoidBone,
   humanoidBoneNameForObject,
   mergeHitZoneDefinitions,
-  type ResolvedActorHitZone
+  type ResolvedActorHitZone,
 } from "./actorHitZones";
 import type { ActorSurfaceAsset, YuukeiClient } from "./yuukeiClient";
 
@@ -33,20 +33,22 @@ describe("ActorApp renderer helpers", () => {
     const preventDefault = vi.fn();
     const open = vi.fn(async () => undefined);
 
-    await openConversationFromContextMenu(
-      { preventDefault },
-      "yuukei",
-      open
-    );
+    await openConversationFromContextMenu({ preventDefault }, "yuukei", open);
 
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(open).toHaveBeenCalledWith("yuukei");
   });
 
   it("does not begin a poke or drag for a macOS Control-click", () => {
-    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: true })).toBe(false);
-    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: false })).toBe(true);
-    expect(shouldBeginActorPointerGesture({ button: 2, ctrlKey: false })).toBe(false);
+    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: true })).toBe(
+      false,
+    );
+    expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(shouldBeginActorPointerGesture({ button: 2, ctrlKey: false })).toBe(
+      false,
+    );
   });
 
   it("normalizes authored motion aliases to renderer motion ids", () => {
@@ -71,7 +73,7 @@ describe("ActorApp renderer helpers", () => {
   it("reads the actorId query parameter as the actor window contract", () => {
     expect(actorIdFromLocation("?actorId=yuukei")).toBe("yuukei");
     expect(actorIdFromLocation("?actorId=actor%2Fwith%2Fslash")).toBe(
-      "actor/with/slash"
+      "actor/with/slash",
     );
     expect(actorIdFromLocation("?view=settings")).toBeNull();
   });
@@ -81,9 +83,9 @@ describe("ActorApp renderer helpers", () => {
       [
         actorAsset("yuukei", true),
         actorAsset("headless", false),
-        actorAsset("another", true)
+        actorAsset("another", true),
       ],
-      "another"
+      "another",
     );
 
     expect(selected.map((asset) => asset.actorId)).toEqual(["another"]);
@@ -98,8 +100,8 @@ describe("ActorApp renderer helpers", () => {
       }),
       getActorSurfaceAssets: vi.fn(async () => ({
         worldPackId: "default-yuukei",
-        actors: [actorAsset("yuukei", true), actorAsset("headless", false)]
-      }))
+        actors: [actorAsset("yuukei", true), actorAsset("headless", false)],
+      })),
     } as unknown as YuukeiClient;
 
     const initial = await loadInitialActorSurfaceState(client);
@@ -109,7 +111,7 @@ describe("ActorApp renderer helpers", () => {
     expect(initial.snapshot).toBe(initialSnapshot);
     expect(initial.assets.map((asset) => asset.actorId)).toEqual([
       "yuukei",
-      "headless"
+      "headless",
     ]);
   });
 
@@ -121,19 +123,19 @@ describe("ActorApp renderer helpers", () => {
       getSnapshot: vi.fn(),
       getActorSurfaceAssets: vi.fn(async () => ({
         worldPackId: "default-yuukei",
-        actors: []
-      }))
+        actors: [],
+      })),
     } as unknown as YuukeiClient;
 
     await expect(loadInitialActorSurfaceState(client)).rejects.toThrow(
-      "attach failed"
+      "attach failed",
     );
     expect(client.getSnapshot).not.toHaveBeenCalled();
   });
 
   it("builds baseline humanoid hit zones from available VRM bones", () => {
     const zones = autoHitZoneDefinitions(
-      new Set(["head", "rightHand", "hips", "spine", "chest"])
+      new Set(["head", "rightHand", "hips", "spine", "chest"]),
     );
 
     expect(zones.map((zone) => zone.id)).toEqual([
@@ -141,7 +143,7 @@ describe("ActorApp renderer helpers", () => {
       "chest",
       "belly",
       "hips",
-      "rightHand"
+      "rightHand",
     ]);
     expect(zones.find((zone) => zone.id === "chest")?.label).toBe("胸");
     expect(zones.find((zone) => zone.id === "belly")?.bones).toEqual(["spine"]);
@@ -155,33 +157,35 @@ describe("ActorApp renderer helpers", () => {
         label: "おでこ",
         source: "humanoidBone",
         bones: ["head"],
-        events: ["avatar.gesture.poke"]
+        events: ["avatar.gesture.poke"],
       },
       {
         id: "tail",
         label: "しっぽ",
         source: "nodeName",
         nodes: ["Tail", "Tail_001"],
-        shape: "mesh"
-      }
+        shape: "mesh",
+      },
     ]);
 
     expect(zones.find((zone) => zone.id === "head")).toMatchObject({
       label: "おでこ",
-      events: ["avatar.gesture.poke"]
+      events: ["avatar.gesture.poke"],
     });
     expect(zones.find((zone) => zone.id === "tail")).toMatchObject({
       label: "しっぽ",
       source: "nodeName",
       nodes: ["Tail", "Tail_001"],
-      events: ["avatar.gesture.poke"]
+      events: ["avatar.gesture.poke"],
     });
   });
 
   it("maps humanoid bones to fine grained zones without head priority bleed", () => {
     const zones = mergeHitZoneDefinitions(
-      autoHitZoneDefinitions(new Set(["head", "chest", "spine", "leftUpperLeg"])),
-      []
+      autoHitZoneDefinitions(
+        new Set(["head", "chest", "spine", "leftUpperLeg"]),
+      ),
+      [],
     );
 
     expect(hitZoneForHumanoidBone(zones, "head")?.id).toBe("head");
@@ -198,13 +202,14 @@ describe("ActorApp renderer helpers", () => {
           id: "ribbon",
           label: "リボン",
           source: "nodeName",
-          nodes: ["Ribbon"]
-        }
-      ]
+          nodes: ["Ribbon"],
+        },
+      ],
     );
 
     expect(
-      hitZoneForLineageOrHumanoidBone(zones, ["Ribbon", "HairMesh"], "head")?.id
+      hitZoneForLineageOrHumanoidBone(zones, ["Ribbon", "HairMesh"], "head")
+        ?.id,
     ).toBe("ribbon");
   });
 
@@ -229,7 +234,7 @@ describe("ActorApp renderer helpers", () => {
     chestBone.name = "Chest";
     const mesh = new THREE.SkinnedMesh(
       indexedSkinGeometry(),
-      new THREE.MeshBasicMaterial({ name: "N00_000_00_Body_00_SKIN" })
+      new THREE.MeshBasicMaterial({ name: "N00_000_00_Body_00_SKIN" }),
     );
     mesh.add(headBone);
     mesh.add(chestBone);
@@ -238,11 +243,11 @@ describe("ActorApp renderer helpers", () => {
       object: mesh,
       faceIndex: 0,
       distance: 1,
-      point: new THREE.Vector3()
+      point: new THREE.Vector3(),
     } as THREE.Intersection;
     const zones = mergeHitZoneDefinitions(
       autoHitZoneDefinitions(new Set(["head", "chest"])),
-      []
+      [],
     );
     const dominantBone = dominantSkinBoneForIntersection(intersection);
     const humanoidBone = dominantBone
@@ -260,7 +265,10 @@ describe("ActorApp renderer helpers", () => {
     const hair = new THREE.Bone();
     head.add(hair);
     const boneName = humanoidBoneNameForObject(hair, new Map([[head, "head"]]));
-    const zones = mergeHitZoneDefinitions(autoHitZoneDefinitions(new Set(["head"])), []);
+    const zones = mergeHitZoneDefinitions(
+      autoHitZoneDefinitions(new Set(["head"])),
+      [],
+    );
 
     expect(boneName).toBe("head");
     expect(hitZoneForHumanoidBone(zones, boneName ?? "")?.id).toBe("head");
@@ -273,12 +281,12 @@ describe("ActorApp renderer helpers", () => {
       {
         button: 0,
         screenX: 123,
-        screenY: 456
+        screenY: 456,
       },
       {
         hitBone: "head",
-        hitSurface: "face"
-      }
+        hitSurface: "face",
+      },
     );
 
     expect(payload).toEqual({
@@ -289,12 +297,12 @@ describe("ActorApp renderer helpers", () => {
       hitSurface: "face",
       input: {
         kind: "pointer",
-        button: "primary"
+        button: "primary",
       },
       screen: {
         x: 123,
-        y: 456
-      }
+        y: 456,
+      },
     });
   });
 
@@ -310,8 +318,8 @@ describe("ActorApp renderer helpers", () => {
       commandFixture("dialogue.say", {
         targetActorId: "yuukei",
         speakerId: "another",
-        payload: { text: "今ここで話します" }
-      })
+        payload: { text: "今ここで話します" },
+      }),
     );
 
     expect(next?.actors.yuukei?.bubble).toBe("今ここで話します");
@@ -324,8 +332,8 @@ describe("ActorApp renderer helpers", () => {
       snapshotFixture(),
       commandFixture("dialogue.say", {
         speakerId: "another",
-        payload: { text: "こちらからです" }
-      })
+        payload: { text: "こちらからです" },
+      }),
     );
 
     expect(next?.actors.another?.bubble).toBe("こちらからです");
@@ -337,8 +345,8 @@ describe("ActorApp renderer helpers", () => {
       snapshotFixture(),
       commandFixture("stage.walk", {
         targetActorId: "yuukei",
-        payload: { destination: "left-edge", motion: "歩く" }
-      })
+        payload: { destination: "left-edge", motion: "歩く" },
+      }),
     );
 
     expect(next?.actors.yuukei?.motion).toBe("歩く");
@@ -348,7 +356,7 @@ describe("ActorApp renderer helpers", () => {
 
 function hitZone(
   id: string,
-  events = ["avatar.gesture.poke"]
+  events = ["avatar.gesture.poke"],
 ): ResolvedActorHitZone {
   return {
     id,
@@ -357,7 +365,7 @@ function hitZone(
     bones: [id],
     nodes: [],
     shape: "auto",
-    events
+    events,
   };
 }
 
@@ -365,30 +373,22 @@ function indexedSkinGeometry(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute(
     "position",
-    new THREE.Float32BufferAttribute(
-      [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0],
-      3
-    )
+    new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0], 3),
   );
   geometry.setIndex([0, 1, 2]);
   geometry.setAttribute(
     "skinIndex",
     new THREE.Uint16BufferAttribute(
       [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-      4
-    )
+      4,
+    ),
   );
   geometry.setAttribute(
     "skinWeight",
     new THREE.Float32BufferAttribute(
-      [
-        0.1, 0.8, 0.1, 0,
-        0.2, 0.7, 0.1, 0,
-        0.1, 0.9, 0, 0,
-        0.5, 0.5, 0, 0
-      ],
-      4
-    )
+      [0.1, 0.8, 0.1, 0, 0.2, 0.7, 0.1, 0, 0.1, 0.9, 0, 0, 0.5, 0.5, 0, 0],
+      4,
+    ),
   );
   return geometry;
 }
@@ -397,21 +397,18 @@ function nonIndexedSkinGeometry(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute(
     "position",
-    new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3)
+    new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3),
   );
   geometry.setAttribute(
     "skinIndex",
-    new THREE.Uint16BufferAttribute(
-      [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-      4
-    )
+    new THREE.Uint16BufferAttribute([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3], 4),
   );
   geometry.setAttribute(
     "skinWeight",
     new THREE.Float32BufferAttribute(
       [0.1, 0.1, 0.8, 0, 0, 0.2, 0.8, 0, 0, 0.1, 0.9, 0],
-      4
-    )
+      4,
+    ),
   );
   return geometry;
 }
@@ -425,9 +422,9 @@ function actorAsset(actorId: string, renderable: boolean): ActorSurfaceAsset {
           kind: "vrm",
           modelUrl: `yuukei-pack://localhost/actors/${actorId}/model`,
           motions: {},
-          hitZones: []
+          hitZones: [],
         }
-      : undefined
+      : undefined,
   };
 }
 
@@ -442,20 +439,20 @@ function snapshotFixture(): ResidentSnapshot {
         expression: "neutral",
         motion: "idle",
         heading: "",
-        location: "desktop"
+        location: "desktop",
       },
       another: {
         displayName: "Another",
         expression: "neutral",
         motion: "idle",
         heading: "",
-        location: "desktop"
-      }
+        location: "desktop",
+      },
     },
     surfaces: {},
     capabilities: {},
     extensions: {},
-    recentEventCursor: "cursor-1"
+    recentEventCursor: "cursor-1",
   };
 }
 
@@ -465,7 +462,7 @@ function commandFixture(
     targetActorId?: string;
     speakerId?: string;
     payload?: Record<string, unknown>;
-  } = {}
+  } = {},
 ): RuntimeCommand {
   return {
     id: "cmd-test",
@@ -475,13 +472,13 @@ function commandFixture(
     residentId: "resident-default",
     payload: {
       ...(options.speakerId ? { speakerId: options.speakerId } : {}),
-      ...(options.payload ?? {})
+      ...(options.payload ?? {}),
     },
     target: options.targetActorId
       ? {
           actorId: options.targetActorId,
-          surfaceId: "surface-actor"
+          surfaceId: "surface-actor",
         }
-      : undefined
+      : undefined,
   };
 }

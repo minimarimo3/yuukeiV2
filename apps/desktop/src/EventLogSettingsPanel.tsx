@@ -1,7 +1,7 @@
 import { eventLogSummary, formatEventLogTimestamp } from "./appShared";
 import type {
   EventLogPage,
-  EventLogPrivacyCategoryFilter
+  EventLogPrivacyCategoryFilter,
 } from "./yuukeiClient";
 
 export type EventLogSettingsPanelProps = {
@@ -41,7 +41,7 @@ export function EventLogSettingsPanel({
   onRefresh,
   onDeleteBefore,
   onDeletePrefix,
-  onDeleteAll
+  onDeleteAll,
 }: EventLogSettingsPanelProps) {
   const records = page?.records ?? [];
   return (
@@ -55,7 +55,11 @@ export function EventLogSettingsPanel({
                 保存されているイベントの種類と内容を確認できます。
               </p>
             </div>
-            <span>{page ? `${page.total}件中 ${records.length}件を表示` : "読み込み中"}</span>
+            <span>
+              {page
+                ? `${page.total}件中 ${records.length}件を表示`
+                : "読み込み中"}
+            </span>
           </div>
           {error ? <p className="settings-error">{error}</p> : null}
           <div className="event-log-filters">
@@ -65,7 +69,9 @@ export function EventLogSettingsPanel({
                 type="text"
                 value={kindPrefix}
                 placeholder="desktop."
-                onChange={(event) => onKindPrefixChange(event.currentTarget.value)}
+                onChange={(event) =>
+                  onKindPrefixChange(event.currentTarget.value)
+                }
               />
             </label>
             <label>
@@ -74,7 +80,7 @@ export function EventLogSettingsPanel({
                 value={privacyFilter}
                 onChange={(event) =>
                   onPrivacyFilterChange(
-                    event.currentTarget.value as EventLogPrivacyCategoryFilter
+                    event.currentTarget.value as EventLogPrivacyCategoryFilter,
                   )
                 }
               >
@@ -98,9 +104,18 @@ export function EventLogSettingsPanel({
                 <div className="memory-text">
                   <p>{eventLogSummary(record)}</p>
                   <dl className="event-log-meta">
-                    <div><dt>種類</dt><dd>{record.kind}</dd></div>
-                    <div><dt>日時</dt><dd>{formatEventLogTimestamp(record.timestamp)}</dd></div>
-                    <div><dt>プライバシー</dt><dd>{record.privacy?.category ?? "なし"}</dd></div>
+                    <div>
+                      <dt>種類</dt>
+                      <dd>{record.kind}</dd>
+                    </div>
+                    <div>
+                      <dt>日時</dt>
+                      <dd>{formatEventLogTimestamp(record.timestamp)}</dd>
+                    </div>
+                    <div>
+                      <dt>プライバシー</dt>
+                      <dd>{record.privacy?.category ?? "なし"}</dd>
+                    </div>
                   </dl>
                 </div>
               </article>
@@ -129,7 +144,9 @@ export function EventLogSettingsPanel({
             <input
               type="datetime-local"
               value={deleteBefore}
-              onChange={(event) => onDeleteBeforeChange(event.currentTarget.value)}
+              onChange={(event) =>
+                onDeleteBeforeChange(event.currentTarget.value)
+              }
             />
             <button type="button" disabled={loading} onClick={onDeleteBefore}>
               期間指定で削除
@@ -141,7 +158,9 @@ export function EventLogSettingsPanel({
               type="text"
               value={deletePrefix}
               placeholder="desktop."
-              onChange={(event) => onDeletePrefixChange(event.currentTarget.value)}
+              onChange={(event) =>
+                onDeletePrefixChange(event.currentTarget.value)
+              }
             />
             <button type="button" disabled={loading} onClick={onDeletePrefix}>
               種類指定で削除

@@ -2,4 +2,8 @@
 import type { MemoryEpisodeEntry } from "./MemoryEpisodeEntry";
 import type { MemoryFactEntry } from "./MemoryFactEntry";
 
-export type MemoryListOutput = { facts: Array<MemoryFactEntry>, episodes: Array<MemoryEpisodeEntry>, episodeTotal: number, };
+export type MemoryListOutput = {
+  facts: Array<MemoryFactEntry>;
+  episodes: Array<MemoryEpisodeEntry>;
+  episodeTotal: number;
+};

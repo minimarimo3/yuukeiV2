@@ -12,7 +12,7 @@ import type {
   ExtensionSettingsSchema,
   ExtensionSignalAlias,
   ResidentSnapshot,
-  RuntimeCommand
+  RuntimeCommand,
 } from "@yuukei/protocol";
 
 export type WorldPackSource = "bundledDefault" | "externalDirectory";
@@ -376,7 +376,10 @@ export type DesktopConversationComposer = {
 };
 
 export type ActorWindowDragStarted = { sessionId: string };
-export type ActorWindowDragFinished = { actorId: string; movedDistance: number };
+export type ActorWindowDragFinished = {
+  actorId: string;
+  movedDistance: number;
+};
 
 export type YuukeiClient = {
   attachSurface(): Promise<ResidentSnapshot>;
@@ -393,27 +396,27 @@ export type YuukeiClient = {
   completeOnboarding(): Promise<OnboardingState>;
   dismissOnboarding(): Promise<OnboardingState>;
   setObservationSettings(
-    settings: ObservationSettingsUpdate
+    settings: ObservationSettingsUpdate,
   ): Promise<ObservationSettingsState>;
   getCapabilityUsage(): Promise<CapabilityUsageState>;
   listResidentMemories(
     episodeLimit?: number,
-    episodeOffset?: number
+    episodeOffset?: number,
   ): Promise<ResidentMemoryState>;
   updateResidentMemory(
     kind: MemoryEntryKind,
     id: string,
-    text: string
+    text: string,
   ): Promise<MemoryUpdateResult>;
   forgetResidentMemories(
     entries?: MemoryForgetEntry[],
-    all?: boolean
+    all?: boolean,
   ): Promise<MemoryForgetResult>;
   readEventLogPage(
     kindPrefix?: string,
     privacyCategory?: EventLogPrivacyCategoryFilter,
     beforeSequence?: number,
-    limit?: number
+    limit?: number,
   ): Promise<EventLogPage>;
   countEventLogDeleteBefore(timestamp: string): Promise<number>;
   countEventLogDeleteByKindPrefix(prefix: string): Promise<number>;
@@ -434,17 +437,28 @@ export type YuukeiClient = {
   sendConversationChoice(
     choiceId: string,
     choice: string,
-    index: number
+    index: number,
   ): Promise<RuntimeCommand[]>;
   sendAvatarGesturePoke(
-    gesture: AvatarGesturePokeInput
+    gesture: AvatarGesturePokeInput,
   ): Promise<RuntimeCommand[]>;
   beginActorWindowDrag(actorId: string): Promise<ActorWindowDragStarted>;
-  moveActorWindowDrag(actorId: string, sessionId: string, dx: number, dy: number): Promise<void>;
-  finishActorWindowDrag(actorId: string, sessionId: string): Promise<ActorWindowDragFinished>;
+  moveActorWindowDrag(
+    actorId: string,
+    sessionId: string,
+    dx: number,
+    dy: number,
+  ): Promise<void>;
+  finishActorWindowDrag(
+    actorId: string,
+    sessionId: string,
+  ): Promise<ActorWindowDragFinished>;
   cancelActorWindowDrag(actorId: string, sessionId: string): Promise<void>;
   notifyAvatarGestureGrab(actorId: string): Promise<RuntimeCommand[]>;
-  notifyAvatarGestureDrop(actorId: string, movedDistance: number): Promise<RuntimeCommand[]>;
+  notifyAvatarGestureDrop(
+    actorId: string,
+    movedDistance: number,
+  ): Promise<RuntimeCommand[]>;
   openWorldPackDirectory(): Promise<string | null>;
   openWorldPackZip(): Promise<string | null>;
   openExtensionDirectory(): Promise<string | null>;
@@ -453,47 +467,55 @@ export type YuukeiClient = {
   importWorldPackZip(path: string): Promise<WorldPackSwitchResult>;
   resetWorldPackToDefault(): Promise<WorldPackSwitchResult>;
   installExtensionDirectory(
-    path: string
+    path: string,
   ): Promise<ExtensionSettingsChangeResult>;
-  uninstallExtension(extensionId: string): Promise<ExtensionSettingsChangeResult>;
+  uninstallExtension(
+    extensionId: string,
+  ): Promise<ExtensionSettingsChangeResult>;
   setExtensionEnabled(
     extensionId: string,
-    enabled: boolean
+    enabled: boolean,
   ): Promise<ExtensionSettingsChangeResult>;
   setExtensionHookOrder(
     hookPoint: ExtensionHookPoint,
-    extensionIds: string[]
+    extensionIds: string[],
   ): Promise<ExtensionSettingsChangeResult>;
   setExtensionSettingValues(
     extensionId: string,
-    values: Record<string, unknown>
+    values: Record<string, unknown>,
   ): Promise<ExtensionSettingsChangeResult>;
   setExtensionSecret(
     extensionId: string,
     key: string,
-    value: string | null
+    value: string | null,
   ): Promise<ExtensionSettingsChangeResult>;
   restartExtensionProcess(extensionId: string): Promise<ExtensionSettingsState>;
   setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
   setAppActorScalePercent(percent: number): Promise<AppSettingsState>;
   setAppConversationSendShortcut(
-    shortcut: ConversationSendShortcut
+    shortcut: ConversationSendShortcut,
   ): Promise<AppSettingsState>;
   setRuntimeSettings(
-    settings: RuntimeSettingsUpdate
+    settings: RuntimeSettingsUpdate,
   ): Promise<RuntimeSettingsState>;
   resetSceneHistory(): Promise<SceneHistoryState>;
   onCommand(callback: (command: RuntimeCommand) => void): Promise<() => void>;
-  onSnapshot(callback: (snapshot: ResidentSnapshot) => void): Promise<() => void>;
+  onSnapshot(
+    callback: (snapshot: ResidentSnapshot) => void,
+  ): Promise<() => void>;
   onWorldPackStatus(
-    callback: (status: WorldPackSelectionState) => void
+    callback: (status: WorldPackSelectionState) => void,
   ): Promise<() => void>;
   onOnboardingDismissed(callback: () => void): Promise<() => void>;
   onAssetsChanged(
-    callback: (catalog: ActorSurfaceAssetCatalog) => void
+    callback: (catalog: ActorSurfaceAssetCatalog) => void,
   ): Promise<() => void>;
-  onStageState(callback: (state: DesktopStageState) => void): Promise<() => void>;
-  onAppSettings(callback: (settings: AppSettingsState) => void): Promise<() => void>;
+  onStageState(
+    callback: (state: DesktopStageState) => void,
+  ): Promise<() => void>;
+  onAppSettings(
+    callback: (settings: AppSettingsState) => void,
+  ): Promise<() => void>;
 };
 
 export const tauriYuukeiClient: YuukeiClient = {
@@ -504,7 +526,8 @@ export const tauriYuukeiClient: YuukeiClient = {
   getExtensionSettings: () =>
     invoke<ExtensionSettingsState>("get_extension_settings"),
   getAppSettings: () => invoke<AppSettingsState>("get_app_settings"),
-  getRuntimeSettings: () => invoke<RuntimeSettingsState>("get_runtime_settings"),
+  getRuntimeSettings: () =>
+    invoke<RuntimeSettingsState>("get_runtime_settings"),
   getSceneHistory: () => invoke<SceneHistoryState>("get_scene_history"),
   getAutostartEnabled: () => invoke<boolean>("get_autostart_enabled"),
   setAutostartEnabled: (enabled: boolean) =>
@@ -516,11 +539,12 @@ export const tauriYuukeiClient: YuukeiClient = {
   dismissOnboarding: () => invoke<OnboardingState>("dismiss_onboarding"),
   setObservationSettings: (settings: ObservationSettingsUpdate) =>
     invoke<ObservationSettingsState>("set_observation_settings", { settings }),
-  getCapabilityUsage: () => invoke<CapabilityUsageState>("get_capability_usage"),
+  getCapabilityUsage: () =>
+    invoke<CapabilityUsageState>("get_capability_usage"),
   listResidentMemories: (episodeLimit?: number, episodeOffset?: number) =>
     invoke<ResidentMemoryState>("list_resident_memories", {
       episodeLimit,
-      episodeOffset
+      episodeOffset,
     }),
   updateResidentMemory: (kind: MemoryEntryKind, id: string, text: string) =>
     invoke<MemoryUpdateResult>("update_resident_memory", { kind, id, text }),
@@ -530,13 +554,13 @@ export const tauriYuukeiClient: YuukeiClient = {
     kindPrefix?: string,
     privacyCategory: EventLogPrivacyCategoryFilter = "all",
     beforeSequence?: number,
-    limit?: number
+    limit?: number,
   ) =>
     invoke<EventLogPage>("read_event_log_page", {
       kindPrefix,
       privacyCategory,
       beforeSequence,
-      limit
+      limit,
     }),
   countEventLogDeleteBefore: (timestamp: string) =>
     invoke<number>("count_event_log_delete_before", { timestamp }),
@@ -559,7 +583,7 @@ export const tauriYuukeiClient: YuukeiClient = {
   reportActorStageAnchor: (actorId: string, anchor: StageAnchor) =>
     invoke<void>("report_actor_stage_anchor", {
       actorId,
-      report: { anchor }
+      report: { anchor },
     }),
   dismissStageBubble: (bubbleId: string) =>
     invoke<void>("dismiss_stage_bubble", { bubbleId }),
@@ -573,22 +597,32 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<RuntimeCommand[]>("send_conversation_choice", {
       choiceId,
       choice,
-      index
+      index,
     }),
   sendAvatarGesturePoke: (gesture: AvatarGesturePokeInput) =>
     invoke<RuntimeCommand[]>("send_avatar_gesture_poke", { gesture }),
   beginActorWindowDrag: (actorId: string) =>
     invoke<ActorWindowDragStarted>("begin_actor_window_drag", { actorId }),
-  moveActorWindowDrag: (actorId: string, sessionId: string, dx: number, dy: number) =>
-    invoke<void>("move_actor_window_drag", { actorId, sessionId, dx, dy }),
+  moveActorWindowDrag: (
+    actorId: string,
+    sessionId: string,
+    dx: number,
+    dy: number,
+  ) => invoke<void>("move_actor_window_drag", { actorId, sessionId, dx, dy }),
   finishActorWindowDrag: (actorId: string, sessionId: string) =>
-    invoke<ActorWindowDragFinished>("finish_actor_window_drag", { actorId, sessionId }),
+    invoke<ActorWindowDragFinished>("finish_actor_window_drag", {
+      actorId,
+      sessionId,
+    }),
   cancelActorWindowDrag: (actorId: string, sessionId: string) =>
     invoke<void>("cancel_actor_window_drag", { actorId, sessionId }),
   notifyAvatarGestureGrab: (actorId: string) =>
     invoke<RuntimeCommand[]>("notify_avatar_gesture_grab", { actorId }),
   notifyAvatarGestureDrop: (actorId: string, movedDistance: number) =>
-    invoke<RuntimeCommand[]>("notify_avatar_gesture_drop", { actorId, movedDistance }),
+    invoke<RuntimeCommand[]>("notify_avatar_gesture_drop", {
+      actorId,
+      movedDistance,
+    }),
   openWorldPackDirectory: async () => {
     const selected = await openDialog({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
@@ -597,7 +631,7 @@ export const tauriYuukeiClient: YuukeiClient = {
     const selected = await openDialog({
       directory: false,
       multiple: false,
-      filters: [{ name: "World Pack zip", extensions: ["zip"] }]
+      filters: [{ name: "World Pack zip", extensions: ["zip"] }],
     });
     return typeof selected === "string" ? selected : null;
   },
@@ -615,53 +649,55 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<WorldPackSwitchResult>("reset_world_pack_to_default"),
   installExtensionDirectory: (path: string) =>
     invoke<ExtensionSettingsChangeResult>("install_extension_directory", {
-      path
+      path,
     }),
   uninstallExtension: (extensionId: string) =>
     invoke<ExtensionSettingsChangeResult>("uninstall_extension", {
-      extensionId
+      extensionId,
     }),
   setExtensionEnabled: (extensionId: string, enabled: boolean) =>
     invoke<ExtensionSettingsChangeResult>("set_extension_enabled", {
       extensionId,
-      enabled
+      enabled,
     }),
   setExtensionHookOrder: (
     hookPoint: ExtensionHookPoint,
-    extensionIds: string[]
+    extensionIds: string[],
   ) =>
     invoke<ExtensionSettingsChangeResult>("set_extension_hook_order", {
       hookPoint,
-      extensionIds
+      extensionIds,
     }),
   setExtensionSettingValues: (
     extensionId: string,
-    values: Record<string, unknown>
+    values: Record<string, unknown>,
   ) =>
     invoke<ExtensionSettingsChangeResult>("set_extension_setting_values", {
       extensionId,
-      values
+      values,
     }),
   setExtensionSecret: (
     extensionId: string,
     key: string,
-    value: string | null
+    value: string | null,
   ) =>
     invoke<ExtensionSettingsChangeResult>("set_extension_secret", {
       extensionId,
       key,
-      value
+      value,
     }),
   restartExtensionProcess: (extensionId: string) =>
     invoke<ExtensionSettingsState>("restart_extension_process", {
-      extensionId
+      extensionId,
     }),
   setAppTalkIntervalMinutes: (minutes: number) =>
     invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),
   setAppActorScalePercent: (percent: number) =>
     invoke<AppSettingsState>("set_app_actor_scale_percent", { percent }),
   setAppConversationSendShortcut: (shortcut: ConversationSendShortcut) =>
-    invoke<AppSettingsState>("set_app_conversation_send_shortcut", { shortcut }),
+    invoke<AppSettingsState>("set_app_conversation_send_shortcut", {
+      shortcut,
+    }),
   setRuntimeSettings: (settings: RuntimeSettingsUpdate) =>
     invoke<RuntimeSettingsState>("set_runtime_settings", { settings }),
   resetSceneHistory: () => invoke<SceneHistoryState>("reset_scene_history"),
@@ -672,9 +708,12 @@ export const tauriYuukeiClient: YuukeiClient = {
     return unlisten;
   },
   onSnapshot: async (callback) => {
-    const unlisten = await listen<ResidentSnapshot>("yuukei-snapshot", (event) => {
-      callback(event.payload);
-    });
+    const unlisten = await listen<ResidentSnapshot>(
+      "yuukei-snapshot",
+      (event) => {
+        callback(event.payload);
+      },
+    );
     return unlisten;
   },
   onWorldPackStatus: async (callback) => {
@@ -682,7 +721,7 @@ export const tauriYuukeiClient: YuukeiClient = {
       "yuukei-world-pack-status",
       (event) => {
         callback(event.payload);
-      }
+      },
     );
     return unlisten;
   },
@@ -697,7 +736,7 @@ export const tauriYuukeiClient: YuukeiClient = {
       "yuukei-assets-changed",
       (event) => {
         callback(event.payload);
-      }
+      },
     );
     return unlisten;
   },
@@ -706,14 +745,17 @@ export const tauriYuukeiClient: YuukeiClient = {
       "yuukei-stage-state",
       (event) => {
         callback(event.payload);
-      }
+      },
     );
     return unlisten;
   },
   onAppSettings: async (callback) => {
-    const unlisten = await listen<AppSettingsState>("yuukei-app-settings", (event) => {
-      callback(event.payload);
-    });
+    const unlisten = await listen<AppSettingsState>(
+      "yuukei-app-settings",
+      (event) => {
+        callback(event.payload);
+      },
+    );
     return unlisten;
-  }
+  },
 };

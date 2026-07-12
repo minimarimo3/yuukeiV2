@@ -47,7 +47,7 @@ const DEFAULT_MIN_WIDTH = 180;
 const DEFAULT_MAX_WIDTH = 360;
 const DEFAULT_SIZE: StageBubbleSize = {
   width: 260,
-  height: 72
+  height: 72,
 };
 
 export function computeStageBubblePlacement(
@@ -55,7 +55,7 @@ export function computeStageBubblePlacement(
   viewport: StageBubbleViewport,
   measuredSize: Partial<StageBubbleSize> = DEFAULT_SIZE,
   obstacles: StageRect[] = [],
-  options: StageBubblePlacementOptions = {}
+  options: StageBubblePlacementOptions = {},
 ): StageBubblePlacement {
   const margin = options.margin ?? DEFAULT_MARGIN;
   const gap = options.gap ?? DEFAULT_GAP;
@@ -67,7 +67,7 @@ export function computeStageBubblePlacement(
   const width = clamp(
     measuredSize.width ?? DEFAULT_SIZE.width,
     Math.min(minWidth, interiorWidth),
-    Math.min(maxWidth, interiorWidth)
+    Math.min(maxWidth, interiorWidth),
   );
   const height = Math.max(measuredSize.height ?? DEFAULT_SIZE.height, 40);
   const candidates = [
@@ -76,7 +76,7 @@ export function computeStageBubblePlacement(
       { width, height },
       { width: viewportWidth, height: viewportHeight },
       margin,
-      gap
+      gap,
     ),
     ...obstacleAvoidancePlacements(
       anchor,
@@ -84,19 +84,19 @@ export function computeStageBubblePlacement(
       { width: viewportWidth, height: viewportHeight },
       obstacles,
       margin,
-      gap
-    )
+      gap,
+    ),
   ];
   const ranked = candidates
     .map((candidate) => ({
       candidate,
       overlapArea: obstacles.reduce(
         (total, obstacle) => total + rectOverlapArea(candidate.rect, obstacle),
-        0
+        0,
       ),
       distance:
         Math.abs(candidate.left + width / 2 - anchor.x) +
-        Math.abs(candidate.top + height / 2 - anchor.y)
+        Math.abs(candidate.top + height / 2 - anchor.y),
     }))
     .sort((a, b) => a.overlapArea - b.overlapArea || a.distance - b.distance);
   const selected = ranked[0]?.candidate ?? candidates[0];
@@ -106,7 +106,7 @@ export function computeStageBubblePlacement(
     width,
     maxWidth: width,
     tailTop: clamp(anchor.y - selected.top, 20, Math.max(height - 20, 20)),
-    tailLeft: clamp(anchor.x - selected.left, 20, Math.max(width - 20, 20))
+    tailLeft: clamp(anchor.x - selected.left, 20, Math.max(width - 20, 20)),
   };
 }
 
@@ -122,11 +122,11 @@ export function rectsOverlap(a: StageRect, b: StageRect): boolean {
 export function rectOverlapArea(a: StageRect, b: StageRect): number {
   const width = Math.max(
     Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x),
-    0
+    0,
   );
   const height = Math.max(
     Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y),
-    0
+    0,
   );
   return width * height;
 }
@@ -136,11 +136,14 @@ export function localRect(globalRect: StageRect, origin: StageRect): StageRect {
     x: globalRect.x - origin.x,
     y: globalRect.y - origin.y,
     width: globalRect.width,
-    height: globalRect.height
+    height: globalRect.height,
   };
 }
 
-export function intersectsViewport(rect: StageRect, viewport: StageRect): boolean {
+export function intersectsViewport(
+  rect: StageRect,
+  viewport: StageRect,
+): boolean {
   return rectsOverlap(rect, viewport);
 }
 
@@ -149,7 +152,7 @@ function candidatePlacements(
   size: StageBubbleSize,
   viewport: StageBubbleViewport,
   margin: number,
-  gap: number
+  gap: number,
 ): StageBubblePlacement[] {
   const rawCandidates: Array<{
     side: StageBubbleSide;
@@ -159,27 +162,27 @@ function candidatePlacements(
     {
       side: "right",
       left: anchor.x + gap,
-      top: anchor.y - size.height * 0.52
+      top: anchor.y - size.height * 0.52,
     },
     {
       side: "left",
       left: anchor.x - gap - size.width,
-      top: anchor.y - size.height * 0.52
+      top: anchor.y - size.height * 0.52,
     },
     {
       side: "above",
       left: anchor.x - size.width / 2,
-      top: anchor.y - gap - size.height
+      top: anchor.y - gap - size.height,
     },
     {
       side: "below",
       left: anchor.x - size.width / 2,
-      top: anchor.y + gap
-    }
+      top: anchor.y + gap,
+    },
   ];
 
   return rawCandidates.map((candidate) =>
-    buildPlacement(candidate, anchor, size, viewport, margin)
+    buildPlacement(candidate, anchor, size, viewport, margin),
   );
 }
 
@@ -189,7 +192,7 @@ function obstacleAvoidancePlacements(
   viewport: StageBubbleViewport,
   obstacles: StageRect[],
   margin: number,
-  gap: number
+  gap: number,
 ): StageBubblePlacement[] {
   return obstacles.flatMap((obstacle) => {
     const rawCandidates: Array<{
@@ -200,26 +203,26 @@ function obstacleAvoidancePlacements(
       {
         side: "right",
         left: obstacle.x + obstacle.width + gap,
-        top: anchor.y - size.height * 0.52
+        top: anchor.y - size.height * 0.52,
       },
       {
         side: "left",
         left: obstacle.x - gap - size.width,
-        top: anchor.y - size.height * 0.52
+        top: anchor.y - size.height * 0.52,
       },
       {
         side: "above",
         left: anchor.x - size.width / 2,
-        top: obstacle.y - gap - size.height
+        top: obstacle.y - gap - size.height,
       },
       {
         side: "below",
         left: anchor.x - size.width / 2,
-        top: obstacle.y + obstacle.height + gap
-      }
+        top: obstacle.y + obstacle.height + gap,
+      },
     ];
     return rawCandidates.map((candidate) =>
-      buildPlacement(candidate, anchor, size, viewport, margin)
+      buildPlacement(candidate, anchor, size, viewport, margin),
     );
   });
 }
@@ -233,10 +236,18 @@ function buildPlacement(
   anchor: StageAnchor,
   size: StageBubbleSize,
   viewport: StageBubbleViewport,
-  margin: number
+  margin: number,
 ): StageBubblePlacement {
-  const left = clamp(candidate.left, margin, viewport.width - margin - size.width);
-  const top = clamp(candidate.top, margin, viewport.height - margin - size.height);
+  const left = clamp(
+    candidate.left,
+    margin,
+    viewport.width - margin - size.width,
+  );
+  const top = clamp(
+    candidate.top,
+    margin,
+    viewport.height - margin - size.height,
+  );
   return {
     side: candidate.side,
     left,
@@ -249,8 +260,8 @@ function buildPlacement(
       x: left,
       y: top,
       width: size.width,
-      height: size.height
-    }
+      height: size.height,
+    },
   };
 }
 

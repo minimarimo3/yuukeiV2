@@ -10,7 +10,7 @@ type ConversationComposerProps = {
 export function ConversationComposer({
   shortcut,
   onSubmit,
-  onDismiss
+  onDismiss,
 }: ConversationComposerProps) {
   const [text, setText] = useState("");
   const [pending, setPending] = useState(false);
@@ -57,7 +57,10 @@ export function ConversationComposer({
         void submit();
       }}
     >
-      <label className="conversation-composer__label" htmlFor="conversation-composer-input">
+      <label
+        className="conversation-composer__label"
+        htmlFor="conversation-composer-input"
+      >
         住人に話しかける
       </label>
       <textarea
@@ -81,8 +84,11 @@ export function ConversationComposer({
 }
 
 export function matchesSendShortcut(
-  event: Pick<KeyboardEvent<HTMLTextAreaElement>, "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
-  shortcut: ConversationSendShortcut
+  event: Pick<
+    KeyboardEvent<HTMLTextAreaElement>,
+    "ctrlKey" | "shiftKey" | "altKey" | "metaKey"
+  >,
+  shortcut: ConversationSendShortcut,
 ): boolean {
   if (event.altKey || event.metaKey) return false;
   if (shortcut === "ctrlEnter") return event.ctrlKey && !event.shiftKey;

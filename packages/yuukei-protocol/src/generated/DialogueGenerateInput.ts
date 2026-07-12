@@ -4,4 +4,11 @@ import type { DialogueGenerateEvent } from "./DialogueGenerateEvent";
 import type { DialogueGeneratePersona } from "./DialogueGeneratePersona";
 import type { DialogueGenerateRecentContext } from "./DialogueGenerateRecentContext";
 
-export type DialogueGenerateInput = { event: DialogueGenerateEvent, instruction?: string, memories?: Array<string>, persona: DialogueGeneratePersona, recentContext: Array<DialogueGenerateRecentContext>, constraints: DialogueGenerateConstraints, };
+export type DialogueGenerateInput = {
+  event: DialogueGenerateEvent;
+  instruction?: string;
+  memories?: Array<string>;
+  persona: DialogueGeneratePersona;
+  recentContext: Array<DialogueGenerateRecentContext>;
+  constraints: DialogueGenerateConstraints;
+};

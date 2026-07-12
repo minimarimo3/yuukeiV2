@@ -11,7 +11,7 @@ export function ObservationToggle({
   description,
   checked,
   disabled,
-  onChange
+  onChange,
 }: ObservationToggleProps) {
   return (
     <label className="extension-toggle observation-toggle">

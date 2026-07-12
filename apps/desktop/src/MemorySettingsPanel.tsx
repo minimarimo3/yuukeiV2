@@ -30,7 +30,7 @@ export function MemorySettingsPanel({
   onForgetEntry,
   onForgetAll,
   onLoadMore,
-  onRefresh
+  onRefresh,
 }: MemorySettingsPanelProps) {
   const facts = memoryState?.facts ?? [];
   const episodes = memoryState?.episodes ?? [];
@@ -163,7 +163,11 @@ export function MemorySettingsPanel({
         </section>
       </div>
       <div className="settings-actions memory-panel-actions">
-        <button type="button" onClick={() => void onRefresh()} disabled={loading}>
+        <button
+          type="button"
+          onClick={() => void onRefresh()}
+          disabled={loading}
+        >
           更新
         </button>
         <button

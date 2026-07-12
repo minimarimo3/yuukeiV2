@@ -5,10 +5,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 1420,
-    strictPort: true
+    strictPort: true,
   },
   test: {
     environment: "jsdom",
-    setupFiles: ["./vitest.setup.ts"]
-  }
+    setupFiles: ["./vitest.setup.ts"],
+  },
 });

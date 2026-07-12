@@ -2,4 +2,17 @@
 import type { Causality } from "./Causality";
 import type { Privacy } from "./Privacy";
 
-export type EventLogRecord = { sequence: bigint, id: string, type: string, timestamp: string, residentId: string, source: string, deviceId?: string, surfaceId?: string, actorId?: string, payload: { [key: string]: unknown }, causality?: Causality, privacy?: Privacy, };
+export type EventLogRecord = {
+  sequence: bigint;
+  id: string;
+  type: string;
+  timestamp: string;
+  residentId: string;
+  source: string;
+  deviceId?: string;
+  surfaceId?: string;
+  actorId?: string;
+  payload: { [key: string]: unknown };
+  causality?: Causality;
+  privacy?: Privacy;
+};

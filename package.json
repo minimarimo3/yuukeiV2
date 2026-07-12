@@ -7,20 +7,28 @@
     "build": "pnpm -r build",
     "build:cli": "cargo build -p yuukei-cli-surface",
     "build:tauri": "pnpm --filter @yuukei/desktop tauri build",
+
     "dev": "pnpm dev:cli",
     "dev:cli": "cargo run -p yuukei-cli-surface",
     "dev:tauri": "pnpm --filter @yuukei/desktop tauri dev",
-    "fmt": "cargo fmt --all",
-    "fmt:check": "cargo fmt --all -- --check",
+
+    "fmt": "cargo fmt --all && biome format --write .",
+    "fmt:check": "cargo fmt --all -- --check && biome format .",
+
+    "lint": "pnpm lint:rust && pnpm lint:biome",
     "lint:rust": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "lint:biome": "biome lint --error-on-warnings .",
+
     "check:rust": "cargo check --workspace --all-targets --all-features",
-    "check": "pnpm fmt:check && pnpm lint:rust && pnpm check:rust && pnpm typecheck && pnpm test",
+    "check": "pnpm fmt:check && pnpm lint && pnpm check:rust && pnpm typecheck && pnpm test",
+
     "licenses:generate": "node tools/generate-third-party-licenses.mjs",
     "release": "pnpm build:tauri",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
     "@tauri-apps/cli": "^2.2.0",
     "typescript": "^5.7.2"
   },

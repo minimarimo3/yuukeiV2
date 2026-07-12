@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { DaihonDiagnosticsPanel } from "./DaihonDiagnosticsPanel";
 import {
   ExtensionSettingsForm,
-  ExtensionUsageSection
+  ExtensionUsageSection,
 } from "./ExtensionSettingsPanel";
 import { EventLogSettingsPanel } from "./EventLogSettingsPanel";
 import { MemorySettingsPanel } from "./MemorySettingsPanel";
@@ -15,7 +15,7 @@ import {
   memoryErrorMessage,
   orderExtensionsForHook,
   subscribesToBeforeCommandEmit,
-  voicevoxCreditText
+  voicevoxCreditText,
 } from "./appShared";
 import {
   tauriYuukeiClient,
@@ -35,7 +35,7 @@ import {
   type RuntimeSettingsState,
   type SceneHistoryState,
   type WorldPackSelectionState,
-  type YuukeiClient
+  type YuukeiClient,
 } from "./yuukeiClient";
 
 type AppProps = {
@@ -72,7 +72,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
   const [runtimeSettings, setRuntimeSettings] =
     useState<RuntimeSettingsState | null>(null);
-  const [sceneHistory, setSceneHistory] = useState<SceneHistoryState | null>(null);
+  const [sceneHistory, setSceneHistory] = useState<SceneHistoryState | null>(
+    null,
+  );
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [observationSettings, setObservationSettings] =
     useState<ObservationSettingsState | null>(null);
@@ -86,10 +88,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     useState<CapabilityUsageState | null>(null);
   const [worldPackError, setWorldPackError] = useState<string | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
-  const [observationSettingsError, setObservationSettingsError] =
-    useState<string | null>(null);
+  const [observationSettingsError, setObservationSettingsError] = useState<
+    string | null
+  >(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
-  const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(null);
+  const [memoryState, setMemoryState] = useState<ResidentMemoryState | null>(
+    null,
+  );
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [loadingMemories, setLoadingMemories] = useState(false);
   const [eventLogPage, setEventLogPage] = useState<EventLogPage | null>(null);
@@ -115,11 +120,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
     async function connect() {
       try {
-        unlisteners.push(await client.onAssetsChanged(() => {
-          void refreshSettings();
-          void loadMemories();
-          void loadEventLog();
-        }));
+        unlisteners.push(
+          await client.onAssetsChanged(() => {
+            void refreshSettings();
+            void loadMemories();
+            void loadEventLog();
+          }),
+        );
         unlisteners.push(
           await client.onWorldPackStatus((nextWorldPackStatus) => {
             if (!disposed) {
@@ -127,14 +134,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             }
             void loadMemories();
             void loadEventLog();
-          })
+          }),
         );
         unlisteners.push(
           await client.onOnboardingDismissed(() => {
             if (!disposed) {
               setOnboardingDismissed(true);
             }
-          })
+          }),
         );
         await refreshSettings();
         await loadMemories();
@@ -159,19 +166,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         nextObservationSettings,
         nextOnboardingState,
         nextExtensionState,
-        nextCapabilityUsage
-      ] =
-        await Promise.all([
-          client.getWorldPackStatus(),
-          client.getAppSettings(),
-          client.getRuntimeSettings(),
-          client.getSceneHistory(),
-          client.getAutostartEnabled(),
-          client.getObservationSettings(),
-          client.getOnboardingState(),
-          client.getExtensionSettings(),
-          client.getCapabilityUsage()
-        ]);
+        nextCapabilityUsage,
+      ] = await Promise.all([
+        client.getWorldPackStatus(),
+        client.getAppSettings(),
+        client.getRuntimeSettings(),
+        client.getSceneHistory(),
+        client.getAutostartEnabled(),
+        client.getObservationSettings(),
+        client.getOnboardingState(),
+        client.getExtensionSettings(),
+        client.getCapabilityUsage(),
+      ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
         setAppSettings(nextAppSettings);
@@ -197,13 +203,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const orderedBeforeCommandEmitExtensions = useMemo(() => {
     return orderExtensionsForHook(
       (extensionState?.installed ?? []).filter(subscribesToBeforeCommandEmit),
-      extensionState?.hookOrder.beforeCommandEmit ?? []
+      extensionState?.hookOrder.beforeCommandEmit ?? [],
     );
   }, [extensionState]);
   const orderedExtensions = useMemo(() => {
     return orderExtensionsForHook(
       extensionState?.installed ?? [],
-      extensionState?.hookOrder.beforeCommandEmit ?? []
+      extensionState?.hookOrder.beforeCommandEmit ?? [],
     );
   }, [extensionState]);
 
@@ -217,9 +223,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           ? {
               ...next,
               facts: next.facts,
-              episodes: [...current.episodes, ...next.episodes]
+              episodes: [...current.episodes, ...next.episodes],
             }
-          : next
+          : next,
       );
     } catch (error) {
       setMemoryError(memoryErrorMessage(error));
@@ -238,16 +244,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         eventLogKindPrefix.trim() || undefined,
         eventLogPrivacyFilter,
         beforeSequence,
-        EVENT_LOG_PAGE_SIZE
+        EVENT_LOG_PAGE_SIZE,
       );
       setEventLogError(null);
       setEventLogPage((current) =>
         append && current
           ? {
               ...next,
-              records: [...current.records, ...next.records]
+              records: [...current.records, ...next.records],
             }
-          : next
+          : next,
       );
     } catch (error) {
       setEventLogError(error instanceof Error ? error.message : String(error));
@@ -295,7 +301,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         ? "\n\n同じpackIdのインポート済みPackがあります。続行すると置き換えます。"
         : "";
       const confirmed = window.confirm(
-        `このWorld Packの配布条件\n\n${inspection.displayName} (${inspection.packId})\n${inspection.licenseSource ?? "ライセンス表記なし"}\n\n${licenseText}${replaceNotice}\n\nこのWorld Packを読み込みますか？`
+        `このWorld Packの配布条件\n\n${inspection.displayName} (${inspection.packId})\n${inspection.licenseSource ?? "ライセンス表記なし"}\n\n${licenseText}${replaceNotice}\n\nこのWorld Packを読み込みますか？`,
       );
       if (!confirmed) return;
       const result = await client.importWorldPackZip(path);
@@ -353,7 +359,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     setExtensionError(null);
     setChangingExtensions(true);
     try {
-      applyExtensionResult(await client.setExtensionEnabled(extensionId, enabled));
+      applyExtensionResult(
+        await client.setExtensionEnabled(extensionId, enabled),
+      );
     } catch (error) {
       setExtensionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -388,7 +396,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   async function moveExtension(extensionId: string, direction: -1 | 1) {
     if (!extensionState) return;
     const currentOrder = orderedBeforeCommandEmitExtensions.map(
-      (extension) => extension.extensionId
+      (extension) => extension.extensionId,
     );
     const index = currentOrder.indexOf(extensionId);
     const nextIndex = index + direction;
@@ -396,13 +404,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     const nextOrder = [...currentOrder];
     [nextOrder[index], nextOrder[nextIndex]] = [
       nextOrder[nextIndex],
-      nextOrder[index]
+      nextOrder[index],
     ];
     setExtensionError(null);
     setChangingExtensions(true);
     try {
       applyExtensionResult(
-        await client.setExtensionHookOrder("beforeCommandEmit", nextOrder)
+        await client.setExtensionHookOrder("beforeCommandEmit", nextOrder),
       );
     } catch (error) {
       setExtensionError(error instanceof Error ? error.message : String(error));
@@ -429,7 +437,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setAppSettings(await client.setAppTalkIntervalMinutes(normalized));
     } catch (error) {
-      setAppSettingsError(error instanceof Error ? error.message : String(error));
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -439,18 +449,22 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setAppSettings(await client.setAppActorScalePercent(normalized));
     } catch (error) {
-      setAppSettingsError(error instanceof Error ? error.message : String(error));
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
   async function saveConversationSendShortcut(
-    shortcut: ConversationSendShortcut
+    shortcut: ConversationSendShortcut,
   ) {
     setAppSettingsError(null);
     try {
       setAppSettings(await client.setAppConversationSendShortcut(shortcut));
     } catch (error) {
-      setAppSettingsError(error instanceof Error ? error.message : String(error));
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -459,7 +473,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setAutostartEnabled(await client.setAutostartEnabled(enabled));
     } catch (error) {
-      setAppSettingsError(error instanceof Error ? error.message : String(error));
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -469,7 +485,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       | "recentContextCount"
       | "talkDesireLow"
       | "talkDesireHigh",
-    value: number
+    value: number,
   ) {
     const current =
       runtimeSettings ??
@@ -478,7 +494,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         recentContextCount: 20,
         talkDesireLow: 30,
         talkDesireHigh: 80,
-        settingsPath: ""
+        settingsPath: "",
       } satisfies RuntimeSettingsState);
     const next = {
       llmTimeoutMs:
@@ -496,20 +512,22 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       talkDesireHigh:
         key === "talkDesireHigh"
           ? Math.max(0, Math.trunc(value || 0))
-          : current.talkDesireHigh
+          : current.talkDesireHigh,
     };
     setAppSettingsError(null);
     try {
       setRuntimeSettings(await client.setRuntimeSettings(next));
     } catch (error) {
-      setAppSettingsError(error instanceof Error ? error.message : String(error));
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
   async function resetSceneHistory() {
     if (
       !window.confirm(
-        "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？"
+        "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？",
       )
     ) {
       return;
@@ -524,20 +542,20 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   async function toggleObservationSetting(
     key: keyof ObservationSettingsUpdate,
-    enabled: boolean
+    enabled: boolean,
   ) {
     const current =
       observationSettings ??
       ({
         windows: false,
         folders: false,
-        downloads: false
+        downloads: false,
       } satisfies ObservationSettingsUpdate);
     const next: ObservationSettingsUpdate = {
       windows: current.windows,
       folders: current.folders,
       downloads: current.downloads,
-      [key]: enabled
+      [key]: enabled,
     };
     setObservationSettingsError(null);
     setChangingObservationSettings(true);
@@ -545,7 +563,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setObservationSettings(await client.setObservationSettings(next));
     } catch (error) {
       setObservationSettingsError(
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
       );
     } finally {
       setChangingObservationSettings(false);
@@ -607,7 +625,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   async function forgetAllMemories() {
     const confirmed = window.confirm(
-      "すべての記憶を忘れます。この操作は取り消せません。続けますか？"
+      "すべての記憶を忘れます。この操作は取り消せません。続けますか？",
     );
     if (!confirmed) return;
     setMemoryError(null);
@@ -684,7 +702,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   function confirmEventLogDeletion(label: string, count: number) {
     return window.confirm(
-      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\n住人の記憶(要約)には残っている場合があります。記憶は『記憶』タブから個別に忘れさせられます。\n\n続けますか？`
+      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\n住人の記憶(要約)には残っている場合があります。記憶は『記憶』タブから個別に忘れさせられます。\n\n続けますか？`,
     );
   }
 
@@ -702,7 +720,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <p className="settings-note">
               分単位で設定します。0分で話さなくなります。
             </p>
-            <label className="app-setting-field" htmlFor="talk-interval-minutes">
+            <label
+              className="app-setting-field"
+              htmlFor="talk-interval-minutes"
+            >
               <span>
                 <strong>おしゃべりの間隔</strong>
                 <small>{appSettings?.settingsPath ?? ""}</small>
@@ -722,7 +743,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <label className="app-setting-field" htmlFor="actor-scale-percent">
               <span>
                 <strong>住人の大きさ</strong>
-                <small>デスクトップに表示される住人の大きさを変えられます。</small>
+                <small>
+                  デスクトップに表示される住人の大きさを変えられます。
+                </small>
               </span>
               <span className="range-setting-control">
                 <input
@@ -734,7 +757,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   value={appSettings?.actorScalePercent ?? 100}
                   onChange={(event) => {
                     const value = Number(event.currentTarget.value);
-                    void saveActorScalePercent(Number.isFinite(value) ? value : 100);
+                    void saveActorScalePercent(
+                      Number.isFinite(value) ? value : 100,
+                    );
                   }}
                 />
                 <output htmlFor="actor-scale-percent">
@@ -745,7 +770,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <label className="extension-toggle" htmlFor="autostart-enabled">
               <span>
                 <strong>ログイン時に自動起動</strong>
-                <small>このデバイスにログインしたとき、Yuukeiを起動します。</small>
+                <small>
+                  このデバイスにログインしたとき、Yuukeiを起動します。
+                </small>
               </span>
               <input
                 id="autostart-enabled"
@@ -776,7 +803,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   const value = Number(event.currentTarget.value);
                   void saveRuntimeSettings(
                     "llmTimeoutMs",
-                    Number.isFinite(value) ? value : 30000
+                    Number.isFinite(value) ? value : 30000,
                   );
                 }}
               />
@@ -797,7 +824,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   const value = Number(event.currentTarget.value);
                   void saveRuntimeSettings(
                     "recentContextCount",
-                    Number.isFinite(value) ? value : 20
+                    Number.isFinite(value) ? value : 20,
                   );
                 }}
               />
@@ -822,7 +849,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   const value = Number(event.currentTarget.value);
                   void saveRuntimeSettings(
                     "talkDesireLow",
-                    Number.isFinite(value) ? value : 30
+                    Number.isFinite(value) ? value : 30,
                   );
                 }}
               />
@@ -843,7 +870,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   const value = Number(event.currentTarget.value);
                   void saveRuntimeSettings(
                     "talkDesireHigh",
-                    Number.isFinite(value) ? value : 80
+                    Number.isFinite(value) ? value : 80,
                   );
                 }}
               />
@@ -853,7 +880,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             ) : null}
           </div>
         </>
-      )
+      ),
     },
     {
       id: "keys",
@@ -866,7 +893,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <p className="settings-note">
             日本語入力の変換確定で誤送信しないよう、既定ではCtrl+Enterを使います。
           </p>
-          <label className="app-setting-field" htmlFor="conversation-send-shortcut">
+          <label
+            className="app-setting-field"
+            htmlFor="conversation-send-shortcut"
+          >
             <span>
               <strong>会話を送信</strong>
               <small>入力欄で会話を送るキーを選びます。</small>
@@ -877,7 +907,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               value={appSettings?.conversationSendShortcut ?? "ctrlEnter"}
               onChange={(event) => {
                 void saveConversationSendShortcut(
-                  event.currentTarget.value as ConversationSendShortcut
+                  event.currentTarget.value as ConversationSendShortcut,
                 );
               }}
             >
@@ -890,7 +920,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <p className="settings-error">{appSettingsError}</p>
           ) : null}
         </div>
-      )
+      ),
     },
     {
       id: "worldPack",
@@ -951,7 +981,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
-      )
+      ),
     },
     {
       id: "sceneHistory",
@@ -983,18 +1013,24 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           ) : (
             <p className="settings-note">まだ記録されたシーンはありません。</p>
           )}
-          {worldPackError ? <p className="settings-error">{worldPackError}</p> : null}
+          {worldPackError ? (
+            <p className="settings-error">{worldPackError}</p>
+          ) : null}
           <div className="danger-zone">
             <div>
               <strong>履歴をリセット</strong>
               <p>このWorld Packのシーン実行履歴をすべて削除します。</p>
             </div>
-            <button type="button" className="danger-button" onClick={resetSceneHistory}>
+            <button
+              type="button"
+              className="danger-button"
+              onClick={resetSceneHistory}
+            >
               全リセット
             </button>
           </div>
         </div>
-      )
+      ),
     },
     {
       id: "observations",
@@ -1035,7 +1071,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             }
           />
         </div>
-      )
+      ),
     },
     {
       id: "eventLog",
@@ -1065,7 +1101,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           onDeletePrefix={() => void deleteEventLogByKindPrefix()}
           onDeleteAll={() => void deleteAllEventLog()}
         />
-      )
+      ),
     },
     {
       id: "memories",
@@ -1092,7 +1128,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           onLoadMore={loadMoreEpisodes}
           onRefresh={() => loadMemories()}
         />
-      )
+      ),
     },
     {
       id: "extensions",
@@ -1119,15 +1155,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             ) : null}
             <div className="extension-list">
               {orderedExtensions.map((extension) => {
-                const hookIndex =
-                  orderedBeforeCommandEmitExtensions.findIndex(
-                    (candidate) =>
-                      candidate.extensionId === extension.extensionId
-                  );
+                const hookIndex = orderedBeforeCommandEmitExtensions.findIndex(
+                  (candidate) =>
+                    candidate.extensionId === extension.extensionId,
+                );
                 const canReorderHook = hookIndex >= 0;
                 const permissionRows = extensionPermissionRows(extension);
                 const usage = capabilityUsage?.extensions.find(
-                  (usage) => usage.extensionId === extension.extensionId
+                  (usage) => usage.extensionId === extension.extensionId,
                 );
                 return (
                   <article
@@ -1144,7 +1179,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           onChange={(event) =>
                             toggleExtension(
                               extension.extensionId,
-                              event.currentTarget.checked
+                              event.currentTarget.checked,
                             )
                           }
                         />
@@ -1156,7 +1191,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                               "extension-runtime-status",
                               extension.runtimeStatus?.suspended
                                 ? "is-suspended"
-                                : ""
+                                : "",
                             ]
                               .filter(Boolean)
                               .join(" ")}
@@ -1170,9 +1205,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           type="button"
                           className="secondary-button compact-button"
                           disabled={
-                            changingExtensions || !canReorderHook || hookIndex === 0
+                            changingExtensions ||
+                            !canReorderHook ||
+                            hookIndex === 0
                           }
-                          onClick={() => moveExtension(extension.extensionId, -1)}
+                          onClick={() =>
+                            moveExtension(extension.extensionId, -1)
+                          }
                         >
                           上へ
                         </button>
@@ -1185,7 +1224,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                             hookIndex ===
                               orderedBeforeCommandEmitExtensions.length - 1
                           }
-                          onClick={() => moveExtension(extension.extensionId, 1)}
+                          onClick={() =>
+                            moveExtension(extension.extensionId, 1)
+                          }
                         >
                           下へ
                         </button>
@@ -1203,7 +1244,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           type="button"
                           className="danger-button compact-button"
                           disabled={changingExtensions}
-                          onClick={() => uninstallExtension(extension.extensionId)}
+                          onClick={() =>
+                            uninstallExtension(extension.extensionId)
+                          }
                         >
                           削除
                         </button>
@@ -1221,7 +1264,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                             <div
                               className={[
                                 "extension-permission-row",
-                                row.warning ? "is-warning" : ""
+                                row.warning ? "is-warning" : "",
                               ]
                                 .filter(Boolean)
                                 .join(" ")}
@@ -1271,15 +1314,15 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </button>
           </div>
         </>
-      )
-    }
+      ),
+    },
   ];
   const activeSettingsCategory =
     settingsCategories.find(
-      (category) => category.id === activeSettingsCategoryId
+      (category) => category.id === activeSettingsCategoryId,
     ) ?? settingsCategories[0];
   const intelligenceExtension = orderedExtensions.find(
-    (extension) => extension.extensionId === "yuukei-intelligence"
+    (extension) => extension.extensionId === "yuukei-intelligence",
   );
   const showOnboarding =
     !!onboardingState &&
@@ -1322,7 +1365,11 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <div className="settings-sidebar-head">
             <h2>設定</h2>
           </div>
-          <nav className="settings-menu" aria-label="設定カテゴリ" role="tablist">
+          <nav
+            className="settings-menu"
+            aria-label="設定カテゴリ"
+            role="tablist"
+          >
             {settingsCategories.map((category) => {
               const selected = category.id === activeSettingsCategory.id;
               return (
@@ -1353,10 +1400,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             </div>
           </header>
           <section
-            className={[
-              "settings-panel",
-              activeSettingsCategory.panelClassName
-            ]
+            className={["settings-panel", activeSettingsCategory.panelClassName]
               .filter(Boolean)
               .join(" ")}
             id={activeSettingsCategory.panelId}

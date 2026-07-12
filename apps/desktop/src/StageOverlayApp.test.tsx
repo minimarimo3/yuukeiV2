@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bubbleTypingProgress,
   StageOverlayApp,
-  stageOverlayPassthrough
+  stageOverlayPassthrough,
 } from "./StageOverlayApp";
 import type { DesktopStageState, YuukeiClient } from "./yuukeiClient";
 
@@ -22,7 +22,7 @@ describe("StageOverlayApp", () => {
     const bubble = stageState({
       text: "A😀",
       createdAtMs: 0,
-      durationMs: 1_000
+      durationMs: 1_000,
     }).bubbles[0];
 
     expect(bubbleTypingProgress(bubble, 0)).toBe(0);
@@ -35,7 +35,7 @@ describe("StageOverlayApp", () => {
       text: "abc",
       createdAtMs: 0,
       durationMs: 7_500,
-      speechPending: true
+      speechPending: true,
     }).bubbles[0];
 
     expect(bubbleTypingProgress(bubble, 4_999)).toBe(0);
@@ -43,8 +43,8 @@ describe("StageOverlayApp", () => {
     expect(
       bubbleTypingProgress(
         { ...bubble, audioStartedAtMs: 6_000, audioDurationMs: 10_000 },
-        6_500
-      )
+        6_500,
+      ),
     ).toBe(1);
   });
 
@@ -55,7 +55,7 @@ describe("StageOverlayApp", () => {
       durationMs: 8_000,
       speechPending: true,
       audioStartedAtMs: 1_000,
-      audioDurationMs: 2_000
+      audioDurationMs: 2_000,
     }).bubbles[0];
 
     expect(bubbleTypingProgress(bubble, 2_000)).toBe(0.5);
@@ -70,28 +70,41 @@ describe("StageOverlayApp", () => {
       choice: {
         choiceId: "choice-typing",
         choices: ["すぐ選ぶ"],
-        timeoutSeconds: 30
-      }
+        timeoutSeconds: 30,
+      },
     });
 
-    render(<StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />);
+    render(
+      <StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />,
+    );
 
     const placeholder = await screen.findByLabelText("読み上げを待っています");
     const content = placeholder.parentElement;
-    expect(content?.querySelectorAll(".actor-bubble-character")).toHaveLength(5);
-    expect(content?.querySelectorAll('[data-typing-visible="false"]')).toHaveLength(5);
-    expect(screen.getByRole("button", { name: "すぐ選ぶ" })).toBeInTheDocument();
+    expect(content?.querySelectorAll(".actor-bubble-character")).toHaveLength(
+      5,
+    );
+    expect(
+      content?.querySelectorAll('[data-typing-visible="false"]'),
+    ).toHaveLength(5);
+    expect(
+      screen.getByRole("button", { name: "すぐ選ぶ" }),
+    ).toBeInTheDocument();
   });
 
   it("renders stage bubbles from desktop stage state", async () => {
-    render(<StageOverlayApp client={clientFixture(stageState())} monitorId="monitor-0" />);
+    render(
+      <StageOverlayApp
+        client={clientFixture(stageState())}
+        monitorId="monitor-0"
+      />,
+    );
 
     const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble).toBeInTheDocument();
     expect(bubble.closest(".stage-bubble")).toHaveClass(
       "stage-bubble--right",
-      "actor-bubble--right"
+      "actor-bubble--right",
     );
   });
 
@@ -117,27 +130,29 @@ describe("StageOverlayApp", () => {
                 x: 240,
                 y: 200,
                 width: 420,
-                height: 420
+                height: 420,
               },
               anchor: {
                 x: 450,
                 y: 360,
-                visible: true
-              }
-            }
-          )
+                visible: true,
+              },
+            },
+          ),
         )}
         monitorId="monitor-0"
-      />
+      />,
     );
 
     const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--above");
     expect(bubble.closest(".stage-bubble")).not.toHaveClass(
-      "actor-bubble--right"
+      "actor-bubble--right",
     );
-    expect(bubble.closest(".stage-bubble")).not.toHaveClass("actor-bubble--left");
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass(
+      "actor-bubble--left",
+    );
   });
 
   it("marks bubbles placed below the actor with the below side class", async () => {
@@ -151,27 +166,29 @@ describe("StageOverlayApp", () => {
                 x: 240,
                 y: 20,
                 width: 420,
-                height: 420
+                height: 420,
               },
               anchor: {
                 x: 450,
                 y: 260,
-                visible: true
-              }
-            }
-          )
+                visible: true,
+              },
+            },
+          ),
         )}
         monitorId="monitor-0"
-      />
+      />,
     );
 
     const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--below");
     expect(bubble.closest(".stage-bubble")).not.toHaveClass(
-      "actor-bubble--right"
+      "actor-bubble--right",
     );
-    expect(bubble.closest(".stage-bubble")).not.toHaveClass("actor-bubble--left");
+    expect(bubble.closest(".stage-bubble")).not.toHaveClass(
+      "actor-bubble--left",
+    );
   });
 
   it("keeps the left side actor bubble class for left placements", async () => {
@@ -185,32 +202,32 @@ describe("StageOverlayApp", () => {
                 x: 420,
                 y: 72,
                 width: 420,
-                height: 560
+                height: 560,
               },
               anchor: {
                 x: 640,
                 y: 190,
-                visible: true
-              }
-            }
-          )
+                visible: true,
+              },
+            },
+          ),
         )}
         monitorId="monitor-0"
-      />
+      />,
     );
 
     const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass(
       "stage-bubble--left",
-      "actor-bubble--left"
+      "actor-bubble--left",
     );
   });
 
   it("dismisses expired bubbles through the stage manager", async () => {
     const state = stageState({
       createdAtMs: Date.now() - 20_000,
-      durationMs: 1
+      durationMs: 1,
     });
     const client = clientFixture(state);
 
@@ -227,9 +244,9 @@ describe("StageOverlayApp", () => {
         choice: {
           choiceId: "choice-1",
           choices: ["見る", "あとで"],
-          timeoutSeconds: 30
-        }
-      })
+          timeoutSeconds: 30,
+        },
+      }),
     );
     const user = userEvent.setup();
 
@@ -243,9 +260,11 @@ describe("StageOverlayApp", () => {
     expect(client.sendConversationChoice).toHaveBeenCalledWith(
       "choice-1",
       "見る",
-      0
+      0,
     );
-    expect(screen.queryByRole("button", { name: "見る" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "見る" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the conversation composer and sends text through the existing client path", async () => {
@@ -253,14 +272,16 @@ describe("StageOverlayApp", () => {
     state.conversationComposer = {
       actorId: "yuukei",
       monitorId: "monitor-0",
-      anchor: { x: 450, y: 190, visible: true }
+      anchor: { x: 450, y: 190, visible: true },
     };
     const client = clientFixture(state);
     const user = userEvent.setup();
 
     render(<StageOverlayApp client={client} monitorId="monitor-0" />);
 
-    const input = await screen.findByRole("textbox", { name: "住人に話しかける" });
+    const input = await screen.findByRole("textbox", {
+      name: "住人に話しかける",
+    });
     await user.type(input, "こんにちは{Control>}{Enter}{/Control}");
 
     await waitFor(() => {
@@ -275,13 +296,17 @@ describe("StageOverlayApp", () => {
     state.conversationComposer = {
       actorId: "yuukei",
       monitorId: "monitor-other",
-      anchor: { x: 2450, y: 190, visible: true }
+      anchor: { x: 2450, y: 190, visible: true },
     };
 
-    render(<StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />);
+    render(
+      <StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />,
+    );
 
     await waitFor(() => {
-      expect(screen.queryByRole("textbox", { name: "住人に話しかける" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("textbox", { name: "住人に話しかける" }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -290,10 +315,14 @@ describe("StageOverlayApp", () => {
     state.conversationComposer = {
       actorId: "yuukei",
       monitorId: "monitor-0",
-      anchor: { x: 450, y: 190, visible: true }
+      anchor: { x: 450, y: 190, visible: true },
     };
     const client = clientFixture(state);
-    let publishSettings: ((settings: Awaited<ReturnType<YuukeiClient["getAppSettings"]>>) => void) | undefined;
+    let publishSettings:
+      | ((
+          settings: Awaited<ReturnType<YuukeiClient["getAppSettings"]>>,
+        ) => void)
+      | undefined;
     client.onAppSettings = vi.fn(async (callback) => {
       publishSettings = callback;
       return () => undefined;
@@ -307,7 +336,7 @@ describe("StageOverlayApp", () => {
         talkIntervalMinutes: 5,
         actorScalePercent: 100,
         conversationSendShortcut: "shiftEnter",
-        settingsPath: "/tmp/yuukei-v2/settings/app.json"
+        settingsPath: "/tmp/yuukei-v2/settings/app.json",
       });
     });
 
@@ -325,7 +354,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
       talkIntervalMinutes: 5,
       actorScalePercent: 100,
       conversationSendShortcut: "ctrlEnter" as const,
-      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+      settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
     getExtensionSettings: vi.fn(),
     getCapabilityUsage: vi.fn(),
@@ -358,13 +387,13 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
       talkIntervalMinutes: minutes,
       actorScalePercent: 100,
       conversationSendShortcut: "ctrlEnter" as const,
-      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+      settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
     setAppActorScalePercent: vi.fn(async (percent: number) => ({
       talkIntervalMinutes: 5,
       actorScalePercent: percent,
       conversationSendShortcut: "ctrlEnter" as const,
-      settingsPath: "/tmp/yuukei-v2/settings/app.json"
+      settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
     setAppConversationSendShortcut: vi.fn(),
     setExtensionHookOrder: vi.fn(),
@@ -375,7 +404,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     onWorldPackStatus: vi.fn(async () => () => undefined),
     onAssetsChanged: vi.fn(async () => () => undefined),
     onAppSettings: vi.fn(async () => () => undefined),
-    onStageState: vi.fn(async () => () => undefined)
+    onStageState: vi.fn(async () => () => undefined),
   };
   return partial as unknown as YuukeiClient;
 }
@@ -384,7 +413,7 @@ function findBubbleText(text: string) {
   return screen.findByText(
     (_content, element) =>
       element?.classList.contains("actor-bubble-content") === true &&
-      element.textContent === text
+      element.textContent === text,
   );
 }
 
@@ -397,20 +426,20 @@ type StageActorFixture = Partial<
 
 function stageState(
   bubble: Partial<DesktopStageState["bubbles"][number]> = {},
-  actor: StageActorFixture = {}
+  actor: StageActorFixture = {},
 ): DesktopStageState {
   const bounds = {
     x: 64,
     y: 72,
     width: 420,
     height: 560,
-    ...actor.bounds
+    ...actor.bounds,
   };
   const anchor = {
     x: 260,
     y: 190,
     visible: true,
-    ...actor.anchor
+    ...actor.anchor,
   };
   return {
     monitors: [
@@ -421,10 +450,10 @@ function stageState(
           x: 0,
           y: 0,
           width: 900,
-          height: 640
+          height: 640,
         },
-        scaleFactor: 1
-      }
+        scaleFactor: 1,
+      },
     ],
     actors: [
       {
@@ -434,8 +463,8 @@ function stageState(
         ...actor,
         bounds,
         anchor,
-        visible: actor.visible ?? true
-      }
+        visible: actor.visible ?? true,
+      },
     ],
     bubbles: [
       {
@@ -445,8 +474,8 @@ function stageState(
         createdAtMs: Date.now(),
         durationMs: 9000,
         speechPending: false,
-        ...bubble
-      }
-    ]
+        ...bubble,
+      },
+    ],
   };
 }

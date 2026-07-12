@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type {
   ActorHitZoneDefinition,
-  AvatarGesturePokeInput
+  AvatarGesturePokeInput,
 } from "./yuukeiClient";
 
 export const AVATAR_GESTURE_POKE = "avatar.gesture.poke";
@@ -26,86 +26,86 @@ export const HUMANOID_HIT_ZONE_BONES = [
     id: "head",
     label: "頭",
     bones: ["head", "neck", "leftEye", "rightEye", "jaw"],
-    events: [AVATAR_GESTURE_POKE, AVATAR_GESTURE_PAT]
+    events: [AVATAR_GESTURE_POKE, AVATAR_GESTURE_PAT],
   },
   {
     id: "chest",
     label: "胸",
     bones: ["chest", "upperChest"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "belly",
     label: "おなか",
     bones: ["spine"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "hips",
     label: "腰",
     bones: ["hips"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "leftArm",
     label: "左腕",
     bones: ["leftShoulder", "leftUpperArm", "leftLowerArm"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "rightArm",
     label: "右腕",
     bones: ["rightShoulder", "rightUpperArm", "rightLowerArm"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "leftHand",
     label: "左手",
     bones: ["leftHand", ...fingerBones("left")],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "rightHand",
     label: "右手",
     bones: ["rightHand", ...fingerBones("right")],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "leftThigh",
     label: "左もも",
     bones: ["leftUpperLeg"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "rightThigh",
     label: "右もも",
     bones: ["rightUpperLeg"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "leftLeg",
     label: "左すね",
     bones: ["leftLowerLeg"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "rightLeg",
     label: "右すね",
     bones: ["rightLowerLeg"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "leftFoot",
     label: "左足",
     bones: ["leftFoot", "leftToes"],
-    events: [AVATAR_GESTURE_POKE]
+    events: [AVATAR_GESTURE_POKE],
   },
   {
     id: "rightFoot",
     label: "右足",
     bones: ["rightFoot", "rightToes"],
-    events: [AVATAR_GESTURE_POKE]
-  }
+    events: [AVATAR_GESTURE_POKE],
+  },
 ] satisfies Array<{
   id: string;
   label: string;
@@ -114,7 +114,7 @@ export const HUMANOID_HIT_ZONE_BONES = [
 }>;
 
 export function autoHitZoneDefinitions(
-  availableBones: ReadonlySet<string>
+  availableBones: ReadonlySet<string>,
 ): ActorHitZoneDefinition[] {
   return HUMANOID_HIT_ZONE_BONES.flatMap((definition) => {
     const bones = definition.bones.filter((bone) => availableBones.has(bone));
@@ -126,20 +126,24 @@ export function autoHitZoneDefinitions(
         source: "humanoidBone",
         bones,
         shape: "auto",
-        events: definition.events
-      }
+        events: definition.events,
+      },
     ];
   });
 }
 
 export function mergeHitZoneDefinitions(
   autoDefinitions: ActorHitZoneDefinition[],
-  packDefinitions: ActorHitZoneDefinition[]
+  packDefinitions: ActorHitZoneDefinition[],
 ): ResolvedActorHitZone[] {
   const merged = new Map<string, ResolvedActorHitZone>();
 
   for (const definition of autoDefinitions) {
-    const normalized = normalizeHitZoneDefinition(definition, undefined, "auto");
+    const normalized = normalizeHitZoneDefinition(
+      definition,
+      undefined,
+      "auto",
+    );
     if (normalized) {
       merged.set(normalized.id, normalized);
     }
@@ -158,28 +162,28 @@ export function mergeHitZoneDefinitions(
 
 export function nodeNameHitZoneForLineage(
   zones: ResolvedActorHitZone[],
-  lineageNames: string[]
+  lineageNames: string[],
 ): ResolvedActorHitZone | null {
   return (
     zones.find(
       (zone) =>
         zone.source === "nodeName" &&
         zone.events.includes(AVATAR_GESTURE_POKE) &&
-        zone.nodes.some((nodeName) => lineageNames.includes(nodeName))
+        zone.nodes.some((nodeName) => lineageNames.includes(nodeName)),
     ) ?? null
   );
 }
 
 export function hitZoneForHumanoidBone(
   zones: ResolvedActorHitZone[],
-  boneName: string
+  boneName: string,
 ): ResolvedActorHitZone | null {
   return (
     zones.find(
       (zone) =>
         zone.source === "humanoidBone" &&
         zone.events.includes(AVATAR_GESTURE_POKE) &&
-        zone.bones.includes(boneName)
+        zone.bones.includes(boneName),
     ) ?? null
   );
 }
@@ -187,7 +191,7 @@ export function hitZoneForHumanoidBone(
 export function hitZoneForLineageOrHumanoidBone(
   zones: ResolvedActorHitZone[],
   lineageNames: string[],
-  boneName: string | null
+  boneName: string | null,
 ): ResolvedActorHitZone | null {
   return (
     nodeNameHitZoneForLineage(zones, lineageNames) ??
@@ -196,7 +200,7 @@ export function hitZoneForLineageOrHumanoidBone(
 }
 
 export function dominantSkinBoneForIntersection(
-  intersection: THREE.Intersection
+  intersection: THREE.Intersection,
 ): THREE.Bone | null {
   const object = intersection.object;
   if (!isSkinnedMesh(object) || intersection.faceIndex == null) {
@@ -204,7 +208,7 @@ export function dominantSkinBoneForIntersection(
   }
   const boneIndex = dominantSkinBoneIndexForFace(
     object.geometry,
-    intersection.faceIndex
+    intersection.faceIndex,
   );
   if (boneIndex === null) return null;
   return object.skeleton.bones[boneIndex] ?? null;
@@ -212,7 +216,7 @@ export function dominantSkinBoneForIntersection(
 
 export function dominantSkinBoneIndexForFace(
   geometry: THREE.BufferGeometry,
-  faceIndex: number
+  faceIndex: number,
 ): number | null {
   const skinIndex = geometry.getAttribute("skinIndex");
   const skinWeight = geometry.getAttribute("skinWeight");
@@ -224,9 +228,15 @@ export function dominantSkinBoneIndexForFace(
   const totals = new Map<number, number>();
   for (const vertexIndex of vertexIndices) {
     for (let component = 0; component < 4; component += 1) {
-      const boneIndex = Math.trunc(attributeComponent(skinIndex, vertexIndex, component));
+      const boneIndex = Math.trunc(
+        attributeComponent(skinIndex, vertexIndex, component),
+      );
       const weight = attributeComponent(skinWeight, vertexIndex, component);
-      if (!Number.isFinite(boneIndex) || !Number.isFinite(weight) || weight <= 0) {
+      if (
+        !Number.isFinite(boneIndex) ||
+        !Number.isFinite(weight) ||
+        weight <= 0
+      ) {
         continue;
       }
       totals.set(boneIndex, (totals.get(boneIndex) ?? 0) + weight);
@@ -246,7 +256,7 @@ export function dominantSkinBoneIndexForFace(
 
 export function humanoidBoneNameForObject(
   object: THREE.Object3D,
-  humanoidBoneByObject: ReadonlyMap<THREE.Object3D, string>
+  humanoidBoneByObject: ReadonlyMap<THREE.Object3D, string>,
 ): string | null {
   let current: THREE.Object3D | null = object;
   while (current) {
@@ -258,7 +268,7 @@ export function humanoidBoneNameForObject(
 }
 
 export function hitSurfaceForIntersection(
-  intersection: THREE.Intersection
+  intersection: THREE.Intersection,
 ): HitSurface {
   const materialNames = materialNamesForIntersection(intersection);
   const materialSurface = hitSurfaceFromNames(materialNames);
@@ -283,7 +293,8 @@ export function hitSurfaceFromNames(names: string[]): HitSurface {
 
   for (const name of names) {
     const normalized = name.toLowerCase();
-    if (normalized.includes("face") || normalized.includes("eye")) return "face";
+    if (normalized.includes("face") || normalized.includes("eye"))
+      return "face";
     if (normalized.includes("hair")) return "hair";
     if (
       normalized.includes("cloth") ||
@@ -292,7 +303,8 @@ export function hitSurfaceFromNames(names: string[]): HitSurface {
     ) {
       return "cloth";
     }
-    if (normalized.includes("body") || normalized.includes("skin")) return "skin";
+    if (normalized.includes("body") || normalized.includes("skin"))
+      return "skin";
   }
   return "unknown";
 }
@@ -310,7 +322,7 @@ export function buildAvatarGesturePokePayload(
   options: {
     hitSurface?: HitSurface;
     hitBone?: string;
-  } = {}
+  } = {},
 ): AvatarGesturePokeInput {
   return {
     actorId,
@@ -320,12 +332,12 @@ export function buildAvatarGesturePokePayload(
     hitBone: options.hitBone,
     input: {
       kind: "pointer",
-      button: pointerButtonName(pointer.button)
+      button: pointerButtonName(pointer.button),
     },
     screen: {
       x: pointer.screenX,
-      y: pointer.screenY
-    }
+      y: pointer.screenY,
+    },
   };
 }
 
@@ -345,7 +357,7 @@ export function pointerButtonName(button: number): string {
 function normalizeHitZoneDefinition(
   definition: ActorHitZoneDefinition,
   fallback: ResolvedActorHitZone | undefined,
-  origin: HitZoneOrigin
+  origin: HitZoneOrigin,
 ): ResolvedActorHitZone | null {
   const id = definition.id.trim();
   if (!id) return null;
@@ -356,9 +368,9 @@ function normalizeHitZoneDefinition(
   const fallbackCompatible =
     fallback && fallback.source === source ? fallback : undefined;
   const nextBones =
-    bones.length > 0 ? bones : fallbackCompatible?.bones.slice() ?? [];
+    bones.length > 0 ? bones : (fallbackCompatible?.bones.slice() ?? []);
   const nextNodes =
-    nodes.length > 0 ? nodes : fallbackCompatible?.nodes.slice() ?? [];
+    nodes.length > 0 ? nodes : (fallbackCompatible?.nodes.slice() ?? []);
 
   if (source === "humanoidBone" && nextBones.length === 0) return null;
   if (source === "nodeName" && nextNodes.length === 0) return null;
@@ -380,7 +392,7 @@ function normalizeHitZoneDefinition(
     events:
       events.length > 0
         ? events
-        : fallback?.events.slice() ?? [AVATAR_GESTURE_POKE]
+        : (fallback?.events.slice() ?? [AVATAR_GESTURE_POKE]),
   };
 }
 
@@ -401,13 +413,13 @@ function fingerBones(side: "left" | "right"): string[] {
     `${prefix}RingDistal`,
     `${prefix}LittleProximal`,
     `${prefix}LittleIntermediate`,
-    `${prefix}LittleDistal`
+    `${prefix}LittleDistal`,
   ];
 }
 
 function faceVertexIndices(
   geometry: THREE.BufferGeometry,
-  faceIndex: number
+  faceIndex: number,
 ): [number, number, number] | null {
   const base = faceIndex * 3;
   const index = geometry.getIndex();
@@ -423,7 +435,7 @@ function faceVertexIndices(
 function attributeComponent(
   attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
   index: number,
-  component: number
+  component: number,
 ): number {
   switch (component) {
     case 0:
@@ -437,7 +449,9 @@ function attributeComponent(
   }
 }
 
-function materialNamesForIntersection(intersection: THREE.Intersection): string[] {
+function materialNamesForIntersection(
+  intersection: THREE.Intersection,
+): string[] {
   const mesh = intersection.object as THREE.Mesh;
   const material = mesh.material;
   if (Array.isArray(material)) {

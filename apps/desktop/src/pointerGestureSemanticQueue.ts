@@ -10,6 +10,6 @@ export function createPointerGestureSemanticQueue(): PointerGestureSemanticQueue
       const completion = tail.then(task);
       tail = completion.catch(() => undefined);
       return completion;
-    }
+    },
   };
 }

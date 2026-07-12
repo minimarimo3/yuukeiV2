@@ -2,4 +2,10 @@
 import type { ExecutionLocation } from "./ExecutionLocation";
 import type { ExtensionHealth } from "./ExtensionHealth";
 
-export type CapabilityRouteSummary = { extensionId: string, capabilities: Array<string>, location: ExecutionLocation, health: ExtensionHealth, enabled: boolean, };
+export type CapabilityRouteSummary = {
+  extensionId: string;
+  capabilities: Array<string>;
+  location: ExecutionLocation;
+  health: ExtensionHealth;
+  enabled: boolean;
+};

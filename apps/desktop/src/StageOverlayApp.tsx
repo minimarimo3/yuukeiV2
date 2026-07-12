@@ -5,7 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties
+  type CSSProperties,
 } from "react";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -16,7 +16,7 @@ import {
   type StageBubble,
   type StageMonitor,
   type StageRect as ClientStageRect,
-  type YuukeiClient
+  type YuukeiClient,
 } from "./yuukeiClient";
 import {
   computeStageBubblePlacement,
@@ -24,7 +24,7 @@ import {
   localRect,
   type StageBubblePlacement,
   type StageBubbleSize,
-  type StageRect
+  type StageRect,
 } from "./stageBubbleLayout";
 import { ConversationComposer } from "./ConversationComposer";
 
@@ -41,7 +41,7 @@ type StageBubbleRenderItem = {
 
 const DEFAULT_BUBBLE_SIZE: StageBubbleSize = {
   width: 260,
-  height: 72
+  height: 72,
 };
 const SPEECH_FALLBACK_GRACE_MS = 5_000;
 const READING_MS_PER_CODE_POINT = 90;
@@ -50,18 +50,19 @@ export function bubbleTypingProgress(bubble: StageBubble, now: number): number {
   const characterCount = [...bubble.text].length;
   if (characterCount === 0) return 1;
 
-  const fallbackStartMs = bubble.createdAtMs +
-    (bubble.speechPending ? SPEECH_FALLBACK_GRACE_MS : 0);
+  const fallbackStartMs =
+    bubble.createdAtMs + (bubble.speechPending ? SPEECH_FALLBACK_GRACE_MS : 0);
   const fallbackDurationMs = Math.min(
     characterCount * READING_MS_PER_CODE_POINT,
     Math.max(
       bubble.durationMs - (bubble.speechPending ? SPEECH_FALLBACK_GRACE_MS : 0),
-      1
-    ) * 0.8
+      1,
+    ) * 0.8,
   );
-  const fallbackProgress = now < fallbackStartMs
-    ? 0
-    : clampUnit((now - fallbackStartMs) / Math.max(fallbackDurationMs, 1));
+  const fallbackProgress =
+    now < fallbackStartMs
+      ? 0
+      : clampUnit((now - fallbackStartMs) / Math.max(fallbackDurationMs, 1));
   if (!bubble.speechPending) return fallbackProgress;
 
   const audioProgress =
@@ -79,16 +80,18 @@ function clampUnit(value: number): number {
 
 export function StageOverlayApp({
   monitorId,
-  client = tauriYuukeiClient
+  client = tauriYuukeiClient,
 }: StageOverlayAppProps) {
   const [stageState, setStageState] = useState<DesktopStageState | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
-  const [bubbleSizes, setBubbleSizes] = useState<Record<string, StageBubbleSize>>({});
+  const [bubbleSizes, setBubbleSizes] = useState<
+    Record<string, StageBubbleSize>
+  >({});
   const [interactingBubbleIds, setInteractingBubbleIds] = useState<Set<string>>(
-    () => new Set()
+    () => new Set(),
   );
   const [hiddenChoiceIds, setHiddenChoiceIds] = useState<Set<string>>(
-    () => new Set()
+    () => new Set(),
   );
   const [deferUntil, setDeferUntil] = useState<Record<string, number>>({});
   const [, setTimerTick] = useState(0);
@@ -98,15 +101,19 @@ export function StageOverlayApp({
     const unlisteners: Array<() => void> = [];
 
     async function connect() {
-      unlisteners.push(await client.onStageState((nextState) => {
-        setStageState(nextState);
-      }));
-      unlisteners.push(await client.onAppSettings((nextSettings) => {
-        setAppSettings(nextSettings);
-      }));
+      unlisteners.push(
+        await client.onStageState((nextState) => {
+          setStageState(nextState);
+        }),
+      );
+      unlisteners.push(
+        await client.onAppSettings((nextSettings) => {
+          setAppSettings(nextSettings);
+        }),
+      );
       const [initialState, initialSettings] = await Promise.all([
         client.getDesktopStageState(),
-        client.getAppSettings()
+        client.getAppSettings(),
       ]);
       if (!disposed) {
         setStageState(initialState);
@@ -128,15 +135,15 @@ export function StageOverlayApp({
 
   const activeMonitor = useMemo(
     () => selectMonitor(stageState, monitorId),
-    [stageState, monitorId]
+    [stageState, monitorId],
   );
   const renderItems = useMemo(
     () => computeRenderItems(stageState, activeMonitor, bubbleSizes),
-    [activeMonitor, bubbleSizes, stageState]
+    [activeMonitor, bubbleSizes, stageState],
   );
   const composer = useMemo(
     () => composerForMonitor(stageState, activeMonitor),
-    [activeMonitor, stageState]
+    [activeMonitor, stageState],
   );
 
   useBubbleExpiry({
@@ -144,7 +151,7 @@ export function StageOverlayApp({
     client,
     deferUntil,
     interactingBubbleIds,
-    onTick: () => setTimerTick((tick) => tick + 1)
+    onTick: () => setTimerTick((tick) => tick + 1),
   });
   useStageOverlayHitTesting(client, renderItems.length + (composer ? 1 : 0));
 
@@ -162,25 +169,28 @@ export function StageOverlayApp({
         return { ...current, [bubbleId]: size };
       });
     },
-    []
+    [],
   );
 
-  const setBubbleInteracting = useCallback((bubbleId: string, active: boolean) => {
-    setInteractingBubbleIds((current) => {
-      const next = new Set(current);
-      if (active) {
-        next.add(bubbleId);
-      } else {
-        next.delete(bubbleId);
-      }
-      return next;
-    });
-  }, []);
+  const setBubbleInteracting = useCallback(
+    (bubbleId: string, active: boolean) => {
+      setInteractingBubbleIds((current) => {
+        const next = new Set(current);
+        if (active) {
+          next.add(bubbleId);
+        } else {
+          next.delete(bubbleId);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   const deferBubble = useCallback((bubbleId: string, durationMs = 2500) => {
     setDeferUntil((current) => ({
       ...current,
-      [bubbleId]: Date.now() + durationMs
+      [bubbleId]: Date.now() + durationMs,
     }));
   }, []);
 
@@ -207,16 +217,20 @@ export function StageOverlayApp({
             hiddenChoiceIds={hiddenChoiceIds}
             onChoiceSelect={(choiceId, choice, index) => {
               setHiddenChoiceIds((current) => new Set(current).add(choiceId));
-              void client.sendConversationChoice(choiceId, choice, index).catch((error) => {
-                console.warn("Failed to send conversation choice", error);
-              });
+              void client
+                .sendConversationChoice(choiceId, choice, index)
+                .catch((error) => {
+                  console.warn("Failed to send conversation choice", error);
+                });
             }}
             onBlur={() => {
               setBubbleInteracting(item.bubble.bubbleId, false);
               deferBubble(item.bubble.bubbleId, 1200);
             }}
             onFocus={() => setBubbleInteracting(item.bubble.bubbleId, true)}
-            onMouseEnter={() => setBubbleInteracting(item.bubble.bubbleId, true)}
+            onMouseEnter={() =>
+              setBubbleInteracting(item.bubble.bubbleId, true)
+            }
             onMouseLeave={() => {
               setBubbleInteracting(item.bubble.bubbleId, false);
               deferBubble(item.bubble.bubbleId, 1200);
@@ -250,7 +264,7 @@ export function StageOverlayApp({
 }
 
 export function stageOverlayIdFromLocation(
-  search = window.location.search
+  search = window.location.search,
 ): string | null {
   const monitorId = new URLSearchParams(search).get("stageOverlayId");
   return monitorId && monitorId.length > 0 ? monitorId : null;
@@ -266,7 +280,7 @@ function StageBubbleView({
   onMouseLeave,
   onScroll,
   onSizeChange,
-  onWheel
+  onWheel,
 }: {
   hiddenChoiceIds: Set<string>;
   item: StageBubbleRenderItem;
@@ -300,7 +314,7 @@ function StageBubbleView({
     "actor-bubble",
     "stage-bubble",
     `stage-bubble--${item.placement.side}`,
-    sideClass
+    sideClass,
   ]
     .filter(Boolean)
     .join(" ");
@@ -309,7 +323,7 @@ function StageBubbleView({
     top: `${item.placement.top}px`,
     "--actor-bubble-max-width": `${item.placement.maxWidth}px`,
     "--actor-bubble-tail-top": `${item.placement.tailTop}px`,
-    "--actor-bubble-tail-left": `${item.placement.tailLeft}px`
+    "--actor-bubble-tail-left": `${item.placement.tailLeft}px`,
   } as CSSProperties;
 
   return (
@@ -338,13 +352,19 @@ function StageBubbleView({
               className="actor-bubble-character"
               data-typing-visible={index < visibleCharacterCount}
               key={`${index}:${character}`}
-              style={{ visibility: index < visibleCharacterCount ? "visible" : "hidden" }}
+              style={{
+                visibility:
+                  index < visibleCharacterCount ? "visible" : "hidden",
+              }}
             >
               {character}
             </span>
           ))}
           {waitingForSpeech ? (
-            <span className="actor-bubble-placeholder" aria-label="読み上げを待っています">
+            <span
+              className="actor-bubble-placeholder"
+              aria-label="読み上げを待っています"
+            >
               …
             </span>
           ) : null}
@@ -377,7 +397,7 @@ function useBubbleTypingProgress(bubble: StageBubble) {
     return {
       bubbleId: bubble.bubbleId,
       now,
-      progress: bubbleTypingProgress(bubble, now)
+      progress: bubbleTypingProgress(bubble, now),
     };
   });
 
@@ -392,7 +412,7 @@ function useBubbleTypingProgress(bubble: StageBubble) {
         progress:
           current.bubbleId === bubble.bubbleId
             ? Math.max(current.progress, nextProgress)
-            : nextProgress
+            : nextProgress,
       }));
       if (nextProgress >= 1 && timer !== undefined) {
         window.clearInterval(timer);
@@ -418,7 +438,7 @@ function useBubbleTypingProgress(bubble: StageBubble) {
 
 function useMeasuredBubbleSize(
   bubbleId: string,
-  onSizeChange: (bubbleId: string, size: StageBubbleSize) => void
+  onSizeChange: (bubbleId: string, size: StageBubbleSize) => void,
 ) {
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -431,7 +451,7 @@ function useMeasuredBubbleSize(
       if (rect.width <= 0 && rect.height <= 0) return;
       onSizeChange(bubbleId, {
         width: Math.max(rect.width, 1),
-        height: Math.max(rect.height, 1)
+        height: Math.max(rect.height, 1),
       });
     };
 
@@ -450,7 +470,7 @@ function useBubbleExpiry({
   client,
   deferUntil,
   interactingBubbleIds,
-  onTick
+  onTick,
 }: {
   bubbles: StageBubble[];
   client: YuukeiClient;
@@ -468,7 +488,7 @@ function useBubbleExpiry({
       }
       const expiry = Math.max(
         bubble.createdAtMs + bubble.durationMs,
-        deferUntil[bubble.bubbleId] ?? 0
+        deferUntil[bubble.bubbleId] ?? 0,
       );
       const delay = expiry - now;
       if (delay <= 0) {
@@ -489,14 +509,15 @@ function useBubbleExpiry({
 
 function useStageOverlayHitTesting(
   client: YuukeiClient,
-  activeInteractiveCount: number
+  activeInteractiveCount: number,
 ) {
   useEffect(() => {
     let disposed = false;
     let lastPassthrough: boolean | null = null;
 
     async function update() {
-      const solid = activeInteractiveCount > 0 && (await pointerHitsStageSolid());
+      const solid =
+        activeInteractiveCount > 0 && (await pointerHitsStageSolid());
       const passthrough = stageOverlayPassthrough(solid);
       if (!disposed && lastPassthrough !== passthrough) {
         lastPassthrough = passthrough;
@@ -516,13 +537,15 @@ function useStageOverlayHitTesting(
   }, [activeInteractiveCount, client]);
 }
 
-export function stageOverlayPassthrough(pointerHitsInteractiveContent: boolean): boolean {
+export function stageOverlayPassthrough(
+  pointerHitsInteractiveContent: boolean,
+): boolean {
   return !pointerHitsInteractiveContent;
 }
 
 function composerForMonitor(
   stageState: DesktopStageState | null,
-  monitor: StageMonitor | null
+  monitor: StageMonitor | null,
 ): { left: number; top: number } | null {
   const composer = stageState?.conversationComposer;
   if (
@@ -544,8 +567,17 @@ function composerForMonitor(
   }
   const width = Math.min(340, Math.max(bounds.width - 24, 1));
   return {
-    left: Math.max(12, Math.min(composer.anchor.x - bounds.x - width / 2, bounds.width - width - 12)),
-    top: Math.max(12, Math.min(composer.anchor.y - bounds.y + 28, bounds.height - 180))
+    left: Math.max(
+      12,
+      Math.min(
+        composer.anchor.x - bounds.x - width / 2,
+        bounds.width - width - 12,
+      ),
+    ),
+    top: Math.max(
+      12,
+      Math.min(composer.anchor.y - bounds.y + 28, bounds.height - 180),
+    ),
   };
 }
 
@@ -555,7 +587,7 @@ async function pointerHitsStageSolid(): Promise<boolean> {
   const [cursor, outerPosition, innerSize] = await Promise.all([
     cursorPosition(),
     windowHandle.outerPosition(),
-    windowHandle.innerSize()
+    windowHandle.innerSize(),
   ]);
   const scaleX = innerSize.width / Math.max(window.innerWidth, 1);
   const scaleY = innerSize.height / Math.max(window.innerHeight, 1);
@@ -573,35 +605,36 @@ async function pointerHitsStageSolid(): Promise<boolean> {
   return Boolean(
     document
       .elementFromPoint(clientX, clientY)
-      ?.closest("[data-stage-solid='true']")
+      ?.closest("[data-stage-solid='true']"),
   );
 }
 
 function computeRenderItems(
   stageState: DesktopStageState | null,
   monitor: StageMonitor | null,
-  bubbleSizes: Record<string, StageBubbleSize>
+  bubbleSizes: Record<string, StageBubbleSize>,
 ): StageBubbleRenderItem[] {
   if (!stageState || !monitor) return [];
   const viewport = {
     width: Math.max(monitor.bounds.width, 1),
-    height: Math.max(monitor.bounds.height, 1)
+    height: Math.max(monitor.bounds.height, 1),
   };
   const actorsById = new Map(
-    stageState.actors.map((actor) => [actor.actorId, actor])
+    stageState.actors.map((actor) => [actor.actorId, actor]),
   );
   const monitorBounds = toLayoutRect(monitor.bounds);
   const actorObstacles = stageState.actors
     .filter(
       (actor) =>
-        actor.visible && intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)
+        actor.visible &&
+        intersectsViewport(toLayoutRect(actor.bounds), monitorBounds),
     )
     .map((actor) => localRect(toLayoutRect(actor.bounds), monitorBounds));
   const occupied: StageRect[] = [...actorObstacles];
   const items: StageBubbleRenderItem[] = [];
 
   for (const bubble of [...stageState.bubbles].sort(
-    (a, b) => a.createdAtMs - b.createdAtMs
+    (a, b) => a.createdAtMs - b.createdAtMs,
   )) {
     const actor = actorsById.get(bubble.actorId);
     if (
@@ -616,7 +649,7 @@ function computeRenderItems(
       anchor,
       viewport,
       bubbleSizes[bubble.bubbleId] ?? DEFAULT_BUBBLE_SIZE,
-      occupied
+      occupied,
     );
     occupied.push(placement.rect);
     items.push({ actor, bubble, placement });
@@ -630,19 +663,19 @@ function localAnchorForActor(actor: StageActor, origin: ClientStageRect) {
     return {
       x: actor.anchor.x - origin.x,
       y: actor.anchor.y - origin.y,
-      visible: true
+      visible: true,
     };
   }
   return {
     x: actor.bounds.x - origin.x + actor.bounds.width * 0.5,
     y: actor.bounds.y - origin.y + actor.bounds.height * 0.28,
-    visible: true
+    visible: true,
   };
 }
 
 function selectMonitor(
   stageState: DesktopStageState | null,
-  monitorId: string | null | undefined
+  monitorId: string | null | undefined,
 ): StageMonitor | null {
   if (!stageState) return null;
   return (
@@ -657,7 +690,7 @@ function toLayoutRect(rect: ClientStageRect): StageRect {
     x: rect.x,
     y: rect.y,
     width: rect.width,
-    height: rect.height
+    height: rect.height,
   };
 }
 

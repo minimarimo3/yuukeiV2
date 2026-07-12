@@ -2,4 +2,46 @@
 import type { ExtensionSettingSelectOption } from "./ExtensionSettingSelectOption";
 import type { ExtensionSettingVisibleWhen } from "./ExtensionSettingVisibleWhen";
 
-export type ExtensionSettingField = { "type": "string", key: string, label: string, description?: string, default?: string, visibleWhen?: ExtensionSettingVisibleWhen, } | { "type": "number", key: string, label: string, description?: string, default?: number, visibleWhen?: ExtensionSettingVisibleWhen, min?: number, max?: number, } | { "type": "boolean", key: string, label: string, description?: string, default?: boolean, visibleWhen?: ExtensionSettingVisibleWhen, } | { "type": "select", key: string, label: string, description?: string, options: Array<ExtensionSettingSelectOption>, default?: string, visibleWhen?: ExtensionSettingVisibleWhen, } | { "type": "secret", key: string, label: string, description?: string, visibleWhen?: ExtensionSettingVisibleWhen, };
+export type ExtensionSettingField =
+  | {
+      type: "string";
+      key: string;
+      label: string;
+      description?: string;
+      default?: string;
+      visibleWhen?: ExtensionSettingVisibleWhen;
+    }
+  | {
+      type: "number";
+      key: string;
+      label: string;
+      description?: string;
+      default?: number;
+      visibleWhen?: ExtensionSettingVisibleWhen;
+      min?: number;
+      max?: number;
+    }
+  | {
+      type: "boolean";
+      key: string;
+      label: string;
+      description?: string;
+      default?: boolean;
+      visibleWhen?: ExtensionSettingVisibleWhen;
+    }
+  | {
+      type: "select";
+      key: string;
+      label: string;
+      description?: string;
+      options: Array<ExtensionSettingSelectOption>;
+      default?: string;
+      visibleWhen?: ExtensionSettingVisibleWhen;
+    }
+  | {
+      type: "secret";
+      key: string;
+      label: string;
+      description?: string;
+      visibleWhen?: ExtensionSettingVisibleWhen;
+    };
