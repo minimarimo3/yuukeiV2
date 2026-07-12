@@ -10,6 +10,7 @@ import {
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   tauriYuukeiClient,
+  type AppSettingsState,
   type DesktopStageState,
   type StageActor,
   type StageBubble,
@@ -25,6 +26,7 @@ import {
   type StageBubbleSize,
   type StageRect
 } from "./stageBubbleLayout";
+import { ConversationComposer } from "./ConversationComposer";
 
 type StageOverlayAppProps = {
   monitorId?: string | null;
@@ -47,6 +49,7 @@ export function StageOverlayApp({
   client = tauriYuukeiClient
 }: StageOverlayAppProps) {
   const [stageState, setStageState] = useState<DesktopStageState | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
   const [bubbleSizes, setBubbleSizes] = useState<Record<string, StageBubbleSize>>({});
   const [interactingBubbleIds, setInteractingBubbleIds] = useState<Set<string>>(
     () => new Set()
@@ -65,9 +68,13 @@ export function StageOverlayApp({
       unlisteners.push(await client.onStageState((nextState) => {
         setStageState(nextState);
       }));
-      const initialState = await client.getDesktopStageState();
+      const [initialState, initialSettings] = await Promise.all([
+        client.getDesktopStageState(),
+        client.getAppSettings()
+      ]);
       if (!disposed) {
         setStageState(initialState);
+        setAppSettings(initialSettings);
       }
     }
 
@@ -91,6 +98,10 @@ export function StageOverlayApp({
     () => computeRenderItems(stageState, activeMonitor, bubbleSizes),
     [activeMonitor, bubbleSizes, stageState]
   );
+  const composer = useMemo(
+    () => composerForMonitor(stageState, activeMonitor),
+    [activeMonitor, stageState]
+  );
 
   useBubbleExpiry({
     bubbles: stageState?.bubbles ?? [],
@@ -99,7 +110,7 @@ export function StageOverlayApp({
     interactingBubbleIds,
     onTick: () => setTimerTick((tick) => tick + 1)
   });
-  useStageOverlayHitTesting(client, renderItems.length);
+  useStageOverlayHitTesting(client, renderItems.length, Boolean(composer));
 
   const updateBubbleSize = useCallback(
     (bubbleId: string, size: StageBubbleSize) => {
@@ -138,7 +149,20 @@ export function StageOverlayApp({
   }, []);
 
   return (
-    <main className="stage-overlay-shell" aria-label="Yuukei desktop stage">
+    <main
+      className="stage-overlay-shell"
+      aria-label="Yuukei desktop stage"
+      onPointerDownCapture={(event) => {
+        const target = event.target;
+        if (
+          composer &&
+          target instanceof Element &&
+          !target.closest(".conversation-composer-position")
+        ) {
+          void client.closeConversationComposer();
+        }
+      }}
+    >
       <div className="stage-overlay-layer" aria-live="polite">
         {renderItems.map((item) => (
           <StageBubbleView
@@ -166,6 +190,24 @@ export function StageOverlayApp({
             onWheel={() => deferBubble(item.bubble.bubbleId)}
           />
         ))}
+        {composer ? (
+          <div
+            className="conversation-composer-position"
+            data-stage-solid="true"
+            style={{ left: composer.left, top: composer.top }}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <ConversationComposer
+              shortcut={appSettings?.conversationSendShortcut ?? "ctrlEnter"}
+              onSubmit={async (text) => {
+                await client.sendConversationText(text);
+              }}
+              onDismiss={() => {
+                void client.closeConversationComposer();
+              }}
+            />
+          </div>
+        ) : null}
       </div>
     </main>
   );
@@ -338,14 +380,18 @@ function useBubbleExpiry({
   }, [bubbles, client, deferUntil, interactingBubbleIds, onTick]);
 }
 
-function useStageOverlayHitTesting(client: YuukeiClient, activeBubbleCount: number) {
+function useStageOverlayHitTesting(
+  client: YuukeiClient,
+  activeBubbleCount: number,
+  forceInteractive: boolean
+) {
   useEffect(() => {
     let disposed = false;
     let lastPassthrough: boolean | null = null;
 
     async function update() {
       const solid = activeBubbleCount > 0 && (await pointerHitsStageSolid());
-      const passthrough = !solid;
+      const passthrough = !forceInteractive && !solid;
       if (!disposed && lastPassthrough !== passthrough) {
         lastPassthrough = passthrough;
         await client.setStageOverlayClickThrough(passthrough);
@@ -361,7 +407,29 @@ function useStageOverlayHitTesting(client: YuukeiClient, activeBubbleCount: numb
       window.clearInterval(interval);
       void client.setStageOverlayClickThrough(true);
     };
-  }, [activeBubbleCount, client]);
+  }, [activeBubbleCount, client, forceInteractive]);
+}
+
+function composerForMonitor(
+  stageState: DesktopStageState | null,
+  monitor: StageMonitor | null
+): { left: number; top: number } | null {
+  const composer = stageState?.conversationComposer;
+  if (!composer || !composer.anchor.visible || !monitor) return null;
+  const { bounds } = monitor;
+  if (
+    composer.anchor.x < bounds.x ||
+    composer.anchor.x > bounds.x + bounds.width ||
+    composer.anchor.y < bounds.y ||
+    composer.anchor.y > bounds.y + bounds.height
+  ) {
+    return null;
+  }
+  const width = Math.min(340, Math.max(bounds.width - 24, 1));
+  return {
+    left: Math.max(12, Math.min(composer.anchor.x - bounds.x - width / 2, bounds.width - width - 12)),
+    top: Math.max(12, Math.min(composer.anchor.y - bounds.y + 28, bounds.height - 180))
+  };
 }
 
 async function pointerHitsStageSolid(): Promise<boolean> {

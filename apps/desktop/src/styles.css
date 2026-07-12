@@ -214,6 +214,81 @@ input {
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
+.conversation-composer-position {
+  position: absolute;
+  z-index: 20;
+  width: min(340px, calc(100vw - 24px));
+  pointer-events: auto;
+}
+
+.conversation-composer {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(23, 32, 51, 0.22);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 14px 36px rgba(16, 24, 40, 0.2);
+  backdrop-filter: blur(12px);
+}
+
+.conversation-composer__label {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.conversation-composer textarea {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.5;
+}
+
+.conversation-composer textarea:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.25);
+  border-color: rgba(37, 99, 235, 0.55);
+}
+
+.conversation-composer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conversation-composer__footer small {
+  color: var(--muted);
+}
+
+.conversation-composer__footer button {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: var(--accent);
+  color: white;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.conversation-composer__footer button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.conversation-composer [role="alert"] {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .stage-bubble--above .actor-bubble-tail,
 .stage-bubble--below .actor-bubble-tail {
   left: var(--actor-bubble-tail-left, 50%);

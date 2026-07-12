@@ -173,6 +173,41 @@ describe("StageOverlayApp", () => {
     );
     expect(screen.queryByRole("button", { name: "見る" })).not.toBeInTheDocument();
   });
+
+  it("renders the conversation composer and sends text through the existing client path", async () => {
+    const state = stageState();
+    state.conversationComposer = {
+      actorId: "yuukei",
+      anchor: { x: 450, y: 190, visible: true }
+    };
+    const client = clientFixture(state);
+    const user = userEvent.setup();
+
+    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+
+    const input = await screen.findByRole("textbox", { name: "住人に話しかける" });
+    await user.type(input, "こんにちは{Control>}{Enter}{/Control}");
+
+    await waitFor(() => {
+      expect(client.sendConversationText).toHaveBeenCalledWith("こんにちは");
+      expect(client.closeConversationComposer).toHaveBeenCalled();
+    });
+    expect(client.setStageOverlayClickThrough).toHaveBeenCalledWith(false);
+  });
+
+  it("does not render a composer belonging to another monitor", async () => {
+    const state = stageState();
+    state.conversationComposer = {
+      actorId: "yuukei",
+      anchor: { x: 2450, y: 190, visible: true }
+    };
+
+    render(<StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("textbox", { name: "住人に話しかける" })).not.toBeInTheDocument();
+    });
+  });
 });
 
 function clientFixture(stage: DesktopStageState): YuukeiClient {
@@ -196,6 +231,8 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(),
+    openConversationComposer: vi.fn(),
+    closeConversationComposer: vi.fn(async () => undefined),
     sendConversationText: vi.fn(),
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(),
