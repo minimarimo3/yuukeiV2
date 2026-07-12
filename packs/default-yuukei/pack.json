@@ -109,8 +109,7 @@
   "llmDelegation": {
     "signals": [
       {
-        "signal": "conversation.text",
-        "cooldownSeconds": 60
+        "signal": "conversation.text"
       }
     ]
   },

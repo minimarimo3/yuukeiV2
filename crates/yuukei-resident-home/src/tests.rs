@@ -2474,6 +2474,29 @@
     }
 
     #[tokio::test]
+    async fn dialogue_generate_without_cooldown_invokes_every_time() -> Result<()> {
+        let mut world = llm_fallback_world();
+        world.llm_delegation.signals[0].cooldown_seconds = None;
+        let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+        let provider = DialogueGenerateProvider::new(JsonMap::from([
+            ("speak".to_string(), json!(true)),
+            ("text".to_string(), json!("毎回応える。")),
+        ]));
+        let calls = provider.calls();
+        home.register_provider(provider)?;
+
+        let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        first.payload.insert("text".to_string(), json!("一つ目"));
+        let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        second.payload.insert("text".to_string(), json!("二つ目"));
+
+        assert_eq!(home.ingest_event(first).await?.len(), 1);
+        assert_eq!(home.ingest_event(second).await?.len(), 1);
+        assert_eq!(calls.lock().expect("calls lock").len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dialogue_generate_daily_budget_suppresses_after_limit() -> Result<()> {
         let mut world = llm_fallback_world();
         world.llm_delegation.signals[0].cooldown_seconds = None;
