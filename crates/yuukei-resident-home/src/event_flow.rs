@@ -332,9 +332,25 @@ impl ResidentHome {
         command: RuntimeCommand,
         source_event: &RuntimeEvent,
     ) -> Result<RuntimeCommand> {
-        let command = self
+        let mut command = self
             .apply_extensions_before_command_emit(command, source_event)
             .await?;
+        let should_mark_speech_pending = command.kind == "dialogue.say"
+            && command
+                .payload
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+            && self
+                .capabilities
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?
+                .has_healthy_provider(SPEECH_SYNTHESIS_CAPABILITY);
+        if should_mark_speech_pending {
+            command
+                .payload
+                .insert("speechPending".to_string(), Value::Bool(true));
+        }
         let appended_command = self
             .event_log
             .append(NewEventLogRecord::from(command.clone()))?;

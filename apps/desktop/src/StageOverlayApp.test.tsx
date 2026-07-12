@@ -1,7 +1,11 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { StageOverlayApp, stageOverlayPassthrough } from "./StageOverlayApp";
+import {
+  bubbleTypingProgress,
+  StageOverlayApp,
+  stageOverlayPassthrough
+} from "./StageOverlayApp";
 import type { DesktopStageState, YuukeiClient } from "./yuukeiClient";
 
 describe("StageOverlayApp", () => {
@@ -14,10 +18,75 @@ describe("StageOverlayApp", () => {
     expect(stageOverlayPassthrough(true)).toBe(false);
   });
 
+  it("uses code-point reading progress for bubbles without pending speech", () => {
+    const bubble = stageState({
+      text: "A😀",
+      createdAtMs: 0,
+      durationMs: 1_000
+    }).bubbles[0];
+
+    expect(bubbleTypingProgress(bubble, 0)).toBe(0);
+    expect(bubbleTypingProgress(bubble, 90)).toBe(0.5);
+    expect(bubbleTypingProgress(bubble, 180)).toBe(1);
+  });
+
+  it("waits for speech, falls back after five seconds, and never lets late audio rewind text", () => {
+    const bubble = stageState({
+      text: "abc",
+      createdAtMs: 0,
+      durationMs: 7_500,
+      speechPending: true
+    }).bubbles[0];
+
+    expect(bubbleTypingProgress(bubble, 4_999)).toBe(0);
+    expect(bubbleTypingProgress(bubble, 5_135)).toBe(0.5);
+    expect(
+      bubbleTypingProgress(
+        { ...bubble, audioStartedAtMs: 6_000, audioDurationMs: 10_000 },
+        6_500
+      )
+    ).toBe(1);
+  });
+
+  it("uses audio duration as the typing clock before fallback begins", () => {
+    const bubble = stageState({
+      text: "abcd",
+      createdAtMs: 0,
+      durationMs: 8_000,
+      speechPending: true,
+      audioStartedAtMs: 1_000,
+      audioDurationMs: 2_000
+    }).bubbles[0];
+
+    expect(bubbleTypingProgress(bubble, 2_000)).toBe(0.5);
+    expect(bubbleTypingProgress(bubble, 3_000)).toBe(1);
+  });
+
+  it("keeps the full text layout while a pending-speech bubble shows its placeholder and choices", async () => {
+    const state = stageState({
+      text: "全文を確保",
+      createdAtMs: Date.now(),
+      speechPending: true,
+      choice: {
+        choiceId: "choice-typing",
+        choices: ["すぐ選ぶ"],
+        timeoutSeconds: 30
+      }
+    });
+
+    render(<StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />);
+
+    const placeholder = await screen.findByLabelText("読み上げを待っています");
+    const content = placeholder.parentElement;
+    expect(content?.querySelectorAll(".actor-bubble-character")).toHaveLength(5);
+    expect(content?.querySelectorAll('[data-typing-visible="false"]')).toHaveLength(5);
+    expect(screen.getByRole("button", { name: "すぐ選ぶ" })).toBeInTheDocument();
+  });
+
   it("renders stage bubbles from desktop stage state", async () => {
     render(<StageOverlayApp client={clientFixture(stageState())} monitorId="monitor-0" />);
 
-    const bubble = await screen.findByText("ここに出ます");
+    const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble).toBeInTheDocument();
     expect(bubble.closest(".stage-bubble")).toHaveClass(
@@ -62,7 +131,7 @@ describe("StageOverlayApp", () => {
       />
     );
 
-    const bubble = await screen.findByText("ここに出ます");
+    const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--above");
     expect(bubble.closest(".stage-bubble")).not.toHaveClass(
@@ -96,7 +165,7 @@ describe("StageOverlayApp", () => {
       />
     );
 
-    const bubble = await screen.findByText("ここに出ます");
+    const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass("stage-bubble--below");
     expect(bubble.closest(".stage-bubble")).not.toHaveClass(
@@ -130,7 +199,7 @@ describe("StageOverlayApp", () => {
       />
     );
 
-    const bubble = await screen.findByText("ここに出ます");
+    const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble.closest(".stage-bubble")).toHaveClass(
       "stage-bubble--left",
@@ -311,6 +380,14 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
   return partial as unknown as YuukeiClient;
 }
 
+function findBubbleText(text: string) {
+  return screen.findByText(
+    (_content, element) =>
+      element?.classList.contains("actor-bubble-content") === true &&
+      element.textContent === text
+  );
+}
+
 type StageActorFixture = Partial<
   Omit<DesktopStageState["actors"][number], "bounds" | "anchor">
 > & {
@@ -367,6 +444,7 @@ function stageState(
         text: "ここに出ます",
         createdAtMs: Date.now(),
         durationMs: 9000,
+        speechPending: false,
         ...bubble
       }
     ]

@@ -44,6 +44,8 @@ const ACTOR_COLLISION_PADDING: f64 = 16.0;
 const MIN_BUBBLE_DURATION_MS: u64 = 2_500;
 const MAX_READING_BUBBLE_DURATION_MS: u64 = 9_000;
 const MAX_BUBBLE_DURATION_MS: u64 = 30_000;
+const SPEECH_FALLBACK_GRACE_MS: u64 = 5_000;
+const AUDIO_LINGER_MS: u64 = 1_500;
 const STAGE_STATE_EVENT: &str = "yuukei-stage-state";
 
 #[derive(Debug, Default)]
@@ -142,13 +144,21 @@ pub struct StageBubble {
     pub choice: Option<StageBubbleChoice>,
     pub created_at_ms: u64,
     pub duration_ms: u64,
+    pub speech_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_duration_ms: Option<u64>,
+    #[serde(skip)]
+    pub base_duration_ms: u64,
 }
 
 #[derive(Clone, Debug)]
 struct QueuedStageBubble {
     bubble_id: String,
     text: String,
-    duration_ms: u64,
+    base_duration_ms: u64,
+    speech_pending: bool,
     scene_key: Option<String>,
 }
 
@@ -742,6 +752,20 @@ impl DesktopStageManager {
         app: &AppHandle,
         command: &RuntimeCommand,
     ) -> Result<(), String> {
+        if command.kind == "audio.play" {
+            let handled = {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                apply_audio_play_to_state(&mut state, command, now_ms())
+            };
+            return if handled {
+                self.emit_state(app)
+            } else {
+                Ok(())
+            };
+        }
         let Some(actor_id) = command_actor_id(command) else {
             return Ok(());
         };
@@ -937,7 +961,7 @@ fn apply_dialogue_say_to_state(
     let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
         return false;
     };
-    let duration_ms = command
+    let base_duration_ms = command
         .payload
         .get("durationMs")
         .and_then(Value::as_u64)
@@ -948,10 +972,16 @@ fn apply_dialogue_say_to_state(
                 .saturating_mul(90)
                 .clamp(MIN_BUBBLE_DURATION_MS, MAX_READING_BUBBLE_DURATION_MS)
         });
+    let speech_pending = command
+        .payload
+        .get("speechPending")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let queued = QueuedStageBubble {
         bubble_id: command.id.clone(),
         text: text.to_string(),
-        duration_ms,
+        base_duration_ms,
+        speech_pending,
         scene_key: command
             .causality
             .as_ref()
@@ -1044,9 +1074,51 @@ fn apply_dialogue_choices_to_state(
                 choice: Some(choice),
                 created_at_ms,
                 duration_ms: timeout_seconds.saturating_mul(1000),
+                speech_pending: false,
+                audio_started_at_ms: None,
+                audio_duration_ms: None,
+                base_duration_ms: timeout_seconds.saturating_mul(1000),
             },
         );
         state.bubble_scene_keys.insert(actor_id, None);
+    }
+    true
+}
+
+fn apply_audio_play_to_state(
+    state: &mut DesktopStageState,
+    command: &RuntimeCommand,
+    audio_started_at_ms: u64,
+) -> bool {
+    let Some(source_command_id) = command
+        .causality
+        .as_ref()
+        .and_then(|causality| causality.source_command_id.as_deref())
+    else {
+        return false;
+    };
+    let Some(audio_duration_ms) = command
+        .payload
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .filter(|duration_ms| *duration_ms > 0)
+    else {
+        return false;
+    };
+    let Some(bubble) = state.bubbles.get_mut(source_command_id) else {
+        return false;
+    };
+    bubble.audio_started_at_ms = Some(audio_started_at_ms);
+    bubble.audio_duration_ms = Some(audio_duration_ms);
+    let audio_lifetime_ms = audio_started_at_ms
+        .saturating_sub(bubble.created_at_ms)
+        .saturating_add(audio_duration_ms)
+        .saturating_add(AUDIO_LINGER_MS);
+    bubble.duration_ms = bubble.base_duration_ms.max(audio_lifetime_ms);
+    if let Some(choice) = bubble.choice.as_ref() {
+        bubble.duration_ms = bubble
+            .duration_ms
+            .max(choice.timeout_seconds.saturating_mul(1000));
     }
     true
 }
@@ -1209,7 +1281,17 @@ fn show_queued_bubble(
             text: queued.text,
             choice: None,
             created_at_ms,
-            duration_ms: queued.duration_ms,
+            duration_ms: if queued.speech_pending {
+                queued
+                    .base_duration_ms
+                    .saturating_add(SPEECH_FALLBACK_GRACE_MS)
+            } else {
+                queued.base_duration_ms
+            },
+            speech_pending: queued.speech_pending,
+            audio_started_at_ms: None,
+            audio_duration_ms: None,
+            base_duration_ms: queued.base_duration_ms,
         },
     );
 }

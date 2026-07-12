@@ -357,6 +357,9 @@ export type StageBubble = {
   };
   createdAtMs: number;
   durationMs: number;
+  speechPending: boolean;
+  audioStartedAtMs?: number;
+  audioDurationMs?: number;
 };
 
 export type DesktopStageState = {

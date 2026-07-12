@@ -43,6 +43,39 @@ const DEFAULT_BUBBLE_SIZE: StageBubbleSize = {
   width: 260,
   height: 72
 };
+const SPEECH_FALLBACK_GRACE_MS = 5_000;
+const READING_MS_PER_CODE_POINT = 90;
+
+export function bubbleTypingProgress(bubble: StageBubble, now: number): number {
+  const characterCount = [...bubble.text].length;
+  if (characterCount === 0) return 1;
+
+  const fallbackStartMs = bubble.createdAtMs +
+    (bubble.speechPending ? SPEECH_FALLBACK_GRACE_MS : 0);
+  const fallbackDurationMs = Math.min(
+    characterCount * READING_MS_PER_CODE_POINT,
+    Math.max(
+      bubble.durationMs - (bubble.speechPending ? SPEECH_FALLBACK_GRACE_MS : 0),
+      1
+    ) * 0.8
+  );
+  const fallbackProgress = now < fallbackStartMs
+    ? 0
+    : clampUnit((now - fallbackStartMs) / Math.max(fallbackDurationMs, 1));
+  if (!bubble.speechPending) return fallbackProgress;
+
+  const audioProgress =
+    typeof bubble.audioStartedAtMs === "number" &&
+    typeof bubble.audioDurationMs === "number" &&
+    bubble.audioDurationMs > 0
+      ? clampUnit((now - bubble.audioStartedAtMs) / bubble.audioDurationMs)
+      : 0;
+  return Math.max(fallbackProgress, audioProgress);
+}
+
+function clampUnit(value: number): number {
+  return Math.min(Math.max(value, 0), 1);
+}
 
 export function StageOverlayApp({
   monitorId,
@@ -248,6 +281,13 @@ function StageBubbleView({
 }) {
   const { ref } = useMeasuredBubbleSize(item.bubble.bubbleId, onSizeChange);
   const choice = item.bubble.choice;
+  const typing = useBubbleTypingProgress(item.bubble);
+  const characters = [...item.bubble.text];
+  const visibleCharacterCount = Math.floor(typing.progress * characters.length);
+  const waitingForSpeech =
+    item.bubble.speechPending &&
+    item.bubble.audioStartedAtMs === undefined &&
+    typing.now < item.bubble.createdAtMs + SPEECH_FALLBACK_GRACE_MS;
   const visibleChoices =
     choice && !hiddenChoiceIds.has(choice.choiceId) ? choice.choices : [];
   const sideClass =
@@ -289,7 +329,26 @@ function StageBubbleView({
     >
       <span className="actor-bubble-tail" aria-hidden="true" />
       {item.bubble.text ? (
-        <span className="actor-bubble-content">{item.bubble.text}</span>
+        <span
+          className="actor-bubble-content"
+          data-typing-progress={typing.progress}
+        >
+          {characters.map((character, index) => (
+            <span
+              className="actor-bubble-character"
+              data-typing-visible={index < visibleCharacterCount}
+              key={`${index}:${character}`}
+              style={{ visibility: index < visibleCharacterCount ? "visible" : "hidden" }}
+            >
+              {character}
+            </span>
+          ))}
+          {waitingForSpeech ? (
+            <span className="actor-bubble-placeholder" aria-label="読み上げを待っています">
+              …
+            </span>
+          ) : null}
+        </span>
       ) : null}
       {choice && visibleChoices.length > 0 ? (
         <span className="actor-bubble-choices">
@@ -310,6 +369,51 @@ function StageBubbleView({
       ) : null}
     </div>
   );
+}
+
+function useBubbleTypingProgress(bubble: StageBubble) {
+  const [typing, setTyping] = useState(() => {
+    const now = Date.now();
+    return {
+      bubbleId: bubble.bubbleId,
+      now,
+      progress: bubbleTypingProgress(bubble, now)
+    };
+  });
+
+  useEffect(() => {
+    let timer: number | undefined;
+    const tick = () => {
+      const now = Date.now();
+      const nextProgress = bubbleTypingProgress(bubble, now);
+      setTyping((current) => ({
+        bubbleId: bubble.bubbleId,
+        now,
+        progress:
+          current.bubbleId === bubble.bubbleId
+            ? Math.max(current.progress, nextProgress)
+            : nextProgress
+      }));
+      if (nextProgress >= 1 && timer !== undefined) {
+        window.clearInterval(timer);
+        timer = undefined;
+      }
+    };
+
+    tick();
+    if (bubbleTypingProgress(bubble, Date.now()) < 1) {
+      timer = window.setInterval(tick, 50);
+    }
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [bubble]);
+
+  if (typing.bubbleId !== bubble.bubbleId) {
+    const now = Date.now();
+    return { now, progress: bubbleTypingProgress(bubble, now) };
+  }
+  return typing;
 }
 
 function useMeasuredBubbleSize(

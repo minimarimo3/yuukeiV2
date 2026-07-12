@@ -925,8 +925,10 @@ async fn speech_synthesis_success_emits_audio_play_after_dialogue() -> Result<()
         .find(|command| command.kind == "dialogue.say")
         .expect("dialogue command");
     assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+    assert_eq!(dialogue.payload["speechPending"], true);
     let broadcast_dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
     assert_eq!(broadcast_dialogue.id, dialogue.id);
+    assert_eq!(broadcast_dialogue.payload["speechPending"], true);
     let audio = next_command_of_kind(&mut receiver, "audio.play").await;
     assert_eq!(audio.source, "capability");
     assert_eq!(audio.payload["audioPath"], "/tmp/yuukei-voicevox/cmd_1.wav");
@@ -949,6 +951,9 @@ async fn speech_synthesis_success_emits_audio_play_after_dialogue() -> Result<()
 
     let records = home.event_log().read(EventLogQuery::default())?.records;
     assert!(records.iter().any(|record| record.kind == "audio.play"));
+    assert!(records.iter().any(|record| {
+        record.kind == "dialogue.say" && record.payload["speechPending"] == true
+    }));
     assert!(records
         .iter()
         .any(|record| record.kind == "capability.invocation.request"
@@ -975,6 +980,7 @@ async fn speech_synthesis_route_absent_keeps_dialogue_without_audio() -> Result<
         .any(|command| command.kind == "dialogue.say"));
     let dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
     assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
+    assert!(dialogue.payload.get("speechPending").is_none());
     let no_audio = tokio::time::timeout(
         std::time::Duration::from_millis(50),
         next_command_of_kind(&mut receiver, "audio.play"),
@@ -988,6 +994,29 @@ async fn speech_synthesis_route_absent_keeps_dialogue_without_audio() -> Result<
         .iter()
         .any(|record| record.kind == "capability.invocation.request"
             && record.payload["capability"] == SPEECH_SYNTHESIS_CAPABILITY));
+    Ok(())
+}
+
+#[tokio::test]
+async fn speech_synthesis_does_not_mark_empty_dialogue_as_pending() -> Result<()> {
+    let provider = SpeechSynthesisProvider::new(JsonMap::new());
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        world_pack(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+    command.payload.insert("text".to_string(), json!(" \t "));
+    let event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+
+    let emitted = home.emit_command_for_event(command, &event).await?;
+
+    assert!(emitted.payload.get("speechPending").is_none());
     Ok(())
 }
 

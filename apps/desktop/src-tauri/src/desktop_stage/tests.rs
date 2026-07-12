@@ -997,6 +997,118 @@ fn dialogue_say_uses_reading_time_without_duration_and_clamps_explicit_duration(
 }
 
 #[test]
+fn speech_pending_bubble_adds_the_fallback_grace_to_its_base_duration() {
+    let mut state = bubble_state(&["yuukei"]);
+    let mut command = say("pending", "yuukei", "短い", Some("scene-a"), None);
+    command
+        .payload
+        .insert("speechPending".to_string(), Value::Bool(true));
+
+    apply_dialogue_say_to_state(&mut state, &command, 10);
+
+    let bubble = only_bubble(&state);
+    assert!(bubble.speech_pending);
+    assert_eq!(bubble.base_duration_ms, MIN_BUBBLE_DURATION_MS);
+    assert_eq!(
+        bubble.duration_ms,
+        MIN_BUBBLE_DURATION_MS + SPEECH_FALLBACK_GRACE_MS
+    );
+    assert_eq!(bubble.audio_started_at_ms, None);
+    assert_eq!(bubble.audio_duration_ms, None);
+}
+
+#[test]
+fn audio_play_extends_only_the_visible_matching_bubble() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("visible", "yuukei", "短い", Some("scene-a"), None),
+        10,
+    );
+
+    assert!(apply_audio_play_to_state(
+        &mut state,
+        &audio_play("visible", Some(3_000)),
+        1_000
+    ));
+    let bubble = only_bubble(&state);
+    assert_eq!(bubble.audio_started_at_ms, Some(1_000));
+    assert_eq!(bubble.audio_duration_ms, Some(3_000));
+    assert_eq!(bubble.duration_ms, 990 + 3_000 + AUDIO_LINGER_MS);
+    let snapshot = serde_json::to_value(state.snapshot()).expect("snapshot JSON");
+    assert_eq!(snapshot["bubbles"][0]["audioStartedAtMs"], 1_000);
+    assert_eq!(snapshot["bubbles"][0]["audioDurationMs"], 3_000);
+
+    let before = bubble.clone();
+    assert!(!apply_audio_play_to_state(
+        &mut state,
+        &audio_play("missing", Some(4_000)),
+        2_000
+    ));
+    assert!(!apply_audio_play_to_state(
+        &mut state,
+        &audio_play("visible", Some(0)),
+        2_000
+    ));
+    assert!(!apply_audio_play_to_state(
+        &mut state,
+        &audio_play("visible", None),
+        2_000
+    ));
+    let mut invalid_duration = audio_play("visible", None);
+    invalid_duration
+        .payload
+        .insert("durationMs".to_string(), Value::String("long".to_string()));
+    assert!(!apply_audio_play_to_state(
+        &mut state,
+        &invalid_duration,
+        2_000
+    ));
+    assert_eq!(only_bubble(&state), &before);
+}
+
+#[test]
+fn audio_play_for_a_queued_or_replaced_bubble_does_not_change_visible_state() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("visible", "yuukei", "表示", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("queued", "yuukei", "待機", Some("scene-a"), None),
+        20,
+    );
+    let before = only_bubble(&state).clone();
+
+    assert!(!apply_audio_play_to_state(
+        &mut state,
+        &audio_play("queued", Some(2_000)),
+        500
+    ));
+    assert_eq!(only_bubble(&state), &before);
+}
+
+#[test]
+fn audio_play_does_not_shorten_an_unresolved_choice_timeout() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_dialogue_say_to_state(
+        &mut state,
+        &say("visible", "yuukei", "選んで", Some("scene-a"), None),
+        10,
+    );
+    apply_dialogue_choices_to_state(&mut state, &choices("choice", "yuukei", 120), 20);
+
+    assert!(apply_audio_play_to_state(
+        &mut state,
+        &audio_play("visible", Some(1_000)),
+        100
+    ));
+    assert_eq!(only_bubble(&state).duration_ms, 120_000);
+}
+
+#[test]
 fn standalone_choices_respect_their_timeout_up_to_six_hundred_seconds() {
     let mut state = bubble_state(&["yuukei"]);
     apply_dialogue_choices_to_state(&mut state, &choices("two-minutes", "yuukei", 120), 10);
@@ -1106,6 +1218,21 @@ fn say(
         source_command_id: None,
         trace_id: None,
     });
+    command
+}
+
+fn audio_play(source_command_id: &str, duration_ms: Option<u64>) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new("audio.play", "capability", "resident-default");
+    command.causality = Some(yuukei_protocol::Causality {
+        source_event_id: None,
+        source_command_id: Some(source_command_id.to_string()),
+        trace_id: None,
+    });
+    if let Some(duration_ms) = duration_ms {
+        command
+            .payload
+            .insert("durationMs".to_string(), Value::Number(duration_ms.into()));
+    }
     command
 }
 
