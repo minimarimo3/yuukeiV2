@@ -575,6 +575,28 @@ input {
   min-width: 0;
 }
 
+.app-settings-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.app-settings-copy > .settings-title {
+  margin-top: 16px;
+}
+
+.app-settings-copy > h2 + .settings-title {
+  margin-top: 0;
+}
+
+.app-settings-copy > .settings-note {
+  margin-top: -3px;
+}
+
+.app-settings-copy > .extension-toggle {
+  margin: 4px 0;
+  padding: 6px 0;
+}
+
 .settings-copy h2 {
   margin: 0 0 6px;
   color: var(--text);
@@ -1091,7 +1113,6 @@ input {
 
 .extension-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: start;
   min-height: 54px;
@@ -1099,6 +1120,14 @@ input {
   border-radius: var(--radius);
   padding: 12px;
   background: var(--panel-muted);
+}
+
+.extension-row-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
 }
 
 .extension-main {
@@ -1162,7 +1191,9 @@ input {
 
 .extension-actions {
   display: flex;
+  justify-content: flex-end;
   flex-wrap: wrap;
+  flex: none;
   gap: 6px;
 }
 
@@ -1432,6 +1463,16 @@ input {
 .command-card pre {
   margin: 0;
   white-space: pre-wrap;
+}
+
+@media (max-width: 900px) {
+  .extension-row-header {
+    flex-direction: column;
+  }
+
+  .extension-actions {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 700px) {

@@ -683,7 +683,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       panelId: "settings-app-panel",
       content: (
         <>
-          <div className="settings-copy">
+          <div className="settings-copy app-settings-copy">
             <h2>App</h2>
             <p className="settings-title">おしゃべりの間隔</p>
             <p className="settings-note">
@@ -1084,7 +1084,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                     className="extension-row"
                     key={extension.extensionId}
                   >
-                    <div className="extension-main">
+                    <div className="extension-row-header">
                       <label className="extension-toggle">
                         <input
                           type="checkbox"
@@ -1115,6 +1115,51 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                           </small>
                         </span>
                       </label>
+                      <div className="extension-actions">
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={
+                            changingExtensions || !canReorderHook || hookIndex === 0
+                          }
+                          onClick={() => moveExtension(extension.extensionId, -1)}
+                        >
+                          上へ
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={
+                            changingExtensions ||
+                            !canReorderHook ||
+                            hookIndex ===
+                              orderedBeforeCommandEmitExtensions.length - 1
+                          }
+                          onClick={() => moveExtension(extension.extensionId, 1)}
+                        >
+                          下へ
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact-button"
+                          disabled={changingExtensions}
+                          onClick={() =>
+                            restartExtensionProcess(extension.extensionId)
+                          }
+                        >
+                          再起動
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-button compact-button"
+                          disabled={changingExtensions}
+                          onClick={() => uninstallExtension(extension.extensionId)}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </div>
+                    <div className="extension-main">
                       {voicevoxCreditText(extension) ? (
                         <p className="extension-credit-note">
                           {voicevoxCreditText(extension)}
@@ -1153,49 +1198,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         {extension.lastLoadError}
                       </p>
                     ) : null}
-                    <div className="extension-actions">
-                      <button
-                        type="button"
-                        className="secondary-button compact-button"
-                        disabled={
-                          changingExtensions || !canReorderHook || hookIndex === 0
-                        }
-                        onClick={() => moveExtension(extension.extensionId, -1)}
-                      >
-                        上へ
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button compact-button"
-                        disabled={
-                          changingExtensions ||
-                          !canReorderHook ||
-                          hookIndex ===
-                            orderedBeforeCommandEmitExtensions.length - 1
-                        }
-                        onClick={() => moveExtension(extension.extensionId, 1)}
-                      >
-                        下へ
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button compact-button"
-                        disabled={changingExtensions}
-                        onClick={() =>
-                          restartExtensionProcess(extension.extensionId)
-                        }
-                      >
-                        再起動
-                      </button>
-                      <button
-                        type="button"
-                        className="danger-button compact-button"
-                        disabled={changingExtensions}
-                        onClick={() => uninstallExtension(extension.extensionId)}
-                      >
-                        削除
-                      </button>
-                    </div>
                   </article>
                 );
               })}
