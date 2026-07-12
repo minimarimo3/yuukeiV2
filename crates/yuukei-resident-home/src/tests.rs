@@ -979,7 +979,7 @@ async fn speech_synthesis_route_absent_keeps_dialogue_without_audio() -> Result<
         .any(|command| command.kind == "dialogue.say"));
     let dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
     assert_eq!(dialogue.payload["text"], "聞こえています。こんにちは");
-    assert!(dialogue.payload.get("speechPending").is_none());
+    assert!(!dialogue.payload.contains_key("speechPending"));
     let no_audio = tokio::time::timeout(
         std::time::Duration::from_millis(50),
         next_command_of_kind(&mut receiver, "audio.play"),
@@ -1015,7 +1015,7 @@ async fn speech_synthesis_does_not_mark_empty_dialogue_as_pending() -> Result<()
 
     let emitted = home.emit_command_for_event(command, &event).await?;
 
-    assert!(emitted.payload.get("speechPending").is_none());
+    assert!(!emitted.payload.contains_key("speechPending"));
     Ok(())
 }
 
