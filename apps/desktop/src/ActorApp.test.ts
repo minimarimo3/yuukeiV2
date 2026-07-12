@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import * as THREE from "three";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
+import * as THREE from "three";
+import { describe, expect, it, vi } from "vitest";
 import {
   actorIdFromLocation,
   actorSurfaceAssetsForActor,

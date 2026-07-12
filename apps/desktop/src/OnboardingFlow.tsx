@@ -61,7 +61,10 @@ export function OnboardingFlow({
           あとで
         </button>
       </header>
-      <div className="onboarding-progress" aria-label="オンボーディングの進行">
+      <section
+        className="onboarding-progress"
+        aria-label="オンボーディングの進行"
+      >
         {["ようこそ", "AI", "観測", "完了"].map((label, index) => (
           <span
             className={[
@@ -75,7 +78,7 @@ export function OnboardingFlow({
             {label}
           </span>
         ))}
-      </div>
+      </section>
       <div className="onboarding-panel">
         {clampedStep === 0 ? (
           <>

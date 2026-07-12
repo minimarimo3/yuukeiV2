@@ -1,23 +1,14 @@
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
 } from "react";
-import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  tauriYuukeiClient,
-  type AppSettingsState,
-  type DesktopStageState,
-  type StageActor,
-  type StageBubble,
-  type StageMonitor,
-  type StageRect as ClientStageRect,
-  type YuukeiClient,
-} from "./yuukeiClient";
+import { ConversationComposer } from "./ConversationComposer";
 import {
   computeStageBubblePlacement,
   intersectsViewport,
@@ -26,7 +17,16 @@ import {
   type StageBubbleSize,
   type StageRect,
 } from "./stageBubbleLayout";
-import { ConversationComposer } from "./ConversationComposer";
+import {
+  type AppSettingsState,
+  type StageRect as ClientStageRect,
+  type DesktopStageState,
+  type StageActor,
+  type StageBubble,
+  type StageMonitor,
+  tauriYuukeiClient,
+  type YuukeiClient,
+} from "./yuukeiClient";
 
 type StageOverlayAppProps = {
   monitorId?: string | null;
@@ -327,6 +327,7 @@ function StageBubbleView({
   } as CSSProperties;
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover/focusで吹き出しの自動消滅を止めるための意図的なフォーカス可能要素(操作要素ではない)
     <div
       className={className}
       data-actor-id={item.actor.actorId}
@@ -339,6 +340,7 @@ function StageBubbleView({
       onWheel={onWheel}
       ref={ref}
       style={style}
+      /* biome-ignore lint/a11y/noNoninteractiveTabindex: hover/focusで吹き出しの自動消滅を止めるための意図的なフォーカス可能要素(操作要素ではない) */
       tabIndex={0}
     >
       <span className="actor-bubble-tail" aria-hidden="true" />
@@ -351,6 +353,7 @@ function StageBubbleView({
             <span
               className="actor-bubble-character"
               data-typing-visible={index < visibleCharacterCount}
+              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えが発生しないリストで、要素値が重複しうるためindexをkeyに含めるのが正しい */
               key={`${index}:${character}`}
               style={{
                 visibility:
@@ -364,6 +367,7 @@ function StageBubbleView({
             <span
               className="actor-bubble-placeholder"
               aria-label="読み上げを待っています"
+              role="status"
             >
               …
             </span>
@@ -375,6 +379,7 @@ function StageBubbleView({
           {visibleChoices.map((label, index) => (
             <button
               className="actor-bubble-choice"
+              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えが発生しないリストで、要素値が重複しうるためindexをkeyに含めるのが正しい */
               key={`${choice.choiceId}:${index}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -549,8 +554,7 @@ function composerForMonitor(
 ): { left: number; top: number } | null {
   const composer = stageState?.conversationComposer;
   if (
-    !composer ||
-    !composer.anchor.visible ||
+    !composer?.anchor.visible ||
     !monitor ||
     (composer.monitorId && composer.monitorId !== monitor.id)
   ) {
@@ -638,8 +642,7 @@ function computeRenderItems(
   )) {
     const actor = actorsById.get(bubble.actorId);
     if (
-      !actor ||
-      !actor.visible ||
+      !actor?.visible ||
       !intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)
     ) {
       continue;

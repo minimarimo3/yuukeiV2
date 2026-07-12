@@ -7,8 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type {
   AppSettingsState,
@@ -922,7 +922,9 @@ describe("App", () => {
   it("switches to a selected World Pack and refreshes the snapshot", async () => {
     const customSnapshot = snapshot("外部Packです");
     customSnapshot.worldPackId = "custom-yuukei";
-    customSnapshot.actors.yuukei!.displayName = "Custom Yuukei";
+    const yuukeiActor = customSnapshot.actors.yuukei;
+    if (!yuukeiActor) throw new Error("yuukei actor missing in fixture");
+    yuukeiActor.displayName = "Custom Yuukei";
     const client = clientFixture({
       openWorldPackDirectory: vi.fn(async () => "/Users/example/custom-pack"),
       selectWorldPackDirectory: vi.fn(async () => ({
@@ -1125,7 +1127,9 @@ describe("App", () => {
       );
     });
 
-    await userEvent.click(screen.getAllByRole("button", { name: "下へ" })[0]!);
+    const [moveDownButton] = screen.getAllByRole("button", { name: "下へ" });
+    if (!moveDownButton) throw new Error("move down button missing");
+    await userEvent.click(moveDownButton);
     await waitFor(() => {
       expect(client.setExtensionHookOrder).toHaveBeenCalledWith(
         "beforeCommandEmit",
@@ -1133,7 +1137,9 @@ describe("App", () => {
       );
     });
 
-    await userEvent.click(screen.getAllByRole("button", { name: "削除" })[1]!);
+    const [, removeButton] = screen.getAllByRole("button", { name: "削除" });
+    if (!removeButton) throw new Error("remove button missing");
+    await userEvent.click(removeButton);
     await waitFor(() => {
       expect(client.uninstallExtension).toHaveBeenCalledWith("nya-suffix");
     });

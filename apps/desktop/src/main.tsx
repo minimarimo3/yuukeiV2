@@ -1,6 +1,6 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ActorApp, actorIdFromLocation } from "./ActorApp";
 import { App } from "./App";
 import { StageOverlayApp, stageOverlayIdFromLocation } from "./StageOverlayApp";

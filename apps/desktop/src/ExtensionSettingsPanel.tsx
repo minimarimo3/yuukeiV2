@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import type { ExtensionSettingField } from "@yuukei/protocol";
+import { useEffect, useState } from "react";
 import type {
   ExtensionCapabilityUsage,
   ExtensionSettingsChangeResult,
@@ -94,6 +94,7 @@ export function ExtensionSettingsForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 編集中ドラフトを保護するため、リセット条件をid/schema/valuesの変化に限定する意図的設計
   useEffect(() => {
     setDraft(initialSettingDraft(extension));
     setSecretDraft({});
@@ -115,10 +116,7 @@ export function ExtensionSettingsForm({
       const nonSecretValues: Record<string, unknown> = {};
       for (const field of fields) {
         if (field.type === "secret") continue;
-        const hasSavedValue = Object.hasOwn(
-          extension.settingValues,
-          field.key,
-        );
+        const hasSavedValue = Object.hasOwn(extension.settingValues, field.key);
         if (!hasSavedValue && !dirtyKeys.has(field.key)) continue;
         if (
           hasSavedValue &&

@@ -1,14 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { DaihonDiagnosticsPanel } from "./DaihonDiagnosticsPanel";
-import {
-  ExtensionSettingsForm,
-  ExtensionUsageSection,
-} from "./ExtensionSettingsPanel";
-import { EventLogSettingsPanel } from "./EventLogSettingsPanel";
-import { MemorySettingsPanel } from "./MemorySettingsPanel";
-import { ObservationToggle } from "./ObservationToggle";
-import { OnboardingFlow } from "./OnboardingFlow";
+import { useEffect, useMemo, useState } from "react";
 import {
   extensionPermissionRows,
   extensionRuntimeStatusLabel,
@@ -17,8 +8,16 @@ import {
   subscribesToBeforeCommandEmit,
   voicevoxCreditText,
 } from "./appShared";
+import { DaihonDiagnosticsPanel } from "./DaihonDiagnosticsPanel";
+import { EventLogSettingsPanel } from "./EventLogSettingsPanel";
 import {
-  tauriYuukeiClient,
+  ExtensionSettingsForm,
+  ExtensionUsageSection,
+} from "./ExtensionSettingsPanel";
+import { MemorySettingsPanel } from "./MemorySettingsPanel";
+import { ObservationToggle } from "./ObservationToggle";
+import { OnboardingFlow } from "./OnboardingFlow";
+import {
   type AppSettingsState,
   type CapabilityUsageState,
   type ConversationSendShortcut,
@@ -34,6 +33,7 @@ import {
   type ResidentMemoryState,
   type RuntimeSettingsState,
   type SceneHistoryState,
+  tauriYuukeiClient,
   type WorldPackSelectionState,
   type YuukeiClient,
 } from "./yuukeiClient";
@@ -114,6 +114,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
     useState(false);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: loadMemories/loadEventLogは毎レンダー再生成されるため依存に含めない(client変更時のみ再接続する意図)
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
@@ -994,7 +995,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <p className="settings-title">このWorld Packの実行履歴</p>
           <p className="settings-path">{sceneHistory?.historyPath ?? ""}</p>
           {sceneHistory?.entries.length ? (
-            <div className="scene-history-list" aria-label="シーン実行履歴">
+            <section className="scene-history-list" aria-label="シーン実行履歴">
               {sceneHistory.entries.map((entry) => (
                 <article
                   className="scene-history-row"
@@ -1009,7 +1010,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                   </time>
                 </article>
               ))}
-            </div>
+            </section>
           ) : (
             <p className="settings-note">まだ記録されたシーンはありません。</p>
           )}
@@ -1365,7 +1366,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <div className="settings-sidebar-head">
             <h2>設定</h2>
           </div>
-          <nav
+          <div
             className="settings-menu"
             aria-label="設定カテゴリ"
             role="tablist"
@@ -1390,7 +1391,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 </button>
               );
             })}
-          </nav>
+          </div>
         </aside>
         <div className="settings-content">
           <header className="settings-content-header">

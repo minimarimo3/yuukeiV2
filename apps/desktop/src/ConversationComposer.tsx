@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { type KeyboardEvent, useState } from "react";
 import type { ConversationSendShortcut } from "./yuukeiClient";
 
 type ConversationComposerProps = {
@@ -64,6 +64,7 @@ export function ConversationComposer({
         住人に話しかける
       </label>
       <textarea
+        /* biome-ignore lint/a11y/noAutofocus: コンポーザ表示時に即入力可能にする意図的なフォーカス */
         autoFocus
         id="conversation-composer-input"
         value={text}

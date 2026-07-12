@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   idlePointerGesture,
-  reducePointerGesture,
   type PointerGestureEffect,
   type PointerGestureEvent,
   type PointerGestureState,
+  reducePointerGesture,
 } from "./pointerGesture";
 
 const gestureId = 11;

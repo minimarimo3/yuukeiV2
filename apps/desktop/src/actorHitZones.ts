@@ -19,8 +19,6 @@ export type ResolvedActorHitZone = {
   events: string[];
 };
 
-type HitZoneOrigin = "auto" | "pack";
-
 export const HUMANOID_HIT_ZONE_BONES = [
   {
     id: "head",
@@ -139,11 +137,7 @@ export function mergeHitZoneDefinitions(
   const merged = new Map<string, ResolvedActorHitZone>();
 
   for (const definition of autoDefinitions) {
-    const normalized = normalizeHitZoneDefinition(
-      definition,
-      undefined,
-      "auto",
-    );
+    const normalized = normalizeHitZoneDefinition(definition, undefined);
     if (normalized) {
       merged.set(normalized.id, normalized);
     }
@@ -151,7 +145,7 @@ export function mergeHitZoneDefinitions(
 
   for (const definition of packDefinitions) {
     const fallback = merged.get(definition.id.trim());
-    const normalized = normalizeHitZoneDefinition(definition, fallback, "pack");
+    const normalized = normalizeHitZoneDefinition(definition, fallback);
     if (normalized) {
       merged.set(normalized.id, normalized);
     }
@@ -357,7 +351,6 @@ export function pointerButtonName(button: number): string {
 function normalizeHitZoneDefinition(
   definition: ActorHitZoneDefinition,
   fallback: ResolvedActorHitZone | undefined,
-  origin: HitZoneOrigin,
 ): ResolvedActorHitZone | null {
   const id = definition.id.trim();
   if (!id) return null;

@@ -1,52 +1,52 @@
+import {
+  type VRM,
+  VRMHumanBoneName,
+  VRMLoaderPlugin,
+  VRMUtils,
+} from "@pixiv/three-vrm";
+import {
+  createVRMAnimationClip,
+  type VRMAnimation,
+  VRMAnimationLoaderPlugin,
+} from "@pixiv/three-vrm-animation";
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import {
-  VRMHumanBoneName,
-  VRMLoaderPlugin,
-  VRMUtils,
-  type VRM,
-} from "@pixiv/three-vrm";
-import {
-  createVRMAnimationClip,
-  VRMAnimationLoaderPlugin,
-  type VRMAnimation,
-} from "@pixiv/three-vrm-animation";
-import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
-import type { ResidentSnapshot, RuntimeCommand } from "@yuukei/protocol";
-import {
-  tauriYuukeiClient,
-  type AvatarGesturePokeInput,
-  type ActorSurfaceAsset,
-  type ActorSurfaceRendererAsset,
-  type StageAnchor,
-  type YuukeiClient,
-} from "./yuukeiClient";
-import {
   autoHitZoneDefinitions,
   buildAvatarGesturePokePayload,
   dominantSkinBoneForIntersection,
+  type HitSurface,
   hitSurfaceForIntersection,
   hitZoneForLineageOrHumanoidBone,
   humanoidBoneNameForObject,
   mergeHitZoneDefinitions,
-  type HitSurface,
   type ResolvedActorHitZone,
 } from "./actorHitZones";
 import {
-  POINTER_GESTURE_HOLD_MS,
-  POINTER_GESTURE_MOVE_THRESHOLD_PX,
+  type ActorHit,
   acceptsNewPointerInput,
   idlePointerGesture,
-  reducePointerGesture,
-  shouldStartPointerGestureDrag,
-  type ActorHit,
+  POINTER_GESTURE_HOLD_MS,
+  POINTER_GESTURE_MOVE_THRESHOLD_PX,
   type PointerGestureEffect,
   type PointerGestureEvent,
   type PointerGestureState,
+  reducePointerGesture,
   type SemanticActorHit,
+  shouldStartPointerGestureDrag,
 } from "./pointerGesture";
 import { createPointerGestureSemanticQueue } from "./pointerGestureSemanticQueue";
+import {
+  type ActorSurfaceAsset,
+  type ActorSurfaceRendererAsset,
+  type AvatarGesturePokeInput,
+  type StageAnchor,
+  tauriYuukeiClient,
+  type YuukeiClient,
+} from "./yuukeiClient";
 
 type ActorAppProps = {
   actorId?: string | null;
