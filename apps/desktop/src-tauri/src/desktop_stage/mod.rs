@@ -16,6 +16,7 @@ mod geometry;
 mod layout;
 #[cfg(test)]
 mod tests;
+mod walk;
 mod windows;
 #[cfg(windows)]
 mod windows_caption;
@@ -23,7 +24,9 @@ use drag::{
     begin_actor_drag_in_state, move_actor_drag_in_state, take_actor_drag_in_state, ActiveActorDrag,
 };
 use geometry::*;
+pub(crate) use geometry::{command_actor_id, foot_anchor};
 use layout::*;
+use walk::*;
 pub(crate) use windows::enforce_borderless;
 #[allow(unused_imports)]
 pub use windows::{
@@ -57,6 +60,7 @@ struct DesktopStageState {
     terrain_windows: BTreeMap<String, DesktopWindowFrame>,
     persisted_anchors: BTreeMap<String, StageFootAnchor>,
     active_drags: BTreeMap<String, ActiveActorDrag>,
+    active_walks: BTreeMap<String, ActiveStageWalk>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
 }
@@ -71,6 +75,7 @@ impl Default for DesktopStageState {
             terrain_windows: BTreeMap::new(),
             persisted_anchors: BTreeMap::new(),
             active_drags: BTreeMap::new(),
+            active_walks: BTreeMap::new(),
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: false,
         }
@@ -294,6 +299,9 @@ impl DesktopStageManager {
             state
                 .perches
                 .retain(|actor_id, _| actor_ids.contains(actor_id));
+            state
+                .active_walks
+                .retain(|actor_id, _| actor_ids.contains(actor_id));
         }
         self.emit_state(app)
     }
@@ -324,25 +332,101 @@ impl DesktopStageManager {
         Ok(state.persisted_anchors.clone())
     }
 
+    pub fn cancel_actor_walk(&self, actor_id: &str) -> Result<Option<String>, String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        Ok(cancel_actor_walk_in_state(&mut state, actor_id))
+    }
+
+    pub fn start_actor_walk(
+        &self,
+        app: &AppHandle,
+        command: &RuntimeCommand,
+    ) -> Result<Option<StageWalkStarted>, String> {
+        let Some(actor_id) = command_actor_id(command) else {
+            return Ok(None);
+        };
+        let Some(destination) = command
+            .payload
+            .get("destination")
+            .and_then(Value::as_str)
+            .and_then(WalkDestination::parse)
+        else {
+            return Ok(None);
+        };
+        let speed_px_per_sec = command
+            .payload
+            .get("speedPxPerSec")
+            .and_then(Value::as_f64)
+            .unwrap_or(DEFAULT_WALK_SPEED_PX_PER_SEC);
+        let started = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            if !state.actors.contains_key(&actor_id) {
+                return Ok(None);
+            }
+            start_actor_walk_in_state(
+                &mut state,
+                &actor_id,
+                &command.id,
+                destination,
+                speed_px_per_sec,
+            )?
+        };
+        if let Some(window) = app.get_webview_window(&started.window_label) {
+            apply_actor_window_bounds(&window, &started.bounds)?;
+        }
+        self.emit_state(app)?;
+        Ok(Some(started))
+    }
+
+    pub fn advance_actor_walk(
+        &self,
+        app: &AppHandle,
+        actor_id: &str,
+        walk_id: &str,
+        delta_seconds: f64,
+    ) -> Result<Option<WalkStep>, String> {
+        let progress = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            advance_actor_walk_in_state(&mut state, actor_id, walk_id, delta_seconds)
+        };
+        let Some(progress) = progress else {
+            return Ok(None);
+        };
+        if let Some(window) = app.get_webview_window(&actor_window_label(actor_id)) {
+            apply_actor_window_bounds(&window, &progress.bounds)?;
+        }
+        self.emit_state(app)?;
+        Ok(Some(progress))
+    }
+
     pub fn begin_actor_drag(
         &self,
         app: &AppHandle,
         window: &WebviewWindow,
         actor_id: &str,
-    ) -> Result<(ActorWindowDragStarted, Option<StagePerchEnded>), String> {
+    ) -> Result<(ActorWindowDragStarted, Option<StagePerchEnded>, Option<String>), String> {
         let bounds = window_bounds(window)?;
         let session_id = uuid::Uuid::new_v4().to_string();
-        let ended = {
+        let (ended, cancelled_walk_id) = {
             let mut state = self
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
             begin_actor_drag_in_state(&mut state, actor_id, &session_id, bounds)?
         };
-        if ended.is_some() {
+        if ended.is_some() || cancelled_walk_id.is_some() {
             self.emit_state(app)?;
         }
-        Ok((ActorWindowDragStarted { session_id }, ended))
+        Ok((ActorWindowDragStarted { session_id }, ended, cancelled_walk_id))
     }
 
     pub fn finish_actor_drag(

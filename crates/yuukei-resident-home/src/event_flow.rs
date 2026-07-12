@@ -6,6 +6,7 @@ impl ResidentHome {
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
         self.set_cursor(appended_event.sequence)?;
+        self.apply_runtime_event_to_snapshot(&event)?;
         if self.resolve_pending_choice_event(&event)? {
             return Ok(Vec::new());
         }
@@ -260,7 +261,10 @@ impl ResidentHome {
         })
     }
 
-    pub(crate) fn enrich_event_for_daihon_dispatch(&self, mut event: RuntimeEvent) -> Result<RuntimeEvent> {
+    pub(crate) fn enrich_event_for_daihon_dispatch(
+        &self,
+        mut event: RuntimeEvent,
+    ) -> Result<RuntimeEvent> {
         let ai_connected = self
             .capabilities
             .lock()
@@ -283,7 +287,10 @@ impl ResidentHome {
         Ok(event)
     }
 
-    pub(crate) fn recent_download_for_folder_event(&self, event: &RuntimeEvent) -> Result<(String, String)> {
+    pub(crate) fn recent_download_for_folder_event(
+        &self,
+        event: &RuntimeEvent,
+    ) -> Result<(String, String)> {
         let dispatch_at = event_timestamp_or_now(event);
         let cutoff = dispatch_at - chrono::Duration::days(7);
         let records = self
@@ -422,14 +429,62 @@ impl ResidentHome {
                     actor.motion = motion.to_string();
                 }
             }
+            "stage.walk" => {
+                if let Some(motion) = command.payload.get("motion").and_then(Value::as_str) {
+                    actor.motion = motion.to_string();
+                }
+                actor.heading = match command.payload.get("destination").and_then(Value::as_str) {
+                    Some("right-edge") => "right".to_string(),
+                    Some("left-edge") => "left".to_string(),
+                    _ => String::new(),
+                };
+                state
+                    .active_walk_commands
+                    .insert(actor_id.clone(), command.id.clone());
+            }
             _ => {}
         }
         Ok(())
     }
 
+    pub(crate) fn apply_runtime_event_to_snapshot(&self, event: &RuntimeEvent) -> Result<()> {
+        if event.kind != "stage.walk.ended" {
+            return Ok(());
+        }
+        let actor_id = event
+            .actor_id
+            .as_deref()
+            .or_else(|| event.payload.get("speakerId").and_then(Value::as_str));
+        let Some(actor_id) = actor_id else {
+            return Ok(());
+        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?;
+        if let Some(ended_command_id) = event
+            .causality
+            .as_ref()
+            .and_then(|causality| causality.source_command_id.as_deref())
+        {
+            if state
+                .active_walk_commands
+                .get(actor_id)
+                .is_some_and(|active_command_id| active_command_id != ended_command_id)
+            {
+                return Ok(());
+            }
+        }
+        let Some(actor) = state.actors.get_mut(actor_id) else {
+            return Ok(());
+        };
+        actor.motion.clear();
+        actor.heading.clear();
+        state.active_walk_commands.remove(actor_id);
+        Ok(())
+    }
 }
 
 pub(crate) fn event_timestamp_or_now(event: &RuntimeEvent) -> DateTime<Utc> {
     event_record_timestamp(&event.timestamp).unwrap_or_else(Utc::now)
 }
-

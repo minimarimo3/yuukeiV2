@@ -327,6 +327,7 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
         terrain_windows: BTreeMap::new(),
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
+        active_walks: BTreeMap::new(),
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };
@@ -372,13 +373,15 @@ fn beginning_user_drag_releases_perch_with_user_drag_reason() {
         ..DesktopStageState::default()
     };
 
-    let ended = begin_actor_drag_in_state(&mut state, "yuukei", "session-1", bounds)
-        .expect("begin actor drag")
-        .expect("perch ended");
+    let (ended, cancelled_walk_id) =
+        begin_actor_drag_in_state(&mut state, "yuukei", "session-1", bounds)
+            .expect("begin actor drag");
+    let ended = ended.expect("perch ended");
 
     assert_eq!(ended.reason, "user-drag");
     assert_eq!(ended.window_key, "window-1");
     assert!(state.perches.is_empty());
+    assert!(cancelled_walk_id.is_none());
     assert_eq!(
         state.active_drags.get("yuukei"),
         Some(&ActiveActorDrag {
@@ -390,6 +393,165 @@ fn beginning_user_drag_releases_perch_with_user_drag_reason() {
                 height: ACTOR_WINDOW_HEIGHT,
             },
         })
+    );
+}
+
+#[test]
+fn stage_walk_targets_current_monitor_edge_without_changing_vertical_position() {
+    let monitors = vec![StageMonitor {
+        id: "secondary".to_string(),
+        label: "stage-overlay-secondary".to_string(),
+        name: None,
+        bounds: StageRect {
+            x: 1_000.0,
+            y: 80.0,
+            width: 1_200.0,
+            height: 800.0,
+        },
+        scale_factor: 1.0,
+    }];
+    let current = StageRect {
+        x: 1_250.0,
+        y: 180.0,
+        width: 420.0,
+        height: 560.0,
+    };
+
+    let right = walk_target_bounds(&current, &monitors, WalkDestination::RightEdge);
+    let left = walk_target_bounds(&current, &monitors, WalkDestination::LeftEdge);
+
+    assert_eq!(right.x, 2_200.0 - 420.0 - ACTOR_WINDOW_MARGIN);
+    assert_eq!(left.x, 1_000.0 + ACTOR_WINDOW_MARGIN);
+    assert_eq!(right.y, current.y);
+    assert_eq!(left.y, current.y);
+}
+
+#[test]
+fn stage_walk_step_moves_at_clamped_speed_and_stops_exactly_at_target() {
+    let current = StageRect {
+        x: 100.0,
+        y: 200.0,
+        width: 420.0,
+        height: 560.0,
+    };
+    let target = StageRect {
+        x: 300.0,
+        ..current.clone()
+    };
+
+    let first = advance_walk_bounds(&current, &target, 10.0, 0.5);
+    assert_eq!(first.bounds.x, 130.0);
+    assert!(!first.arrived);
+
+    let arrived = advance_walk_bounds(&first.bounds, &target, 9_999.0, 1.0);
+    assert_eq!(arrived.bounds, target);
+    assert!(arrived.arrived);
+}
+
+#[test]
+fn stage_walk_state_releases_perch_and_tracks_replacement() {
+    let spec = test_specs(&["yuukei"]).remove(0);
+    let bounds = StageRect {
+        x: 120.0,
+        y: 80.0,
+        width: ACTOR_WINDOW_WIDTH,
+        height: ACTOR_WINDOW_HEIGHT,
+    };
+    let mut state = DesktopStageState {
+        monitors: vec![test_monitor(1_000.0, 700.0)],
+        actors: BTreeMap::from([("yuukei".to_string(), actor_from_spec(&spec, bounds, true))]),
+        perches: BTreeMap::from([(
+            "yuukei".to_string(),
+            StagePerch {
+                window_key: "window-1".to_string(),
+            },
+        )]),
+        ..DesktopStageState::default()
+    };
+
+    let started = start_actor_walk_in_state(
+        &mut state,
+        "yuukei",
+        "walk-1",
+        WalkDestination::RightEdge,
+        120.0,
+    )
+    .expect("start walk");
+
+    assert_eq!(started.perch_ended.expect("perch ended").reason, "walk");
+    assert!(state.perches.is_empty());
+    assert_eq!(state.active_walks["yuukei"].walk_id, "walk-1");
+    assert_eq!(
+        cancel_actor_walk_in_state(&mut state, "yuukei").as_deref(),
+        Some("walk-1")
+    );
+    assert!(cancel_actor_walk_in_state(&mut state, "yuukei").is_none());
+}
+
+#[test]
+fn beginning_user_drag_cancels_active_walk() {
+    let spec = test_specs(&["yuukei"]).remove(0);
+    let bounds = StageRect {
+        x: 120.0,
+        y: 80.0,
+        width: ACTOR_WINDOW_WIDTH,
+        height: ACTOR_WINDOW_HEIGHT,
+    };
+    let mut state = DesktopStageState {
+        monitors: vec![test_monitor(1_000.0, 700.0)],
+        actors: BTreeMap::from([(
+            "yuukei".to_string(),
+            actor_from_spec(&spec, bounds.clone(), true),
+        )]),
+        ..DesktopStageState::default()
+    };
+    start_actor_walk_in_state(
+        &mut state,
+        "yuukei",
+        "walk-1",
+        WalkDestination::RightEdge,
+        240.0,
+    )
+    .expect("start walk");
+
+    let (_, cancelled_walk_id) =
+        begin_actor_drag_in_state(&mut state, "yuukei", "drag-1", bounds).expect("begin drag");
+
+    assert_eq!(cancelled_walk_id.as_deref(), Some("walk-1"));
+    assert!(state.active_walks.is_empty());
+}
+
+#[test]
+fn arriving_stage_walk_persists_final_foot_anchor() {
+    let spec = test_specs(&["yuukei"]).remove(0);
+    let bounds = StageRect {
+        x: 120.0,
+        y: 80.0,
+        width: ACTOR_WINDOW_WIDTH,
+        height: ACTOR_WINDOW_HEIGHT,
+    };
+    let mut state = DesktopStageState {
+        monitors: vec![test_monitor(1_000.0, 700.0)],
+        actors: BTreeMap::from([("yuukei".to_string(), actor_from_spec(&spec, bounds, true))]),
+        ..DesktopStageState::default()
+    };
+    start_actor_walk_in_state(
+        &mut state,
+        "yuukei",
+        "walk-1",
+        WalkDestination::RightEdge,
+        960.0,
+    )
+    .expect("start walk");
+
+    let progress =
+        advance_actor_walk_in_state(&mut state, "yuukei", "walk-1", 10.0).expect("active walk");
+
+    assert!(progress.arrived);
+    assert!(!state.active_walks.contains_key("yuukei"));
+    assert_eq!(
+        state.persisted_anchors.get("yuukei"),
+        Some(&foot_anchor(&progress.bounds))
     );
 }
 
@@ -523,6 +685,7 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
         terrain_windows: BTreeMap::from([("window-1".to_string(), target)]),
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
+        active_walks: BTreeMap::new(),
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };

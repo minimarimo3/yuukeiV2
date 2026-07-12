@@ -120,6 +120,42 @@
     }
 
     #[tokio::test]
+    async fn stage_walk_ended_is_logged_with_actor_and_reason() -> Result<()> {
+        let workspace = tempdir()?;
+        let data = tempdir()?;
+        write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+        let env = test_env(workspace.path(), data.path());
+        let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+
+        runtime.emit_stage_walk_ended("yuukei", "arrived").await?;
+
+        let records = runtime.home().event_log().read(EventLogQuery {
+            kind: Some("stage.walk.ended".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        let record = records.records.first().expect("stage walk ended record");
+        assert_eq!(record.actor_id.as_deref(), Some("yuukei"));
+        assert_eq!(record.payload["reason"], json!("arrived"));
+        assert_eq!(record.payload.len(), 1);
+
+        runtime
+            .emit_stage_walk_ended_for_command("yuukei", "replaced", "walk-1")
+            .await?;
+        let records = runtime.home().event_log().read(EventLogQuery {
+            kind: Some("stage.walk.ended".to_string()),
+            ..EventLogQuery::default()
+        })?;
+        assert_eq!(
+            records.records[1]
+                .causality
+                .as_ref()
+                .and_then(|causality| causality.source_command_id.as_deref()),
+            Some("walk-1")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn desktop_window_events_are_logged_with_desktop_observation_privacy() -> Result<()> {
         let workspace = tempdir()?;
         let data = tempdir()?;

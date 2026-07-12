@@ -93,7 +93,7 @@
 ユーザーの想定は3要素すべて(2026-07-11回答)。M2と同じく積み木に分解して設計してから着手する。
 
 - [x] ドラッグ移動 — 長押し(500ms)で持ち上げ、OSネイティブドラッグ、perch解除(reason: user-drag)、クランプ。合図 住人_つまむ/住人_おろす(入力#移動距離)+default pack反応台本(2761ad1)。startDraggingの完了タイミングは実機確認待ち
-- [ ] 自発的な歩行 — Daihonから「歩く」を指示できる(RuntimeCommand `stage.walk` 系+Daihon構文の新設)。v1スコープは同一モニタ内の水平移動(2026-07-11ユーザー回答)。walk.vrma(別名: 歩く)は流用可。03/08への仕様追記が先
+- [x] 自発的な歩行 — Daihon関数 `＜歩く 右端＞`(RuntimeCommand `stage.walk`+`stage.walk.ended`、合図 住人_歩き終わり、入力#理由)。同一モニタ内の水平移動、歩行中は進行方向へ回転(ActorSnapshot.heading)、到着でモーション自動停止+位置永続化、つまみで中断。default packに靴つつき→右端歩行の台本を追加。実機GUIでの見た目確認は未実施(ユーザー確認待ち)
 - [x] 位置の記憶 — 足元anchorを settings/stage.json へ永続化、起動時にモニタ構成へ正規化して復元(2761ad1)
 
 ### 設定画面UIの改善【設計必要・中物】

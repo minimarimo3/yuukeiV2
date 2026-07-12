@@ -6,6 +6,7 @@ import {
   actorSurfaceAssetsForActor,
   applyCommandHint,
   expressionPresetFor,
+  headingRotationY,
   loadInitialActorSurfaceState,
   normalizeMotionId,
   shouldStartAvatarGrab
@@ -41,6 +42,12 @@ describe("ActorApp renderer helpers", () => {
     expect(expressionPresetFor("笑顔")).toBe("happy");
     expect(expressionPresetFor("angry")).toBe("angry");
     expect(expressionPresetFor("neutral")).toBeNull();
+  });
+
+  it("rotates headings relative to the VRM authored baseline", () => {
+    expect(headingRotationY(0.25, "right")).toBeCloseTo(0.25 + Math.PI / 2);
+    expect(headingRotationY(0.25, "left")).toBeCloseTo(0.25 - Math.PI / 2);
+    expect(headingRotationY(0.25, "")).toBeCloseTo(0.25);
   });
 
   it("reads the actorId query parameter as the actor window contract", () => {
@@ -339,6 +346,19 @@ describe("ActorApp renderer helpers", () => {
     expect(next?.actors.another?.bubble).toBe("こちらからです");
     expect(next?.actors.another?.speaking).toBe(true);
   });
+
+  it("applies stage.walk motion and heading hints immediately", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("stage.walk", {
+        targetActorId: "yuukei",
+        payload: { destination: "left-edge", motion: "歩く" }
+      })
+    );
+
+    expect(next?.actors.yuukei?.motion).toBe("歩く");
+    expect(next?.actors.yuukei?.heading).toBe("left");
+  });
 });
 
 function hitZone(
@@ -436,12 +456,14 @@ function snapshotFixture(): ResidentSnapshot {
         displayName: "Yuukei",
         expression: "neutral",
         motion: "idle",
+        heading: "",
         location: "desktop"
       },
       another: {
         displayName: "Another",
         expression: "neutral",
         motion: "idle",
+        heading: "",
         location: "desktop"
       }
     },

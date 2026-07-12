@@ -19,7 +19,7 @@ use yuukei_event_log::{
 };
 use yuukei_extension::{ProcessHookExtension, ProcessRuntimeSupervisor};
 use yuukei_protocol::{
-    new_id, now_timestamp, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
+    new_id, now_timestamp, Causality, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
     MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput, MemoryUpdateOutput, Privacy,
     ResidentSnapshot, RetentionPolicy, RuntimeCommand, RuntimeEvent, SurfaceKind,
     SurfacePresentation, SurfaceRenderer, SurfaceSession,

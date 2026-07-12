@@ -823,6 +823,82 @@
     }
 
     #[tokio::test]
+    async fn stage_walk_command_and_ended_event_update_actor_snapshot() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        let mut command = RuntimeCommand::new("stage.walk", "daihon", "resident-default");
+        command.target = Some(CommandTarget {
+            device_id: None,
+            surface_id: None,
+            actor_id: Some("yuukei".to_string()),
+        });
+        command.payload = JsonMap::from([
+            ("destination".to_string(), json!("right-edge")),
+            ("motion".to_string(), json!("walk")),
+        ]);
+
+        home.emit_internal_command_without_extensions(command)?;
+
+        let walking = home.snapshot()?;
+        assert_eq!(walking.actors["yuukei"].motion, "walk");
+        assert_eq!(walking.actors["yuukei"].heading, "right");
+
+        let mut ended =
+            RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        ended.actor_id = Some("yuukei".to_string());
+        ended
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        home.ingest_event(ended).await?;
+
+        let stopped = home.snapshot()?;
+        assert_eq!(stopped.actors["yuukei"].motion, "");
+        assert_eq!(stopped.actors["yuukei"].heading, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replaced_walk_end_does_not_clear_newer_walk_snapshot() -> Result<()> {
+        let home =
+            ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+        for (id, destination, motion) in [
+            ("walk-1", "right-edge", "walk"),
+            ("walk-2", "left-edge", "歩く"),
+        ] {
+            let mut command = RuntimeCommand::new("stage.walk", "daihon", "resident-default");
+            command.id = id.to_string();
+            command.target = Some(CommandTarget {
+                device_id: None,
+                surface_id: None,
+                actor_id: Some("yuukei".to_string()),
+            });
+            command.payload = JsonMap::from([
+                ("destination".to_string(), json!(destination)),
+                ("motion".to_string(), json!(motion)),
+            ]);
+            home.emit_internal_command_without_extensions(command)?;
+        }
+        let mut ended =
+            RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        ended.actor_id = Some("yuukei".to_string());
+        ended
+            .payload
+            .insert("reason".to_string(), json!("replaced"));
+        ended.causality = Some(Causality {
+            source_event_id: None,
+            source_command_id: Some("walk-1".to_string()),
+            trace_id: None,
+        });
+
+        home.ingest_event(ended).await?;
+
+        let snapshot = home.snapshot()?;
+        assert_eq!(snapshot.actors["yuukei"].motion, "歩く");
+        assert_eq!(snapshot.actors["yuukei"].heading, "left");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn speech_synthesis_success_emits_audio_play_after_dialogue() -> Result<()> {
         let provider = SpeechSynthesisProvider::new(JsonMap::from([
             (

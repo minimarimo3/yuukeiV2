@@ -59,6 +59,7 @@ type LoadedActor = {
   mixer: THREE.AnimationMixer;
   actions: Map<string, THREE.AnimationAction>;
   currentMotionId: string | null;
+  baseRotationY: number;
   hitZones: ResolvedActorHitZone[];
   boneNodes: Map<string, THREE.Object3D>;
   humanoidBoneByObject: Map<THREE.Object3D, string>;
@@ -290,6 +291,7 @@ function VrmStage({
           mixer: new THREE.AnimationMixer(vrm.scene),
           actions: new Map(),
           currentMotionId: null,
+          baseRotationY: vrm.scene.rotation.y,
           hitZones,
           boneNodes,
           humanoidBoneByObject,
@@ -309,6 +311,10 @@ function VrmStage({
         const actor = currentSnapshot?.actors[loaded.actorId];
         applyExpression(loaded.vrm, actor?.expression);
         applyMotion(loaded, actor?.motion);
+        loaded.vrm.scene.rotation.y = headingRotationY(
+          loaded.baseRotationY,
+          actor?.heading
+        );
         loaded.mixer.update(delta);
         loaded.vrm.update(delta);
       }
@@ -772,6 +778,15 @@ function applyMotion(loaded: LoadedActor, motion: string | undefined) {
   }
 }
 
+export function headingRotationY(
+  baseRotationY: number,
+  heading: string | undefined
+): number {
+  if (heading === "right") return baseRotationY + Math.PI / 2;
+  if (heading === "left") return baseRotationY - Math.PI / 2;
+  return baseRotationY;
+}
+
 function frameCamera(root: THREE.Object3D, camera: THREE.PerspectiveCamera) {
   const box = new THREE.Box3().setFromObject(root);
   if (box.isEmpty()) {
@@ -1144,6 +1159,29 @@ export function applyCommandHint(
         [actorId]: {
           ...actor,
           motion: command.payload.motion
+        }
+      }
+    };
+  }
+  if (
+    command.type === "stage.walk" &&
+    typeof command.payload.motion === "string" &&
+    typeof command.payload.destination === "string"
+  ) {
+    const heading =
+      command.payload.destination === "right-edge"
+        ? "right"
+        : command.payload.destination === "left-edge"
+          ? "left"
+          : "";
+    return {
+      ...snapshot,
+      actors: {
+        ...snapshot.actors,
+        [actorId]: {
+          ...actor,
+          motion: command.payload.motion,
+          heading
         }
       }
     };

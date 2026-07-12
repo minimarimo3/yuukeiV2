@@ -1376,6 +1376,44 @@ impl ActionHandler for YuukeiActionHandler {
                 ]);
                 self.commands.lock().await.push(command);
             }
+            "歩く" | "walk" => {
+                let Some(destination) =
+                    positional
+                        .first()
+                        .and_then(|value| match value.to_display_string().trim() {
+                            "右端" | "right-edge" => Some("right-edge"),
+                            "左端" | "left-edge" => Some("left-edge"),
+                            _ => None,
+                        })
+                else {
+                    return Ok(DaihonValue::None);
+                };
+                let motion = named
+                    .get("動作")
+                    .map(DaihonValue::to_display_string)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "walk".to_string());
+                let mut command = self.command("stage.walk", speaker_id);
+                command.payload = JsonMap::from([
+                    (
+                        "destination".to_string(),
+                        Value::String(destination.to_string()),
+                    ),
+                    ("motion".to_string(), Value::String(motion)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(speed) = named.get("速さ") {
+                    let speed = daihon_value_to_json(speed);
+                    if speed.is_number() {
+                        command.payload.insert("speedPxPerSec".to_string(), speed);
+                    }
+                }
+                self.commands.lock().await.push(command);
+            }
             "枠に座る" => {
                 let Some(window_key) = function_value(&positional, &named) else {
                     return Ok(DaihonValue::None);
@@ -1584,6 +1622,16 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
             DaihonValue::Number(DaihonNumber::Integer(idle_minutes)),
         ));
     }
+    if event.kind == "stage.walk.ended" {
+        let reason = match event.payload.get("reason").and_then(Value::as_str) {
+            Some("arrived") => Some("到着"),
+            Some("user-drag" | "replaced") => Some("中断"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            inputs.push(("理由".to_string(), DaihonValue::String(reason.to_string())));
+        }
+    }
     for (payload_key, input_name) in [
         ("app", "アプリ"),
         ("windowKey", "窓ID"),
@@ -1680,6 +1728,35 @@ fn yuukei_function_registry() -> FunctionRegistry {
                 required: true,
             }],
             named: BTreeMap::new(),
+            return_type: None,
+        });
+    }
+    for name in ["歩く", "walk"] {
+        registry.register(FunctionSpec {
+            name: name.to_string(),
+            positional: vec![ParamSpec {
+                name: Some("行き先".to_string()),
+                ty: ParamType::String,
+                required: false,
+            }],
+            named: BTreeMap::from([
+                (
+                    "速さ".to_string(),
+                    ParamSpec {
+                        name: Some("速さ".to_string()),
+                        ty: ParamType::Number,
+                        required: false,
+                    },
+                ),
+                (
+                    "動作".to_string(),
+                    ParamSpec {
+                        name: Some("動作".to_string()),
+                        ty: ParamType::String,
+                        required: false,
+                    },
+                ),
+            ]),
             return_type: None,
         });
     }
@@ -2873,6 +2950,101 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_stage_walk_function() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.startup".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### walk
+話者: yuukei
+＜歩く 右端＞
+＜walk 左端 速さ=120 動作=歩く＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.startup", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].kind, "stage.walk");
+        assert_eq!(result.commands[0].payload["destination"], "right-edge");
+        assert_eq!(result.commands[0].payload["motion"], "walk");
+        assert!(!result.commands[0].payload.contains_key("speedPxPerSec"));
+        assert_eq!(result.commands[0].payload["speakerId"], "yuukei");
+        assert_eq!(result.commands[0].payload["sourceFunction"], "歩く");
+        assert_eq!(result.commands[1].payload["destination"], "left-edge");
+        assert_eq!(result.commands[1].payload["motion"], "歩く");
+        assert_eq!(result.commands[1].payload["speedPxPerSec"], 120);
+        assert_eq!(result.commands[1].payload["sourceFunction"], "walk");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_ignores_invalid_or_empty_stage_walk_destination() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.startup".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### walk
+話者: yuukei
+＜歩く 上＞
+＜walk＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.startup", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert!(result.commands.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn event_inputs_translate_stage_walk_ended_reason_for_daihon() {
+        for (reason, expected) in [
+            ("arrived", "到着"),
+            ("user-drag", "中断"),
+            ("replaced", "中断"),
+        ] {
+            let mut event = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+            event.payload.insert("reason".to_string(), json!(reason));
+
+            let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
+
+            assert_eq!(inputs["理由"], DaihonValue::String(expected.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_stage_walk_ended_with_japanese_reason() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["stage.walk.ended".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## stage reactions
+### walk ended
+合図: ＠住人_歩き終わり
+話者: yuukei
+「理由は＜入力#理由＞」
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut event = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        event
+            .payload
+            .insert("reason".to_string(), json!("user-drag"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands[0].payload["text"], "理由は中断");
+        Ok(())
+    }
+
     struct ChoiceHandler {
         choice: String,
         requests: Vec<DaihonChoiceRequest>,
@@ -3166,7 +3338,10 @@ mod tests {
             .iter()
             .find(|command| command.kind == "dialogue.say")
             .expect("shoe dialogue");
-        assert_eq!(dialogue.payload["text"], "……くつ。ひっぱっても、伸びません。");
+        assert_eq!(
+            dialogue.payload["text"],
+            "……くつ。ひっぱっても、伸びません。"
+        );
 
         // 腕ゾーンのclothは従来どおり袖セリフ
         let result = adapter
@@ -3189,6 +3364,44 @@ mod tests {
             .find(|command| command.kind == "dialogue.say")
             .expect("torso dialogue");
         assert_eq!(dialogue.payload["text"], "……服、伸びます。");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_poke_yuukei_shoe_walks_to_right_edge() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut event = RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+        event.actor_id = Some("yuukei".to_string());
+        event
+            .payload
+            .insert("hitZoneId".to_string(), json!("leftFoot"));
+        event
+            .payload
+            .insert("hitSurface".to_string(), json!("cloth"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        let walk = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "stage.walk")
+            .expect("stage.walk command");
+        assert_eq!(walk.payload["destination"], "right-edge");
+        assert_eq!(walk.payload["motion"], "walk");
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("shoe walk dialogue");
+        assert_eq!(
+            dialogue.payload["text"],
+            "わっ、くつはだめです。……もう、あっちに行きますからね。"
+        );
         Ok(())
     }
 

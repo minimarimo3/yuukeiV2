@@ -49,7 +49,7 @@ pub struct AppState {
     runtime: Mutex<LocalYuukeiRuntime>,
     asset_index: RwLock<PackAssetIndex>,
     stage: Arc<DesktopStageManager>,
-    stage_settings: StdMutex<StageSettingsRegistry>,
+    stage_settings: Arc<StdMutex<StageSettingsRegistry>>,
     audio_player: Option<Arc<AudioPlayer>>,
     command_forwarder: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     surface_attached: Mutex<bool>,
@@ -477,7 +477,7 @@ async fn send_avatar_gesture_poke(
 }
 
 #[tauri::command]
-fn begin_actor_window_drag(
+async fn begin_actor_window_drag(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
@@ -486,7 +486,25 @@ fn begin_actor_window_drag(
     if window.label() != desktop_stage::actor_window_label(&actor_id) {
         return Err("actor drag must originate from its own actor window".to_string());
     }
-    let (started, _ended) = state.stage.begin_actor_drag(&app, &window, &actor_id)?;
+    let (started, perch_ended, cancelled_walk_id) =
+        state.stage.begin_actor_drag(&app, &window, &actor_id)?;
+    let runtime = state.runtime.lock().await.clone();
+    if let Some(ended) = perch_ended {
+        runtime
+            .emit_stage_perch_ended(&ended.actor_id, &ended.window_key, ended.reason)
+            .await
+            .map_err(to_message)?;
+    }
+    if let Some(walk_id) = cancelled_walk_id {
+        emit_stage_walk_ended_and_snapshot(
+            &app,
+            &runtime,
+            &actor_id,
+            "user-drag",
+            Some(&walk_id),
+        )
+        .await?;
+    }
     Ok(started)
 }
 
@@ -787,6 +805,7 @@ pub fn run() {
             stage
                 .set_persisted_actor_anchors(stage_settings.actor_anchors().clone())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            let stage_settings = Arc::new(StdMutex::new(stage_settings));
             let actor_scale_percent = runtime
                 .app_settings()
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?
@@ -799,9 +818,10 @@ pub fn run() {
                 }
             };
             let command_forwarder = spawn_command_forwarder(
-                runtime.home(),
+                runtime.clone(),
                 app.handle().clone(),
                 stage.clone(),
+                stage_settings.clone(),
                 audio_player.clone(),
             );
             let power_observer = PowerObserver::new(runtime.clone());
@@ -813,7 +833,7 @@ pub fn run() {
                 runtime: Mutex::new(runtime),
                 asset_index: RwLock::new(asset_index),
                 stage: stage.clone(),
-                stage_settings: StdMutex::new(stage_settings),
+                stage_settings,
                 audio_player,
                 command_forwarder: Mutex::new(Some(command_forwarder)),
                 surface_attached: Mutex::new(false),
@@ -1210,9 +1230,10 @@ async fn replace_runtime(
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(
-        runtime.home(),
+        runtime.clone(),
         app.clone(),
         state.stage.clone(),
+        state.stage_settings.clone(),
         state.audio_player.clone(),
     );
     let next_presence_loop = spawn_desktop_presence_loop(&runtime);
@@ -1288,9 +1309,10 @@ async fn replace_runtime_snapshot(
     emit_app_startup_or_status(&app, &runtime).await?;
     let snapshot = runtime.snapshot().map_err(to_message)?;
     let next_forwarder = spawn_command_forwarder(
-        runtime.home(),
+        runtime.clone(),
         app.clone(),
         state.stage.clone(),
+        state.stage_settings.clone(),
         state.audio_player.clone(),
     );
     let next_presence_loop = spawn_desktop_presence_loop(&runtime);
@@ -1660,12 +1682,13 @@ fn emit_world_pack_status(app: &AppHandle, status: &WorldPackSelectionState) -> 
 }
 
 fn spawn_command_forwarder(
-    home: Arc<yuukei_resident_home::ResidentHome>,
+    runtime: LocalYuukeiRuntime,
     app: AppHandle,
     stage: Arc<DesktopStageManager>,
+    stage_settings: Arc<StdMutex<StageSettingsRegistry>>,
     audio_player: Option<Arc<AudioPlayer>>,
 ) -> tauri::async_runtime::JoinHandle<()> {
-    let mut receiver = home.subscribe_commands();
+    let mut receiver = runtime.home().subscribe_commands();
     tauri::async_runtime::spawn(async move {
         while let Ok(command) = receiver.recv().await {
             if command.kind == "audio.play" {
@@ -1677,10 +1700,142 @@ fn spawn_command_forwarder(
                     eprintln!("Yuukei audio.play ignored: audio output unavailable");
                 }
             }
-            let _ = stage.handle_runtime_command(&app, &command);
+            if command.kind == "stage.walk" {
+                if let Err(error) = handle_stage_walk_command(
+                    app.clone(),
+                    runtime.clone(),
+                    stage.clone(),
+                    stage_settings.clone(),
+                    &command,
+                )
+                .await
+                {
+                    eprintln!("Yuukei stage.walk ignored: {error}");
+                }
+            } else {
+                let _ = stage.handle_runtime_command(&app, &command);
+            }
             let _ = app.emit("yuukei-command", &command);
         }
     })
+}
+
+async fn handle_stage_walk_command(
+    app: AppHandle,
+    runtime: LocalYuukeiRuntime,
+    stage: Arc<DesktopStageManager>,
+    stage_settings: Arc<StdMutex<StageSettingsRegistry>>,
+    command: &RuntimeCommand,
+) -> Result<(), String> {
+    let Some(actor_id) = desktop_stage::command_actor_id(command) else {
+        return Ok(());
+    };
+    if let Some(replaced_walk_id) = stage.cancel_actor_walk(&actor_id)? {
+        emit_stage_walk_ended_and_snapshot(
+            &app,
+            &runtime,
+            &actor_id,
+            "replaced",
+            Some(&replaced_walk_id),
+        )
+        .await?;
+    }
+    let Some(started) = stage.start_actor_walk(&app, command)? else {
+        return Ok(());
+    };
+    if let Some(ended) = &started.perch_ended {
+        runtime
+            .emit_stage_perch_ended(&ended.actor_id, &ended.window_key, ended.reason)
+            .await
+            .map_err(to_message)?;
+    }
+    tauri::async_runtime::spawn(run_stage_walk(
+        app,
+        runtime,
+        stage,
+        stage_settings,
+        started.actor_id,
+        started.walk_id,
+    ));
+    Ok(())
+}
+
+async fn run_stage_walk(
+    app: AppHandle,
+    runtime: LocalYuukeiRuntime,
+    stage: Arc<DesktopStageManager>,
+    stage_settings: Arc<StdMutex<StageSettingsRegistry>>,
+    actor_id: String,
+    walk_id: String,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    let mut previous = std::time::Instant::now();
+    loop {
+        interval.tick().await;
+        let now = std::time::Instant::now();
+        let delta_seconds = now.duration_since(previous).as_secs_f64();
+        previous = now;
+        let progress = match stage.advance_actor_walk(&app, &actor_id, &walk_id, delta_seconds) {
+            Ok(Some(progress)) => progress,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("Yuukei stage.walk failed: {error}");
+                return;
+            }
+        };
+        if !progress.arrived {
+            continue;
+        }
+        let anchor = desktop_stage::foot_anchor(&progress.bounds);
+        if let Err(error) = stage_settings
+            .lock()
+            .map_err(|_| "stage settings lock is poisoned".to_string())
+            .and_then(|mut settings| {
+                settings
+                    .set_actor_anchor(actor_id.clone(), anchor)
+                    .map_err(to_message)
+            })
+        {
+            eprintln!("Yuukei stage.walk position persistence failed: {error}");
+        }
+        if let Err(error) =
+            emit_stage_walk_ended_and_snapshot(
+                &app,
+                &runtime,
+                &actor_id,
+                "arrived",
+                Some(&walk_id),
+            )
+            .await
+        {
+            eprintln!("Yuukei stage.walk completion failed: {error}");
+        }
+        return;
+    }
+}
+
+async fn emit_stage_walk_ended_and_snapshot(
+    app: &AppHandle,
+    runtime: &LocalYuukeiRuntime,
+    actor_id: &str,
+    reason: &str,
+    command_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(command_id) = command_id {
+        runtime
+            .emit_stage_walk_ended_for_command(actor_id, reason, command_id)
+            .await
+            .map_err(to_message)?;
+    } else {
+        runtime
+            .emit_stage_walk_ended(actor_id, reason)
+            .await
+            .map_err(to_message)?;
+    }
+    let snapshot = runtime.snapshot().map_err(to_message)?;
+    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)
 }
 
 fn to_message(error: impl std::fmt::Display) -> String {

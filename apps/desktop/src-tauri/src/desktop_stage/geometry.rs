@@ -75,7 +75,7 @@ pub(super) fn bounds_from_foot_anchor(anchor: StageFootAnchor, actor_size: Actor
     }
 }
 
-pub(super) fn foot_anchor(bounds: &StageRect) -> StageFootAnchor {
+pub(crate) fn foot_anchor(bounds: &StageRect) -> StageFootAnchor {
     StageFootAnchor {
         x: bounds.x + bounds.width * 0.5,
         y: bounds.y + bounds.height,
@@ -100,7 +100,7 @@ pub(super) fn default_actor_anchor(bounds: &StageRect) -> StageAnchor {
     }
 }
 
-pub(super) fn command_actor_id(command: &RuntimeCommand) -> Option<String> {
+pub(crate) fn command_actor_id(command: &RuntimeCommand) -> Option<String> {
     command
         .target
         .as_ref()

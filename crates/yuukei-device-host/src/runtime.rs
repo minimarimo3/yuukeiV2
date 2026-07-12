@@ -913,6 +913,40 @@ impl LocalYuukeiRuntime {
         .await
     }
 
+    pub async fn emit_stage_walk_ended(
+        &self,
+        actor_id: &str,
+        reason: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            "stage.walk.ended",
+            JsonMap::from([("reason".to_string(), json!(reason))]),
+            None,
+            Some(actor_id.to_string()),
+        )
+        .await
+    }
+
+    pub async fn emit_stage_walk_ended_for_command(
+        &self,
+        actor_id: &str,
+        reason: &str,
+        command_id: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options_and_causality(
+            "stage.walk.ended",
+            JsonMap::from([("reason".to_string(), json!(reason))]),
+            None,
+            Some(actor_id.to_string()),
+            Some(Causality {
+                source_event_id: None,
+                source_command_id: Some(command_id.to_string()),
+                trace_id: None,
+            }),
+        )
+        .await
+    }
+
     pub fn spawn_presence_loop(&self) -> JoinHandle<()> {
         self.spawn_presence_loop_with_idle_sampler(|| None)
     }
@@ -1034,6 +1068,20 @@ impl LocalYuukeiRuntime {
         privacy: Option<Privacy>,
         actor_id: Option<String>,
     ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options_and_causality(
+            kind, payload, privacy, actor_id, None,
+        )
+        .await
+    }
+
+    async fn emit_runtime_event_with_options_and_causality(
+        &self,
+        kind: &str,
+        payload: JsonMap,
+        privacy: Option<Privacy>,
+        actor_id: Option<String>,
+        causality: Option<Causality>,
+    ) -> Result<Vec<RuntimeCommand>> {
         let active_surface_id = self.home.snapshot()?.active_surface_id;
         let event = RuntimeEvent {
             id: new_id("evt"),
@@ -1042,7 +1090,7 @@ impl LocalYuukeiRuntime {
             source: "device".to_string(),
             resident_id: self.resident_id.clone(),
             payload,
-            causality: None,
+            causality,
             device_id: Some(self.device_id.clone()),
             surface_id: active_surface_id,
             actor_id,

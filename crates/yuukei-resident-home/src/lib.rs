@@ -157,6 +157,7 @@ struct HomeState {
     resident_id: String,
     active_surface_id: Option<String>,
     actors: BTreeMap<String, ActorSnapshot>,
+    active_walk_commands: BTreeMap<String, String>,
     surfaces: BTreeMap<String, SurfaceSession>,
     recent_event_cursor: i64,
     daihon_diagnostics: Vec<DaihonDiagnosticEntry>,
@@ -170,7 +171,6 @@ struct DispatchOutcome {
     commands: Vec<RuntimeCommand>,
     events: Vec<RuntimeEvent>,
 }
-
 
 impl ResidentHome {
     pub async fn new(
@@ -283,6 +283,7 @@ impl ResidentHome {
                         display_name: actor.display_name.clone(),
                         expression: "neutral".to_string(),
                         motion: "idle".to_string(),
+                        heading: String::new(),
                         location: "desktop".to_string(),
                         speaking: Some(false),
                         bubble: None,
@@ -303,6 +304,7 @@ impl ResidentHome {
                 resident_id,
                 active_surface_id: None,
                 actors,
+                active_walk_commands: BTreeMap::new(),
                 surfaces: BTreeMap::new(),
                 recent_event_cursor: 0,
                 daihon_diagnostics: Vec::new(),

@@ -3,7 +3,7 @@ pub(super) fn begin_actor_drag_in_state(
     actor_id: &str,
     session_id: &str,
     bounds: StageRect,
-) -> Result<Option<StagePerchEnded>, String> {
+) -> Result<(Option<StagePerchEnded>, Option<String>), String> {
     let actor = state
         .actors
         .get_mut(actor_id)
@@ -17,11 +17,13 @@ pub(super) fn begin_actor_drag_in_state(
             start_bounds: bounds,
         },
     );
-    Ok(state.perches.remove(actor_id).map(|perch| StagePerchEnded {
+    let perch_ended = state.perches.remove(actor_id).map(|perch| StagePerchEnded {
         actor_id: actor_id.to_string(),
         window_key: perch.window_key,
         reason: "user-drag",
-    }))
+    });
+    let cancelled_walk_id = cancel_actor_walk_in_state(state, actor_id);
+    Ok((perch_ended, cancelled_walk_id))
 }
 
 pub(super) fn move_actor_drag_in_state(

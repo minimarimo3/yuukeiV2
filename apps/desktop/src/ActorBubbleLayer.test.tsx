@@ -73,6 +73,7 @@ function actorSnapshot(bubble: string): ActorSnapshot {
     displayName: "Yuukei",
     expression: "neutral",
     motion: "idle",
+    heading: "",
     location: "desktop",
     speaking: true,
     bubble

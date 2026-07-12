@@ -71,6 +71,13 @@
 話者: ゆ
 「おかえりなさい。」
 
+### cloth pull yuukei shoes
+合図: ＠住人_つつく
+条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「yuukei」 かつ （入力#hitZoneId = 「leftFoot」 または 入力#hitZoneId = 「rightFoot」））
+話者: ゆ
+＜歩く 右端＞
+「わっ、くつはだめです。……もう、あっちに行きますからね。」
+
 ### cloth pull yuukei
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「yuukei」）

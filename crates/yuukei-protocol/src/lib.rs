@@ -87,6 +87,11 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "住人おろし",
     },
     StandardSignalDefinition {
+        canonical_id: "stage.walk.ended",
+        daihon_alias: "住人_歩き終わり",
+        display_label: "住人歩き終わり",
+    },
+    StandardSignalDefinition {
         canonical_id: "desktop.window.appeared",
         daihon_alias: "窓_出現",
         display_label: "窓出現",
@@ -1048,6 +1053,7 @@ pub struct ActorSnapshot {
     pub display_name: String,
     pub expression: String,
     pub motion: String,
+    pub heading: String,
     pub location: String,
     #[ts(optional)]
     pub speaking: Option<bool>,
@@ -1176,6 +1182,23 @@ mod tests {
     }
 
     #[test]
+    fn actor_snapshot_serializes_heading() -> anyhow::Result<()> {
+        let actor = ActorSnapshot {
+            display_name: "Yuukei".to_string(),
+            expression: String::new(),
+            motion: "walk".to_string(),
+            heading: "right".to_string(),
+            location: "desktop".to_string(),
+            speaking: None,
+            bubble: None,
+        };
+
+        let value = serde_json::to_value(actor)?;
+        assert_eq!(value["heading"], "right");
+        Ok(())
+    }
+
+    #[test]
     fn standard_signals_resolve_daihon_aliases_to_canonical_ids() {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
         assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
@@ -1187,6 +1210,7 @@ mod tests {
         assert_eq!(canonical_signal_id("住人_なでる"), "avatar.gesture.pat");
         assert_eq!(canonical_signal_id("住人_つまむ"), "avatar.gesture.grab");
         assert_eq!(canonical_signal_id("住人_おろす"), "avatar.gesture.drop");
+        assert_eq!(canonical_signal_id("住人_歩き終わり"), "stage.walk.ended");
         assert_eq!(canonical_signal_id("窓_出現"), "desktop.window.appeared");
         assert_eq!(canonical_signal_id("窓_消滅"), "desktop.window.closed");
         assert_eq!(canonical_signal_id("窓_注目"), "desktop.window.focused");

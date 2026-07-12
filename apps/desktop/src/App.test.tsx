@@ -36,6 +36,7 @@ function snapshot(bubble: string | null = null): ResidentSnapshot {
         displayName: "Yuukei",
         expression: "neutral",
         motion: "idle",
+        heading: "",
         location: "desktop",
         speaking: Boolean(bubble),
         bubble: bubble ?? undefined
