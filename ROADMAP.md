@@ -113,9 +113,9 @@
 
 音声再生中に吹き出しが先に消えるバグの根治と、音声に合わせたタイプライター表示。仕様は03の吹き出し節(逐次表示)とCapability Composition節、02のDevice Host節。ユーザー確定: 音声待ちは「…」プレースホルダ→音声開始と同時に流す/声なし住人も推定速度で逐次表示。
 
-- [ ] `dialogue.say` に `speechPending` 付与(Resident Home、健全なTTS providerがあるとき)
-- [ ] `audio.play`(`sourceCommandId`=吹き出しID、実長`durationMs`)到着で吹き出し寿命を max(読み時間, 経過+音声実長+余韻1.5秒) へ置き換え(消失バグ修正)
-- [ ] テキスト逐次表示: 音声同期(線形)/フォールバック(猶予5秒で推定速度)/声なし住人(即・推定速度)。吹き出しサイズは全文で確保
+- [x] `dialogue.say` に `speechPending` 付与(Resident Home、健全なTTS providerがあるとき)(b9bb391)
+- [x] `audio.play`(`sourceCommandId`=吹き出しID、実長`durationMs`)到着で吹き出し寿命を max(基本表示時間, 経過+音声実長+余韻1.5秒) へ置き換え(消失バグ修正)。未解決選択肢のtimeoutは短縮しない(b9bb391)
+- [x] テキスト逐次表示: 音声同期(線形)/フォールバック(猶予5秒で推定速度)/声なし住人(即・推定速度)。吹き出しサイズは全文で確保(b9bb391)。実機GUI確認は未実施
 - モーラ単位のカラオケ同期(audio_queryのタイミング利用)は将来候補
 
 ## 近距離(次にやると効果が大きい)
