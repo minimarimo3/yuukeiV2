@@ -35,7 +35,6 @@
 /src-tauri/gen/schemas/
 /src-tauri/target/
 /target/
-Cargo.lock
 Thumbs.db
 apps/*/dist/
 apps/*/src-tauri/binaries/
@@ -53,7 +52,6 @@ packages/*/dist/
 packs/default-yuukei/character/*
 packs/default-yuukei/motion/*
 pnpm-debug.log*
-pnpm-lock.yaml
 src-tauri/**/*.rs.bk
 src-tauri/*.log
 src-tauri/target/
