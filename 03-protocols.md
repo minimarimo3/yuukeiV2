@@ -180,6 +180,15 @@ RuntimeCommandはSurfaceにとっての描画命令であり、長期状態のso
 
 `dialogue.say` は、表示テキスト、話者、口調、emotion、任意の `speechRef` を持てる。音声そのものをcommandへ埋め込まず、音声、viseme、文字単位または句単位のtimingは `speech.synthesis` の結果として参照する。
 
+Desktop Surfaceの吹き出しは住人ごとに同時に1個までとする。`DesktopStageManager` が住人単位で「表示中の吹き出し」と「待機キュー」を持ち、`dialogue.say` を受けたときの扱いは次の通り。
+
+- 表示中の吹き出しがなければ即表示する。
+- 表示中があり、同じシーンのセリフ(causalityの `sourceEventId` が表示中の吹き出しと一致)なら待機キューの末尾へ並べる。
+- 別シーンのセリフ(`sourceEventId` が異なる、またはcausalityなし)なら待機キューを破棄し、表示中を即置き換える。
+- ただし表示中の吹き出しに未解決の選択肢(`dialogue.choices`)が付いている間は表示中の置き換えを行わない。同一シーンのセリフは通常どおりキュー末尾へ、別シーンのセリフは待機キューを破棄したうえでキューに入り、選択肢の解決後に順に表示される(連打しても最後のシーンだけが残る)。
+
+表示時間は、payloadに `durationMs` があればそれを優先し、なければ文字数×90msを2.5〜9秒へクランプした読み時間とする。ユーザーが吹き出しへホバー/フォーカスしている間は消滅が延期され、その間は待機キューも進まない(別シーンによる即置き換えだけはホバー中でも起きる)。表示中の吹き出しが消えたら(期限切れまたは明示dismiss)、待機キューの先頭を次に表示する。選択肢だけの吹き出しを新規に作るときの表示時間は `timeoutSeconds`(5〜600秒)をそのまま尊重し、セリフ用の上限へはクランプしない。
+
 Daihon作者がWorld Packの `speakerAliases` を使って短く書いた場合も、RuntimeCommandに出る話者はcanonical actor IDへ正規化する。SurfaceやExtensionは `ゆ` や `パ` のような台本上の短縮名を解釈せず、`target.actorId` と `payload.speakerId` のcanonical actor IDだけを扱う。
 
 ## Extensions
