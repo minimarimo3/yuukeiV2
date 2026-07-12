@@ -3139,6 +3139,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_pack_poke_cloth_dialogue_matches_touched_zone() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let poke_cloth = |event_id: &str, zone: &str| {
+            let mut event = RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+            event.id = event_id.to_string();
+            event.actor_id = Some("partner".to_string());
+            event.payload.insert("hitZoneId".to_string(), json!(zone));
+            event
+                .payload
+                .insert("hitSurface".to_string(), json!("cloth"));
+            event
+        };
+
+        // 靴(足ゾーン)のclothは袖セリフになってはいけない
+        let result = adapter
+            .dispatch(&poke_cloth("evt_poke_shoe", "rightFoot"), &world)
+            .await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("shoe dialogue");
+        assert_eq!(dialogue.payload["text"], "……くつ。ひっぱっても、伸びません。");
+
+        // 腕ゾーンのclothは従来どおり袖セリフ
+        let result = adapter
+            .dispatch(&poke_cloth("evt_poke_sleeve", "leftArm"), &world)
+            .await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("sleeve dialogue");
+        assert_eq!(dialogue.payload["text"], "……そで、伸びます。");
+
+        // 胴体などその他のclothは汎用セリフ(袖と言わない)
+        let result = adapter
+            .dispatch(&poke_cloth("evt_poke_torso", "belly"), &world)
+            .await?;
+        let dialogue = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "dialogue.say")
+            .expect("torso dialogue");
+        assert_eq!(dialogue.payload["text"], "……服、伸びます。");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_adapter_ignores_disallowed_signal() -> Result<()> {
         let world = pack();
         let adapter = YuukeiDaihonAdapter::default();

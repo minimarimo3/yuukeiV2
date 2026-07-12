@@ -27,6 +27,7 @@ Yuukeiの変更履歴。[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)
 
 ### Fixed
 
+- default pack: 靴やズボンをつついても「そで、伸びます」と言う誤反応を修正(clothセリフを `入力#hitZoneId` で腕/足/その他に出し分け。VRoidモデルは靴・ズボンも `_CLOTH` マテリアルのため `hitSurface` だけでは部位を特定できない)
 - 既定データディレクトリをOSの一時領域からOS標準のアプリデータ領域へ移動(既存データは初回起動時に自動移行)。生活史がOS再起動・temp掃除で消える問題の修正
 
 ### Changed

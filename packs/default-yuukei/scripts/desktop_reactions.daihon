@@ -77,11 +77,23 @@
 話者: ゆ
 「服はひっぱらないでください。のびちゃいます。」
 
+### cloth pull partner sleeve
+合図: ＠住人_つつく
+条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」 かつ （入力#hitZoneId = 「leftArm」 または 入力#hitZoneId = 「rightArm」））
+話者: パ
+「……そで、伸びます。」
+
+### cloth pull partner shoes
+合図: ＠住人_つつく
+条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」 かつ （入力#hitZoneId = 「leftFoot」 または 入力#hitZoneId = 「rightFoot」））
+話者: パ
+「……くつ。ひっぱっても、伸びません。」
+
 ### cloth pull partner
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」）
 話者: パ
-「……そで、伸びます。」
+「……服、伸びます。」
 
 ### hair touch yuukei
 合図: ＠住人_なでる
