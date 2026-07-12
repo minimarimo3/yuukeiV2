@@ -199,7 +199,10 @@ pub(crate) fn inspect_world_pack_zip_archive<R: Read + Seek>(
     })
 }
 
-pub(crate) fn import_world_pack_zip_to_dir(data_dir: &Path, zip_path: impl AsRef<Path>) -> Result<PathBuf> {
+pub(crate) fn import_world_pack_zip_to_dir(
+    data_dir: &Path,
+    zip_path: impl AsRef<Path>,
+) -> Result<PathBuf> {
     let zip_path = zip_path.as_ref();
     let file = File::open(zip_path).map_err(|error| {
         DeviceHostError::WorldPackImport(format!("zipファイルを開けませんでした: {}", error))

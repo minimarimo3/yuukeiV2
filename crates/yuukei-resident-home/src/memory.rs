@@ -48,7 +48,10 @@ impl ResidentHome {
             .await
     }
 
-    pub(crate) async fn maybe_index_memory_for_trigger(&self, trigger_event: &RuntimeEvent) -> Result<()> {
+    pub(crate) async fn maybe_index_memory_for_trigger(
+        &self,
+        trigger_event: &RuntimeEvent,
+    ) -> Result<()> {
         if !matches!(
             trigger_event.kind.as_str(),
             "app.startup" | "device.sleep.before"
@@ -265,7 +268,6 @@ impl ResidentHome {
             .collect::<Vec<_>>();
         Ok((!memories.is_empty()).then_some(memories))
     }
-
 }
 
 fn indexed_memory_dates(records: &[EventLogRecord]) -> BTreeSet<NaiveDate> {
@@ -349,4 +351,3 @@ fn strip_references_from_value(value: &mut Value) {
         _ => {}
     }
 }
-

@@ -515,14 +515,8 @@ async fn begin_actor_window_drag(
             .map_err(to_message)?;
     }
     if let Some(walk_id) = cancelled_walk_id {
-        emit_stage_walk_ended_and_snapshot(
-            &app,
-            &runtime,
-            &actor_id,
-            "user-drag",
-            Some(&walk_id),
-        )
-        .await?;
+        emit_stage_walk_ended_and_snapshot(&app, &runtime, &actor_id, "user-drag", Some(&walk_id))
+            .await?;
     }
     Ok(started)
 }
@@ -788,12 +782,11 @@ async fn set_app_conversation_send_shortcut(
     state: State<'_, AppState>,
     shortcut: ConversationSendShortcut,
 ) -> Result<AppSettingsState, String> {
-    let settings = LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(
-        state.env.clone(),
-        shortcut,
-    )
-    .map_err(to_message)?;
-    app.emit("yuukei-app-settings", &settings).map_err(to_message)?;
+    let settings =
+        LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(state.env.clone(), shortcut)
+            .map_err(to_message)?;
+    app.emit("yuukei-app-settings", &settings)
+        .map_err(to_message)?;
     Ok(settings)
 }
 
@@ -929,8 +922,7 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let state = window.app_handle().state::<AppState>();
-                    if let Err(error) =
-                        LocalYuukeiRuntime::dismiss_onboarding_in(state.env.clone())
+                    if let Err(error) = LocalYuukeiRuntime::dismiss_onboarding_in(state.env.clone())
                     {
                         eprintln!("Yuukei onboarding dismiss error: {error}");
                     }
@@ -1857,14 +1849,8 @@ async fn run_stage_walk(
             eprintln!("Yuukei stage.walk position persistence failed: {error}");
         }
         if let Err(error) =
-            emit_stage_walk_ended_and_snapshot(
-                &app,
-                &runtime,
-                &actor_id,
-                "arrived",
-                Some(&walk_id),
-            )
-            .await
+            emit_stage_walk_ended_and_snapshot(&app, &runtime, &actor_id, "arrived", Some(&walk_id))
+                .await
         {
             eprintln!("Yuukei stage.walk completion failed: {error}");
         }

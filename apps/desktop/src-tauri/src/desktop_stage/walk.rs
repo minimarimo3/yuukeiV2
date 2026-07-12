@@ -143,10 +143,7 @@ pub(super) fn cancel_actor_walk_in_state(
     state: &mut DesktopStageState,
     actor_id: &str,
 ) -> Option<String> {
-    state
-        .active_walks
-        .remove(actor_id)
-        .map(|walk| walk.walk_id)
+    state.active_walks.remove(actor_id).map(|walk| walk.walk_id)
 }
 
 pub(super) fn advance_actor_walk_in_state(

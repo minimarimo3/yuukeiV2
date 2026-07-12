@@ -416,7 +416,6 @@ impl ResidentHome {
         self.set_cursor(appended.sequence)?;
         Ok(())
     }
-
 }
 
 fn extension_event_hop_count(record: &EventLogRecord) -> u32 {
@@ -429,4 +428,3 @@ fn extension_event_hop_count(record: &EventLogRecord) -> u32 {
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0)
 }
-

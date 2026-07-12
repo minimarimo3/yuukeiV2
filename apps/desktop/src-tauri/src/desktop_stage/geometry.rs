@@ -66,7 +66,10 @@ pub(super) fn resize_actor_bounds_from_bottom_center(
     }
 }
 
-pub(super) fn bounds_from_foot_anchor(anchor: StageFootAnchor, actor_size: ActorWindowSize) -> StageRect {
+pub(super) fn bounds_from_foot_anchor(
+    anchor: StageFootAnchor,
+    actor_size: ActorWindowSize,
+) -> StageRect {
     StageRect {
         x: anchor.x - actor_size.width * 0.5,
         y: anchor.y - actor_size.height,

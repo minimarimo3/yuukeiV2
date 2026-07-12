@@ -19,7 +19,6 @@ pub(crate) struct InterpretationState {
     pub(crate) pending_choice: Option<PendingChoice>,
 }
 
-
 impl ResidentHome {
     pub(crate) async fn maybe_generate_dialogue_fallback(
         &self,
@@ -518,7 +517,6 @@ impl ResidentHome {
         state.interpretation.in_flight = in_flight;
         Ok(())
     }
-
 }
 
 pub(crate) struct ResidentHomeInterpretHandler {

@@ -6,7 +6,6 @@ pub(crate) struct PendingChoice {
     sender: oneshot::Sender<String>,
 }
 
-
 impl ResidentHome {
     pub(crate) fn resolve_pending_choice_event(&self, event: &RuntimeEvent) -> Result<bool> {
         if event.kind != "conversation.choice" {
@@ -160,5 +159,4 @@ impl ResidentHome {
         self.emit_command_for_event(command, source_event).await?;
         Ok(())
     }
-
 }

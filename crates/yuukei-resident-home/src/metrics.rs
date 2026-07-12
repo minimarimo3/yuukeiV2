@@ -33,7 +33,10 @@ impl ResidentHome {
         Ok(())
     }
 
-    pub(crate) fn record_capability_result(&self, record: CapabilityResultRecord<'_>) -> Result<()> {
+    pub(crate) fn record_capability_result(
+        &self,
+        record: CapabilityResultRecord<'_>,
+    ) -> Result<()> {
         let result_payload = JsonMap::from([
             (
                 "invocationId".to_string(),
@@ -121,4 +124,3 @@ fn is_small_context_value(value: &Value) -> bool {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
     )
 }
-

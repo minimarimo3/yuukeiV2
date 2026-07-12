@@ -280,12 +280,14 @@ impl DesktopStageManager {
             .state
             .write()
             .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        let owns_composer = state.conversation_composer.as_ref().is_some_and(|composer| {
-            state
-                .monitors
-                .iter()
-                .any(|monitor| monitor.id == composer.monitor_id && monitor.label == overlay_label)
-        });
+        let owns_composer = state
+            .conversation_composer
+            .as_ref()
+            .is_some_and(|composer| {
+                state.monitors.iter().any(|monitor| {
+                    monitor.id == composer.monitor_id && monitor.label == overlay_label
+                })
+            });
         if !owns_composer || !close_conversation_composer_in_state(&mut state) {
             return Ok(());
         }
@@ -491,7 +493,14 @@ impl DesktopStageManager {
         app: &AppHandle,
         window: &WebviewWindow,
         actor_id: &str,
-    ) -> Result<(ActorWindowDragStarted, Option<StagePerchEnded>, Option<String>), String> {
+    ) -> Result<
+        (
+            ActorWindowDragStarted,
+            Option<StagePerchEnded>,
+            Option<String>,
+        ),
+        String,
+    > {
         let bounds = window_bounds(window)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let (ended, cancelled_walk_id) = {
@@ -504,7 +513,11 @@ impl DesktopStageManager {
         if ended.is_some() || cancelled_walk_id.is_some() {
             self.emit_state(app)?;
         }
-        Ok((ActorWindowDragStarted { session_id }, ended, cancelled_walk_id))
+        Ok((
+            ActorWindowDragStarted { session_id },
+            ended,
+            cancelled_walk_id,
+        ))
     }
 
     pub fn finish_actor_drag(
@@ -1122,12 +1135,16 @@ fn open_conversation_composer_in_state(
         .or_else(|| state.monitors.first());
     let anchor = match monitor {
         Some(monitor) if point_is_inside(&actor.anchor, &monitor.bounds) => actor.anchor.clone(),
-        Some(monitor) => clamp_anchor_to_monitor(default_actor_anchor(&actor.bounds), &monitor.bounds),
+        Some(monitor) => {
+            clamp_anchor_to_monitor(default_actor_anchor(&actor.bounds), &monitor.bounds)
+        }
         None => default_actor_anchor(&actor.bounds),
     };
     state.conversation_composer = Some(DesktopConversationComposer {
         actor_id: actor_id.to_string(),
-        monitor_id: monitor.map(|monitor| monitor.id.clone()).unwrap_or_default(),
+        monitor_id: monitor
+            .map(|monitor| monitor.id.clone())
+            .unwrap_or_default(),
         anchor,
     });
     Ok(())

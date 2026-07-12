@@ -232,7 +232,6 @@ pub fn time_period_for_hour(hour: u32) -> LocalTimePeriod {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

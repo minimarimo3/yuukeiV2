@@ -209,7 +209,6 @@ pub fn build_avatar_drag_event(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +311,4 @@ mod tests {
         assert!(!drop.payload.contains_key("x"));
         assert!(!drop.payload.contains_key("y"));
     }
-
 }

@@ -174,5 +174,4 @@ mod tests {
         assert!(!dir.path().join("app-activity.4.jsonl").exists());
         Ok(())
     }
-
 }

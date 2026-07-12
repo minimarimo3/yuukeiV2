@@ -35,7 +35,10 @@ pub(crate) fn resolve_default_data_dir(
     migrate_legacy_temp_data_dir(&legacy_temp_dir, &data_dir).unwrap_or(legacy_temp_dir)
 }
 
-pub(crate) fn migrate_legacy_temp_data_dir(legacy_temp_dir: &Path, data_dir: &Path) -> io::Result<PathBuf> {
+pub(crate) fn migrate_legacy_temp_data_dir(
+    legacy_temp_dir: &Path,
+    data_dir: &Path,
+) -> io::Result<PathBuf> {
     if !directory_has_entries(legacy_temp_dir)? || !directory_is_absent_or_empty(data_dir)? {
         return Ok(data_dir.to_path_buf());
     }
@@ -204,5 +207,4 @@ mod tests {
         assert!(selected.join("events.sqlite3").exists());
         Ok(())
     }
-
 }

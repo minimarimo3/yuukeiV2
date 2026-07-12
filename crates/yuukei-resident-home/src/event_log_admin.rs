@@ -277,7 +277,6 @@ impl ResidentHome {
             allow_references: grant.allow_references && permission.allow_references,
         })
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -307,4 +306,3 @@ pub(crate) fn event_record_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
-

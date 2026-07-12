@@ -20,7 +20,6 @@ pub(crate) enum TalkImpulseModeration {
     Skip { source_event: RuntimeEvent },
 }
 
-
 impl ResidentHome {
     pub(crate) async fn maybe_evaluate_mood(
         &self,
@@ -341,7 +340,6 @@ impl ResidentHome {
         self.set_cursor(appended.sequence)?;
         Ok(())
     }
-
 }
 
 fn mood_interval_minutes(router: &CapabilityRouter) -> Option<u64> {
@@ -440,4 +438,3 @@ fn current_talk_impulse_payload(mood: &MoodSnapshot, trigger: Option<&str>) -> J
     }
     payload
 }
-

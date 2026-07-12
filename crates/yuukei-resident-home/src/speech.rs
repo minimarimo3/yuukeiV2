@@ -151,5 +151,4 @@ impl ResidentHome {
             .await?;
         Ok(())
     }
-
 }

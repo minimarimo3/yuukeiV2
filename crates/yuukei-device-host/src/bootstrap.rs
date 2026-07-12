@@ -340,4 +340,3 @@ pub(crate) fn trim_event_log_if_needed(home: &ResidentHome, logger: &AppLogger) 
         }
     }
 }
-

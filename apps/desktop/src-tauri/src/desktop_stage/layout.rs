@@ -26,7 +26,9 @@ pub(super) fn reconcile_actor_windows(
     }
 }
 
-pub(super) fn actor_window_specs(catalog: &DesktopActorSurfaceAssetCatalog) -> Vec<ActorWindowSpec> {
+pub(super) fn actor_window_specs(
+    catalog: &DesktopActorSurfaceAssetCatalog,
+) -> Vec<ActorWindowSpec> {
     catalog
         .actors
         .iter()
@@ -41,7 +43,11 @@ pub(super) fn actor_window_specs(catalog: &DesktopActorSurfaceAssetCatalog) -> V
         .collect()
 }
 
-pub(super) fn actor_from_spec(spec: &ActorWindowSpec, bounds: StageRect, visible: bool) -> StageActor {
+pub(super) fn actor_from_spec(
+    spec: &ActorWindowSpec,
+    bounds: StageRect,
+    visible: bool,
+) -> StageActor {
     StageActor {
         actor_id: spec.actor_id.clone(),
         display_name: spec.display_name.clone(),
@@ -64,7 +70,10 @@ pub(super) fn window_bounds(window: &WebviewWindow) -> Result<StageRect, String>
     })
 }
 
-pub(super) fn apply_actor_window_bounds(window: &WebviewWindow, bounds: &StageRect) -> Result<(), String> {
+pub(super) fn apply_actor_window_bounds(
+    window: &WebviewWindow,
+    bounds: &StageRect,
+) -> Result<(), String> {
     let current = window_bounds(window).ok();
     if current
         .as_ref()
@@ -274,7 +283,10 @@ pub(super) fn restore_actor_to_desktop(
     Some((label, bounds))
 }
 
-pub(super) fn best_monitor_bounds_for_rect(rect: &StageRect, monitors: &[StageMonitor]) -> StageRect {
+pub(super) fn best_monitor_bounds_for_rect(
+    rect: &StageRect,
+    monitors: &[StageMonitor],
+) -> StageRect {
     monitors
         .iter()
         .max_by(|a, b| {

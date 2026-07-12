@@ -218,9 +218,9 @@ mod runtime;
 mod runtime_settings_api;
 mod settings;
 mod surface_assets;
-mod world_pack_import;
 #[cfg(test)]
 mod tests;
+mod world_pack_import;
 
 pub use app_logger::*;
 pub use capability_usage::*;

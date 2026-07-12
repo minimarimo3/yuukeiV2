@@ -69,7 +69,10 @@ pub(super) fn monitor_snapshots(app: &AppHandle) -> Result<Vec<StageMonitor>, St
         .collect())
 }
 
-pub(super) fn create_stage_overlay_window(app: &AppHandle, monitor: &StageMonitor) -> Result<(), String> {
+pub(super) fn create_stage_overlay_window(
+    app: &AppHandle,
+    monitor: &StageMonitor,
+) -> Result<(), String> {
     let window = WebviewWindowBuilder::new(app, &monitor.label, stage_overlay_url(&monitor.id))
         .title("")
         .inner_size(monitor.bounds.width, monitor.bounds.height)

@@ -1068,10 +1068,8 @@ impl LocalYuukeiRuntime {
         privacy: Option<Privacy>,
         actor_id: Option<String>,
     ) -> Result<Vec<RuntimeCommand>> {
-        self.emit_runtime_event_with_options_and_causality(
-            kind, payload, privacy, actor_id, None,
-        )
-        .await
+        self.emit_runtime_event_with_options_and_causality(kind, payload, privacy, actor_id, None)
+            .await
     }
 
     async fn emit_runtime_event_with_options_and_causality(
