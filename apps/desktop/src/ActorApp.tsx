@@ -72,6 +72,7 @@ type VrmStageProps = {
   onStageAnchorReport(actorId: string, anchor: StageAnchor): Promise<void>;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
+  onConversationOpen(actorId: string): Promise<void>;
   client: Pick<YuukeiClient, "beginActorWindowDrag" | "moveActorWindowDrag" | "finishActorWindowDrag" | "cancelActorWindowDrag" | "notifyAvatarGestureGrab" | "notifyAvatarGestureDrop">;
 };
 
@@ -149,6 +150,12 @@ export function ActorApp({
     },
     [client]
   );
+  const openConversation = useCallback(
+    async (reportedActorId: string) => {
+      await client.openConversationComposer(reportedActorId);
+    },
+    [client]
+  );
 
   return (
     <main className="actor-shell" aria-label="Yuukei actor surface">
@@ -158,6 +165,7 @@ export function ActorApp({
         onStageAnchorReport={reportStageAnchor}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
+        onConversationOpen={openConversation}
         client={client}
       />
       {visibleStatus ? (
@@ -189,6 +197,7 @@ function VrmStage({
   onStageAnchorReport,
   onHitTestChange,
   onAvatarGesturePoke,
+  onConversationOpen,
   client
 }: VrmStageProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -390,6 +399,24 @@ function VrmStage({
         semanticHit,
         client: { x: event.clientX, y: event.clientY },
         screen: { x: event.screenX, y: event.screenY }
+      });
+    }
+
+    function handleContextMenu(event: MouseEvent) {
+      const actorHit = actorAtPointer(
+        event as PointerEvent,
+        renderer.domElement,
+        camera,
+        loadedActors,
+        semanticRaycaster
+      );
+      if (!actorHit) return;
+      void openConversationFromContextMenu(
+        event,
+        actorHit.actorId,
+        onConversationOpen
+      ).catch((error) => {
+        console.warn("Failed to open conversation composer", error);
       });
     }
 
@@ -671,6 +698,7 @@ function VrmStage({
     canvas.addEventListener("pointermove", handlePointerMove);
     canvas.addEventListener("pointerup", handlePointerUp);
     canvas.addEventListener("pointercancel", handlePointerCancel);
+    canvas.addEventListener("contextmenu", handleContextMenu);
     resize();
     void loadActors().catch((error) => {
       console.error("Failed to load VRM actors", error);
@@ -687,6 +715,7 @@ function VrmStage({
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", handlePointerUp);
       canvas.removeEventListener("pointercancel", handlePointerCancel);
+      canvas.removeEventListener("contextmenu", handleContextMenu);
       for (const timer of holdTimers.values()) window.clearTimeout(timer);
       holdTimers.clear();
       if (moveFrame) window.cancelAnimationFrame(moveFrame);
@@ -704,6 +733,7 @@ function VrmStage({
     client,
     onAvatarGesturePoke,
     onHitTestChange,
+    onConversationOpen,
     onStageAnchorReport
   ]);
 
@@ -712,6 +742,15 @@ function VrmStage({
       <canvas className="actor-canvas" ref={canvasRef} />
     </div>
   );
+}
+
+export async function openConversationFromContextMenu(
+  event: Pick<MouseEvent, "preventDefault">,
+  actorId: string,
+  open: (actorId: string) => Promise<void>
+): Promise<void> {
+  event.preventDefault();
+  await open(actorId);
 }
 
 async function loadMotionActions(

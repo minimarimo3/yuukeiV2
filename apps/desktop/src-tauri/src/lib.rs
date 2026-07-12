@@ -414,6 +414,20 @@ fn open_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_conversation_composer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    actor_id: String,
+) -> Result<(), String> {
+    state.stage.open_conversation_composer(&app, &actor_id)
+}
+
+#[tauri::command]
+fn close_conversation_composer(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.stage.close_conversation_composer(&app)
+}
+
+#[tauri::command]
 async fn send_conversation_text(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -940,6 +954,8 @@ pub fn run() {
             report_actor_stage_anchor,
             dismiss_stage_bubble,
             open_settings_window,
+            open_conversation_composer,
+            close_conversation_composer,
             send_conversation_text,
             send_conversation_choice,
             send_avatar_gesture_poke,

@@ -63,6 +63,7 @@ struct DesktopStageState {
     persisted_anchors: BTreeMap<String, StageFootAnchor>,
     active_drags: BTreeMap<String, ActiveActorDrag>,
     active_walks: BTreeMap<String, ActiveStageWalk>,
+    conversation_composer: Option<DesktopConversationComposer>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
 }
@@ -80,6 +81,7 @@ impl Default for DesktopStageState {
             persisted_anchors: BTreeMap::new(),
             active_drags: BTreeMap::new(),
             active_walks: BTreeMap::new(),
+            conversation_composer: None,
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: false,
         }
@@ -164,6 +166,15 @@ pub struct DesktopStageSnapshot {
     pub monitors: Vec<StageMonitor>,
     pub actors: Vec<StageActor>,
     pub bubbles: Vec<StageBubble>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_composer: Option<DesktopConversationComposer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopConversationComposer {
+    pub actor_id: String,
+    pub anchor: StageAnchor,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -217,6 +228,30 @@ impl DesktopStageManager {
         let snapshot = self.snapshot()?;
         self.raise_overlay_windows(app, &snapshot.monitors)?;
         app.emit(STAGE_STATE_EVENT, &snapshot).map_err(to_message)
+    }
+
+    pub fn open_conversation_composer(
+        &self,
+        app: &AppHandle,
+        actor_id: &str,
+    ) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        open_conversation_composer_in_state(&mut state, actor_id)?;
+        drop(state);
+        self.emit_state(app)
+    }
+
+    pub fn close_conversation_composer(&self, app: &AppHandle) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        close_conversation_composer_in_state(&mut state);
+        drop(state);
+        self.emit_state(app)
     }
 
     pub fn set_persisted_actor_anchors(
@@ -625,8 +660,15 @@ impl DesktopStageManager {
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
             if let Some(actor) = state.actors.get_mut(&actor_id) {
                 actor.bounds = bounds;
-                actor.anchor = anchor;
+                actor.anchor = anchor.clone();
                 actor.visible = window.is_visible().unwrap_or(true);
+            }
+            if let Some(composer) = state
+                .conversation_composer
+                .as_mut()
+                .filter(|composer| composer.actor_id == actor_id)
+            {
+                composer.anchor = anchor;
             }
         }
         self.emit_state(app)
@@ -996,6 +1038,13 @@ fn dismiss_bubble_in_state(state: &mut DesktopStageState, bubble_id: &str, creat
 }
 
 fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTreeSet<String>) {
+    if state
+        .conversation_composer
+        .as_ref()
+        .is_some_and(|composer| !actor_ids.contains(&composer.actor_id))
+    {
+        state.conversation_composer = None;
+    }
     state
         .bubbles
         .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
@@ -1011,6 +1060,25 @@ fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTre
     state
         .active_walks
         .retain(|actor_id, _| actor_ids.contains(actor_id));
+}
+
+fn open_conversation_composer_in_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+) -> Result<(), String> {
+    let actor = state
+        .actors
+        .get(actor_id)
+        .ok_or_else(|| format!("unknown actor for conversation composer: {actor_id}"))?;
+    state.conversation_composer = Some(DesktopConversationComposer {
+        actor_id: actor_id.to_string(),
+        anchor: actor.anchor.clone(),
+    });
+    Ok(())
+}
+
+fn close_conversation_composer_in_state(state: &mut DesktopStageState) {
+    state.conversation_composer = None;
 }
 
 fn active_bubble_id_for_actor(state: &DesktopStageState, actor_id: &str) -> Option<String> {
@@ -1052,6 +1120,7 @@ impl DesktopStageState {
             monitors: self.monitors.clone(),
             actors: self.actors.values().cloned().collect(),
             bubbles: self.bubbles.values().cloned().collect(),
+            conversation_composer: self.conversation_composer.clone(),
         }
     }
 }

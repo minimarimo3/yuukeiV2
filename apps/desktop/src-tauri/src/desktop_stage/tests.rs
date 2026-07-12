@@ -2,6 +2,45 @@ use super::*;
 use std::collections::VecDeque;
 
 #[test]
+fn conversation_composer_opens_for_actor_and_closes() {
+    let mut state = bubble_state(&["yuukei", "partner"]);
+
+    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
+    assert_eq!(
+        state
+            .snapshot()
+            .conversation_composer
+            .as_ref()
+            .map(|composer| composer.actor_id.as_str()),
+        Some("yuukei")
+    );
+
+    open_conversation_composer_in_state(&mut state, "partner").expect("replace composer");
+    assert_eq!(
+        state
+            .snapshot()
+            .conversation_composer
+            .as_ref()
+            .map(|composer| composer.actor_id.as_str()),
+        Some("partner")
+    );
+
+    close_conversation_composer_in_state(&mut state);
+    assert!(state.snapshot().conversation_composer.is_none());
+}
+
+#[test]
+fn conversation_composer_rejects_unknown_actor() {
+    let mut state = bubble_state(&["yuukei"]);
+
+    let error = open_conversation_composer_in_state(&mut state, "missing")
+        .expect_err("unknown actor must fail");
+
+    assert!(error.contains("unknown actor"));
+    assert!(state.snapshot().conversation_composer.is_none());
+}
+
+#[test]
 fn actor_window_labels_hex_encode_actor_ids() {
     assert_eq!(actor_window_label("yuukei"), "actor-7975756b6569");
     assert_eq!(actor_window_label("partner"), "actor-706172746e6572");
@@ -331,6 +370,7 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
+        conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };
@@ -691,6 +731,7 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
+        conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };

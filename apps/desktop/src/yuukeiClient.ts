@@ -363,6 +363,12 @@ export type DesktopStageState = {
   monitors: StageMonitor[];
   actors: StageActor[];
   bubbles: StageBubble[];
+  conversationComposer?: DesktopConversationComposer;
+};
+
+export type DesktopConversationComposer = {
+  actorId: string;
+  anchor: StageAnchor;
 };
 
 export type ActorWindowDragStarted = { sessionId: string };
@@ -418,6 +424,8 @@ export type YuukeiClient = {
   reportActorStageAnchor(actorId: string, anchor: StageAnchor): Promise<void>;
   dismissStageBubble(bubbleId: string): Promise<void>;
   openSettingsWindow(): Promise<void>;
+  openConversationComposer(actorId: string): Promise<void>;
+  closeConversationComposer(): Promise<void>;
   sendConversationText(text: string): Promise<RuntimeCommand[]>;
   sendConversationChoice(
     choiceId: string,
@@ -551,6 +559,9 @@ export const tauriYuukeiClient: YuukeiClient = {
   dismissStageBubble: (bubbleId: string) =>
     invoke<void>("dismiss_stage_bubble", { bubbleId }),
   openSettingsWindow: () => invoke<void>("open_settings_window"),
+  openConversationComposer: (actorId: string) =>
+    invoke<void>("open_conversation_composer", { actorId }),
+  closeConversationComposer: () => invoke<void>("close_conversation_composer"),
   sendConversationText: (text: string) =>
     invoke<RuntimeCommand[]>("send_conversation_text", { text }),
   sendConversationChoice: (choiceId: string, choice: string, index: number) =>

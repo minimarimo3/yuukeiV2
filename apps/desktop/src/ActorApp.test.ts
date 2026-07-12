@@ -9,6 +9,7 @@ import {
   headingRotationY,
   loadInitialActorSurfaceState,
   normalizeMotionId,
+  openConversationFromContextMenu,
   shouldStartAvatarGrab
 } from "./ActorApp";
 import {
@@ -27,6 +28,20 @@ import {
 import type { ActorSurfaceAsset, YuukeiClient } from "./yuukeiClient";
 
 describe("ActorApp renderer helpers", () => {
+  it("opens conversation for the context-clicked actor", async () => {
+    const preventDefault = vi.fn();
+    const open = vi.fn(async () => undefined);
+
+    await openConversationFromContextMenu(
+      { preventDefault },
+      "yuukei",
+      open
+    );
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledWith("yuukei");
+  });
+
   it("normalizes authored motion aliases to renderer motion ids", () => {
     expect(normalizeMotionId("walk")).toBe("walk");
     expect(normalizeMotionId("歩く")).toBe("walk");
