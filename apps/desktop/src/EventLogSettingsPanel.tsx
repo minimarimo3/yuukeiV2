@@ -55,7 +55,7 @@ export function EventLogSettingsPanel({
                 保存されているイベントの種類と内容を確認できます。
               </p>
             </div>
-            <span>{page ? `${records.length} / ${page.total}` : "loading"}</span>
+            <span>{page ? `${page.total}件中 ${records.length}件を表示` : "読み込み中"}</span>
           </div>
           {error ? <p className="settings-error">{error}</p> : null}
           <div className="event-log-filters">
@@ -69,7 +69,7 @@ export function EventLogSettingsPanel({
               />
             </label>
             <label>
-              <span>privacy</span>
+              <span>プライバシー</span>
               <select
                 value={privacyFilter}
                 onChange={(event) =>
@@ -79,7 +79,7 @@ export function EventLogSettingsPanel({
                 }
               >
                 <option value="all">すべて</option>
-                <option value="desktopObservation">desktop-observation</option>
+                <option value="desktopObservation">端末の観測</option>
                 <option value="none">なし</option>
               </select>
             </label>
@@ -97,10 +97,11 @@ export function EventLogSettingsPanel({
               <article className="memory-row event-log-row" key={record.id}>
                 <div className="memory-text">
                   <p>{eventLogSummary(record)}</p>
-                  <small>
-                    {formatEventLogTimestamp(record.timestamp)} / {record.kind} /{" "}
-                    {record.privacy?.category ?? "privacyなし"}
-                  </small>
+                  <dl className="event-log-meta">
+                    <div><dt>種類</dt><dd>{record.kind}</dd></div>
+                    <div><dt>日時</dt><dd>{formatEventLogTimestamp(record.timestamp)}</dd></div>
+                    <div><dt>プライバシー</dt><dd>{record.privacy?.category ?? "なし"}</dd></div>
+                  </dl>
                 </div>
               </article>
             ))}
@@ -119,7 +120,7 @@ export function EventLogSettingsPanel({
             </button>
           ) : null}
         </section>
-        <section className="memory-section event-log-delete">
+        <section className="memory-section event-log-delete danger-zone-section">
           <div className="memory-section-head">
             <h3>削除</h3>
           </div>
@@ -154,7 +155,7 @@ export function EventLogSettingsPanel({
         </button>
         <button
           type="button"
-          className="secondary-button"
+          className="danger-button"
           onClick={onDeleteAll}
           disabled={loading}
         >

@@ -15,8 +15,10 @@
       {
         "label": "settings",
         "title": "Yuukei Settings",
-        "width": 760,
-        "height": 640,
+        "width": 980,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 560,
         "visible": false,
         "resizable": true
       }

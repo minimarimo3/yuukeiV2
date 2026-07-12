@@ -269,7 +269,7 @@ input {
 }
 
 .surface-shell {
-  width: min(1180px, 100%);
+  width: min(1440px, 100%);
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto auto auto minmax(120px, 24vh);
@@ -429,7 +429,7 @@ input {
 
 .settings-workspace {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   min-height: 360px;
   overflow: hidden;
   border: 1px solid rgba(228, 231, 236, 0.95);
@@ -533,7 +533,7 @@ input {
 .settings-content {
   min-width: 0;
   overflow: auto;
-  padding: 28px;
+  padding: clamp(20px, 3vw, 36px);
   background: linear-gradient(180deg, #ffffff 0%, #fafbfd 100%);
 }
 
@@ -559,8 +559,8 @@ input {
 
 .settings-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
   gap: 18px;
   min-width: 0;
   margin-top: 22px;
@@ -587,6 +587,13 @@ input {
   color: var(--text);
   font-size: 15px;
   font-weight: 650;
+}
+
+.settings-section-label {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .settings-path {
@@ -724,7 +731,12 @@ input {
 
 .settings-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.settings-actions-wrap button {
+  white-space: nowrap;
 }
 
 .settings-actions button,
@@ -766,6 +778,49 @@ input {
 .settings-actions .secondary-button:hover,
 .extension-actions .secondary-button:hover {
   background: var(--panel-muted);
+}
+
+.danger-button {
+  min-width: 88px;
+  height: 38px;
+  border: 1px solid #fecdca;
+  border-radius: var(--radius);
+  padding: 0 14px;
+  background: #fff5f5;
+  color: var(--danger);
+  cursor: pointer;
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.danger-button:hover {
+  background: #fee4e2;
+}
+
+.danger-button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.danger-zone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  border-top: 1px solid #fecdca;
+  padding-top: 16px;
+}
+
+.danger-zone strong {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.danger-zone p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .extension-panel {
@@ -901,7 +956,7 @@ input {
 .event-log-filters,
 .event-log-delete label {
   display: grid;
-  grid-template-columns: minmax(120px, 0.3fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(120px, 180px) minmax(180px, 1fr) auto;
   gap: 8px;
   align-items: center;
 }
@@ -950,6 +1005,82 @@ input {
 
 .event-log-row {
   grid-template-columns: minmax(0, 1fr);
+  padding: 14px;
+  background: #ffffff;
+}
+
+.event-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+}
+
+.event-log-meta div {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+}
+
+.event-log-meta dt,
+.event-log-meta dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.event-log-meta dt {
+  color: #475467;
+  font-weight: 700;
+}
+
+.event-log-meta dd {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.scene-history-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.scene-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--panel-muted);
+}
+
+.scene-history-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.scene-history-main strong {
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.scene-history-main small,
+.scene-history-row time {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scene-history-main small {
+  overflow-wrap: anywhere;
+}
+
+.scene-history-row time {
+  white-space: nowrap;
 }
 
 .extension-list {
@@ -1031,6 +1162,7 @@ input {
 
 .extension-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -1083,7 +1215,7 @@ input {
 .extension-setting-field,
 .app-setting-field {
   display: grid;
-  grid-template-columns: minmax(132px, 0.42fr) minmax(0, 1fr);
+  grid-template-columns: minmax(150px, 0.38fr) minmax(220px, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;

@@ -847,10 +847,11 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       label: "World Pack",
       ariaLabel: "World Pack settings",
       panelId: "settings-world-pack-panel",
+      panelClassName: "world-pack-panel",
       content: (
         <>
           <div className="settings-copy">
-            <h2>World Pack</h2>
+            <p className="settings-section-label">現在使用中</p>
             <p className="settings-title">
               {worldPackStatus?.activeInstall.displayName ?? "loading"}
             </p>
@@ -874,7 +875,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               }
             />
           </div>
-          <div className="settings-actions">
+          <div className="settings-actions settings-actions-wrap">
             <button
               type="button"
               onClick={chooseWorldPack}
@@ -896,7 +897,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               onClick={resetWorldPack}
               disabled={switchingPack}
             >
-              Default
+              標準に戻す
             </button>
           </div>
         </>
@@ -907,28 +908,25 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       label: "シーン履歴",
       ariaLabel: "Scene history settings",
       panelId: "settings-scene-history-panel",
+      panelClassName: "scene-history-panel",
       content: (
         <div className="settings-copy">
-          <h2>シーン履歴</h2>
           <p className="settings-title">このWorld Packの実行履歴</p>
           <p className="settings-path">{sceneHistory?.historyPath ?? ""}</p>
-          <div className="settings-actions">
-            <button type="button" className="secondary-button" onClick={resetSceneHistory}>
-              全リセット
-            </button>
-          </div>
           {sceneHistory?.entries.length ? (
-            <div className="event-log-list" aria-label="シーン実行履歴">
+            <div className="scene-history-list" aria-label="シーン実行履歴">
               {sceneHistory.entries.map((entry) => (
                 <article
-                  className="event-log-row"
+                  className="scene-history-row"
                   key={`${entry.eventName}:${entry.sceneName}`}
                 >
-                  <div>
+                  <div className="scene-history-main">
                     <strong>{entry.sceneName}</strong>
-                    <small>{entry.eventName}</small>
+                    <small>合図: {entry.eventName}</small>
                   </div>
-                  <span>{new Date(entry.lastExecutedAt).toLocaleString()}</span>
+                  <time dateTime={entry.lastExecutedAt}>
+                    {new Date(entry.lastExecutedAt).toLocaleString()}
+                  </time>
                 </article>
               ))}
             </div>
@@ -936,6 +934,15 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <p className="settings-note">まだ記録されたシーンはありません。</p>
           )}
           {worldPackError ? <p className="settings-error">{worldPackError}</p> : null}
+          <div className="danger-zone">
+            <div>
+              <strong>履歴をリセット</strong>
+              <p>このWorld Packのシーン実行履歴をすべて削除します。</p>
+            </div>
+            <button type="button" className="danger-button" onClick={resetSceneHistory}>
+              全リセット
+            </button>
+          </div>
         </div>
       )
     },
@@ -1046,11 +1053,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       content: (
         <>
           <div className="settings-copy">
-            <h2>Extensions</h2>
             <p className="settings-title">
               {extensionState
-                ? `${extensionState.installed.length} installed`
-                : "loading"}
+                ? `${extensionState.installed.length}件のExtensionをインストール済み`
+                : "読み込み中"}
             </p>
             <p className="settings-path">
               {extensionState?.extensionRoot ?? ""}
@@ -1156,7 +1162,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         }
                         onClick={() => moveExtension(extension.extensionId, -1)}
                       >
-                        上
+                        上へ
                       </button>
                       <button
                         type="button"
@@ -1169,7 +1175,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         }
                         onClick={() => moveExtension(extension.extensionId, 1)}
                       >
-                        下
+                        下へ
                       </button>
                       <button
                         type="button"
@@ -1183,7 +1189,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                       </button>
                       <button
                         type="button"
-                        className="secondary-button compact-button"
+                        className="danger-button compact-button"
                         disabled={changingExtensions}
                         onClick={() => uninstallExtension(extension.extensionId)}
                       >
@@ -1262,7 +1268,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       <section className="settings-workspace" aria-label="Settings">
         <aside className="settings-sidebar">
           <div className="settings-sidebar-head">
-            <p className="settings-eyebrow">Preferences</p>
             <h2>設定</h2>
           </div>
           <nav className="settings-menu" aria-label="設定カテゴリ" role="tablist">
@@ -1291,10 +1296,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         <div className="settings-content">
           <header className="settings-content-header">
             <div>
-              <p className="settings-eyebrow">Selected</p>
+              <p className="settings-eyebrow">設定項目</p>
               <h2>{activeSettingsCategory.label}</h2>
             </div>
-            <span className="settings-badge">{activeSettingsCategory.id}</span>
           </header>
           <section
             className={[

@@ -525,11 +525,15 @@ describe("App", () => {
     render(<App client={client} />);
 
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
-    expect(screen.queryByText("0 installed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("0件のExtensionをインストール済み")
+    ).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
 
-    expect(await screen.findByText("0 installed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("0件のExtensionをインストール済み")
+    ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Extensions" })).toHaveAttribute(
       "aria-selected",
       "true"
@@ -738,7 +742,7 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByRole("tab", { name: "シーン履歴" }));
     expect(await screen.findByText("greeting")).toBeInTheDocument();
-    expect(screen.getByText("conversation.text")).toBeInTheDocument();
+    expect(screen.getByText("合図: conversation.text")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "全リセット" }));
     expect(confirm).toHaveBeenCalledWith(
@@ -784,7 +788,7 @@ describe("App", () => {
 
     expect(await screen.findByText("fileName: photo.png")).toBeInTheDocument();
     expect(screen.getByText(/desktop.download.completed/)).toBeInTheDocument();
-    expect(screen.getAllByText(/desktop-observation/).length).toBeGreaterThan(1);
+    expect(screen.getByText("desktop-observation")).toBeInTheDocument();
     expect(screen.getByText("text: おはよう")).toBeInTheDocument();
   });
 
@@ -995,7 +999,7 @@ describe("App", () => {
     render(<App client={client} />);
 
     await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
-    await screen.findByText("0 installed");
+    await screen.findByText("0件のExtensionをインストール済み");
     await userEvent.click(screen.getByRole("button", { name: "追加" }));
 
     await waitFor(() => {
@@ -1047,7 +1051,7 @@ describe("App", () => {
       );
     });
 
-    await userEvent.click(screen.getAllByRole("button", { name: "下" })[0]!);
+    await userEvent.click(screen.getAllByRole("button", { name: "下へ" })[0]!);
     await waitFor(() => {
       expect(client.setExtensionHookOrder).toHaveBeenCalledWith(
         "beforeCommandEmit",
