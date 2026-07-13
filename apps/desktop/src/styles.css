@@ -79,6 +79,7 @@ input {
   height: 100%;
   display: block;
   background: transparent;
+  filter: url(#actor-silhouette-outline);
 }
 
 .actor-bubble-layer {

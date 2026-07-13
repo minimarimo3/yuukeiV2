@@ -759,6 +759,39 @@ function VrmStage({
 
   return (
     <div className="actor-stage" ref={containerRef}>
+      <svg
+        aria-hidden="true"
+        height="0"
+        style={{ pointerEvents: "none", position: "absolute" }}
+        width="0"
+      >
+        <filter
+          colorInterpolationFilters="sRGB"
+          height="110%"
+          id="actor-silhouette-outline"
+          width="110%"
+          x="-5%"
+          y="-5%"
+        >
+          <feMorphology
+            in="SourceAlpha"
+            operator="dilate"
+            radius="2"
+            result="outline-shape"
+          />
+          <feFlood floodColor="#ffffff" result="outline-color" />
+          <feComposite
+            in="outline-color"
+            in2="outline-shape"
+            operator="in"
+            result="outline"
+          />
+          <feMerge>
+            <feMergeNode in="outline" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </svg>
       <canvas className="actor-canvas" ref={canvasRef} />
     </div>
   );
