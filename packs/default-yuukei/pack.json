@@ -89,6 +89,7 @@
       "avatar.gesture.pat",
       "avatar.gesture.grab",
       "avatar.gesture.drop",
+      "stage.walk.ended",
       "presence.idle.start",
       "presence.idle.end",
       "desktop.window.appeared",
@@ -103,6 +104,8 @@
     "optional": [
       "speech.synthesis",
       "dialogue.generate",
+      "dialogue.interpret",
+      "dialogue.extract",
       "mood.evaluate"
     ]
   },
@@ -117,6 +120,7 @@
     "scripts": [
       "scripts/desktop_reactions.daihon",
       "scripts/conversation_fallback.daihon",
+      "scripts/daily_life.daihon",
       "scripts/random_talk.daihon",
       "scripts/presence_away.daihon",
       "scripts/presence_return.daihon",
@@ -125,7 +129,19 @@
       "scripts/window_perch.daihon"
     ]
   },
-  "initialVariables": {},
+  "initialVariables": {
+    "全体#暮らし開始済み": false,
+    "全体#散歩回数": 0,
+    "全体#外出回数": 0,
+    "全体#最後の届きもの": "",
+    "全体#届きもの未確認": false,
+    "全体#届きものを見た": false,
+    "全体#留守番回数": 0,
+    "全体#留守番あと話": false,
+    "全体#ユーザー呼び名": "",
+    "全体#最近の調子": "",
+    "全体#AI雑談回数": 0
+  },
   "uiSpace": {
     "desktop": "shared-room"
   }

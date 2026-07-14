@@ -3226,6 +3226,47 @@ mod tests {
         requests: Vec<DaihonChoiceRequest>,
     }
 
+    struct AiMomentHandler {
+        interpretation: String,
+        extracted: String,
+        generated: Option<DaihonGenerateResponse>,
+        interpret_requests: Vec<DaihonInterpretRequest>,
+        extract_requests: Vec<DaihonExtractRequest>,
+        generate_requests: Vec<DaihonGenerateRequest>,
+    }
+
+    #[async_trait]
+    impl DaihonInterpretHandler for AiMomentHandler {
+        async fn interpret(&mut self, request: DaihonInterpretRequest) -> String {
+            self.interpret_requests.push(request);
+            self.interpretation.clone()
+        }
+
+        async fn extract(&mut self, request: DaihonExtractRequest) -> String {
+            self.extract_requests.push(request);
+            self.extracted.clone()
+        }
+
+        async fn generate(
+            &mut self,
+            request: DaihonGenerateRequest,
+        ) -> Option<DaihonGenerateResponse> {
+            self.generate_requests.push(request);
+            self.generated.clone()
+        }
+    }
+
+    fn ai_moment_handler() -> AiMomentHandler {
+        AiMomentHandler {
+            interpretation: yuukei_daihon::UNKNOWN_INTERPRETATION.to_string(),
+            extracted: yuukei_daihon::UNKNOWN_INTERPRETATION.to_string(),
+            generated: None,
+            interpret_requests: Vec::new(),
+            extract_requests: Vec::new(),
+            generate_requests: Vec::new(),
+        }
+    }
+
     #[async_trait]
     impl DaihonInterpretHandler for ChoiceHandler {
         async fn interpret(&mut self, _request: DaihonInterpretRequest) -> String {
@@ -3421,6 +3462,251 @@ mod tests {
                 .as_ref()
                 .and_then(|target| target.actor_id.as_deref()),
             Some("yuukei")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_first_life_tick_starts_an_authored_walk() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        assert!(world.allows_signal("presence.life_tick"));
+        assert!(world.allows_signal("stage.walk.ended"));
+
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut event = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        event.id = "evt_first_life_tick".to_string();
+        event
+            .payload
+            .insert("actorLocation".to_string(), json!("desktop"));
+        event
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.executed_scenes[0].scene_name, "最初の見回り");
+        let walk = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "stage.walk")
+            .expect("authored first walk");
+        assert_eq!(walk.payload["destination"], "right-edge");
+        assert!(result
+            .commands
+            .iter()
+            .any(|command| command.kind == "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_download_continues_into_folder_and_later_talk() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut download =
+            RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+        download.id = "evt_download_continuity".to_string();
+        download
+            .payload
+            .insert("fileName".to_string(), json!("おやつ.png"));
+        download
+            .payload
+            .insert("fileCategory".to_string(), json!("image"));
+        adapter.dispatch(&download, &world).await?;
+
+        let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        folder.id = "evt_folder_continuity".to_string();
+        folder
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        folder
+            .payload
+            .insert("recentDownloadFileName".to_string(), json!("おやつ.png"));
+        folder
+            .payload
+            .insert("recentDownloadCategory".to_string(), json!("image"));
+        folder
+            .payload
+            .insert("actorLocation".to_string(), json!("desktop"));
+        folder
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        let folder_result = adapter.dispatch(&folder, &world).await?;
+        assert_eq!(
+            folder_result.executed_scenes[0].scene_name,
+            "新しい届きものを一緒に確認"
+        );
+        assert!(folder_result.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("ここにありました"))
+        }));
+
+        let mut talk = talk_impulse_event("evt_download_followup");
+        talk.payload.insert("timePeriod".to_string(), json!("昼"));
+        talk.payload.insert("気分".to_string(), json!("ふつう"));
+        talk.payload.insert("aiConnected".to_string(), json!(false));
+        let talk_result = adapter.dispatch(&talk, &world).await?;
+        assert_eq!(
+            talk_result.executed_scenes[0].scene_name,
+            "届きものの後日談"
+        );
+        assert!(talk_result.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("さっき一緒に見た"))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_life_tick_brings_away_actor_home() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut event = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        event.id = "evt_return_from_downloads".to_string();
+        event
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        event
+            .payload
+            .insert("actorPresence".to_string(), json!("away"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.executed_scenes[0].scene_name, "Downloadsから帰る");
+        let enter = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.enter")
+            .expect("actor returns to the desktop");
+        assert_eq!(enter.payload["location"], "desktop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_extracts_and_remembers_requested_user_name() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        assert!(world
+            .capabilities
+            .optional
+            .contains(&"dialogue.extract".to_string()));
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut handler = ai_moment_handler();
+        handler.extracted = "ミナ".to_string();
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_remember_name".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("ミナって呼んで"));
+        event.payload.insert("aiConnected".to_string(), json!(true));
+
+        let result = adapter
+            .dispatch_with_interpret(&event, &world, &mut handler)
+            .await?;
+
+        assert_eq!(handler.extract_requests.len(), 1);
+        assert_eq!(handler.extract_requests[0].input_text, "ミナって呼んで");
+        assert!(result.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"] == "ミナさん、ですね。覚えました。"
+        }));
+        assert!(result.variable_patches.iter().any(|patch| {
+            patch["path"] == "全体#ユーザー呼び名" && patch["value"] == "ミナ"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_interprets_user_condition_into_authored_response() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut handler = ai_moment_handler();
+        handler.interpretation = "疲れた".to_string();
+
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.id = "evt_interpret_condition".to_string();
+        event
+            .payload
+            .insert("text".to_string(), json!("今日はちょっと疲れた"));
+        event.payload.insert("aiConnected".to_string(), json!(true));
+
+        let result = adapter
+            .dispatch_with_interpret(&event, &world, &mut handler)
+            .await?;
+
+        assert_eq!(handler.interpret_requests.len(), 1);
+        assert_eq!(
+            handler.interpret_requests[0].choices,
+            vec!["元気", "疲れた", "つらい"]
+        );
+        assert!(result.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"] == "疲れているんですね。返事は短くて大丈夫です。"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_generates_app_observation_with_authored_fallback() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let mut handler = ai_moment_handler();
+        handler.generated = Some(DaihonGenerateResponse {
+            text: "コードの窓から、細い路地がたくさん見えます。".to_string(),
+            expression: None,
+            motion: None,
+        });
+
+        let mut event = RuntimeEvent::new("desktop.window.focused", "device", "resident-default");
+        event.id = "evt_generate_app_observation".to_string();
+        event
+            .payload
+            .insert("app".to_string(), json!("Visual Studio Code"));
+        event.payload.insert("aiConnected".to_string(), json!(true));
+
+        let generated = adapter
+            .dispatch_with_interpret(&event, &world, &mut handler)
+            .await?;
+        assert_eq!(handler.generate_requests.len(), 1);
+        assert!(handler.generate_requests[0]
+            .instruction
+            .contains("Visual Studio Code"));
+        assert!(generated.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"] == "コードの窓から、細い路地がたくさん見えます。"
+        }));
+
+        let fallback_adapter = YuukeiDaihonAdapter::default();
+        fallback_adapter.load_world(&world).await?;
+        let fallback = fallback_adapter.dispatch(&event, &world).await?;
+        assert!(
+            fallback.commands.iter().any(|command| {
+                command.kind == "dialogue.say"
+                    && command.payload["text"].as_str().is_some_and(|text| {
+                        text.contains("Visual Studio Code")
+                            && text.contains("外の気配が少し変わりました")
+                    })
+            }),
+            "fallback commands: {:?}",
+            fallback.commands
         );
         Ok(())
     }

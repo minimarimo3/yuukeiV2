@@ -842,6 +842,24 @@ fn validator_requires_interpret_result_to_have_unknown_or_catch_all_branch() {
         .any(|diagnostic| diagnostic.code == "E-DHN-SEM-048"));
 }
 
+#[test]
+fn validator_accepts_guaranteed_string_concatenation_for_string_parameters() {
+    let script = parse_script(
+        r#"
+## 生成
+### 動的な指示
+＜生成 (「前面アプリは 」 + 入力#アプリ + 「。短く描写する」) 「窓の気配が変わりました。」＞
+"#,
+    )
+    .unwrap();
+
+    let diagnostics = validate_script(&script, Some(&registry()));
+    assert!(
+        diagnostics.is_empty(),
+        "expected string concatenation to validate, got {diagnostics:?}"
+    );
+}
+
 #[tokio::test]
 async fn docs_ai_examples_match_strict_registry() {
     let interpret_script = parse_script(

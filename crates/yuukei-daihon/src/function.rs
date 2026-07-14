@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{Expr, FuncArg, FunctionCall};
+use crate::ast::{BinaryOp, Expr, FuncArg, FunctionCall};
 use crate::diagnostic::DaihonDiagnostic;
 use crate::value::{DaihonValue, ValueType};
 
@@ -214,11 +214,23 @@ fn param_accepts(ty: ParamType, arg: &FuncArg) -> bool {
         }
         ParamType::String => match arg {
             FuncArg::BareWord(_) => true,
-            FuncArg::Expr(Expr::Value(value)) => matches!(value.value, DaihonValue::String(_)),
-            _ => false,
+            FuncArg::Expr(expr) => expr_is_definitely_string(expr),
         },
         ParamType::Boolean => {
             matches!(arg, FuncArg::Expr(Expr::Value(value)) if matches!(value.value, DaihonValue::Boolean(_)))
         }
+    }
+}
+
+fn expr_is_definitely_string(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(value) => matches!(value.value, DaihonValue::String(_)),
+        Expr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+            ..
+        } => expr_is_definitely_string(left) || expr_is_definitely_string(right),
+        _ => false,
     }
 }
