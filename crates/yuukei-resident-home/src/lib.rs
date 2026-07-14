@@ -31,9 +31,9 @@ use yuukei_extension::{
     ProcessFailureReport, YuukeiExtension,
 };
 use yuukei_protocol::{
-    new_id, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget, DialogueExtractInput,
-    DialogueExtractOutput, DialogueGenerateConstraints, DialogueGenerateEvent,
-    DialogueGenerateInput, DialogueGenerateOutput, DialogueGeneratePersona,
+    new_id, ActorPresence, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget,
+    DialogueExtractInput, DialogueExtractOutput, DialogueGenerateConstraints,
+    DialogueGenerateEvent, DialogueGenerateInput, DialogueGenerateOutput, DialogueGeneratePersona,
     DialogueGenerateRecentContext, DialogueInterpretInput, DialogueInterpretOutput,
     DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
     MemoryForgetEntry, MemoryForgetInput, MemoryForgetOutput, MemoryIndexEvent, MemoryIndexInput,
@@ -273,7 +273,7 @@ impl ResidentHome {
         }
 
         let resident_id = resident_id.into();
-        let actors = world_pack
+        let mut actors = world_pack
             .actors
             .iter()
             .map(|actor| {
@@ -285,12 +285,14 @@ impl ResidentHome {
                         motion: "idle".to_string(),
                         heading: String::new(),
                         location: "desktop".to_string(),
+                        presence: ActorPresence::Present,
                         speaking: Some(false),
                         bubble: None,
                     },
                 )
             })
             .collect();
+        restore_actor_presence_state(&event_log, &resident_id, &mut actors)?;
         let mood = load_mood_state(runtime_settings.mood_state_path.as_ref());
         let (command_tx, _) = broadcast::channel(128);
         Ok(Self {
@@ -443,6 +445,63 @@ impl ResidentHome {
             .lock()
             .map_err(|_| ResidentHomeError::PoisonedLock)?;
         Ok(state.resident_id.clone())
+    }
+}
+
+fn restore_actor_presence_state(
+    event_log: &EventLog,
+    resident_id: &str,
+    actors: &mut BTreeMap<String, ActorSnapshot>,
+) -> Result<()> {
+    let mut records = Vec::new();
+    for kind in ["actor.location.set", "actor.exit", "actor.enter"] {
+        records.extend(
+            event_log
+                .read(EventLogQuery {
+                    resident_id: Some(resident_id.to_string()),
+                    kind: Some(kind.to_string()),
+                    ..EventLogQuery::default()
+                })?
+                .records,
+        );
+    }
+    records.sort_by_key(|record| record.sequence);
+    for record in records {
+        let actor_id = record
+            .actor_id
+            .as_deref()
+            .or_else(|| record.payload.get("speakerId").and_then(Value::as_str));
+        let Some(actor) = actor_id.and_then(|actor_id| actors.get_mut(actor_id)) else {
+            continue;
+        };
+        apply_actor_presence_command(actor, &record.kind, &record.payload);
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_actor_presence_command(
+    actor: &mut ActorSnapshot,
+    kind: &str,
+    payload: &JsonMap,
+) {
+    if let Some(location) = payload
+        .get("location")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|location| !location.is_empty())
+    {
+        actor.location = location.to_string();
+    }
+    match kind {
+        "actor.exit" => {
+            actor.presence = ActorPresence::Away;
+            actor.motion.clear();
+            actor.heading.clear();
+            actor.speaking = Some(false);
+            actor.bubble = None;
+        }
+        "actor.enter" => actor.presence = ActorPresence::Present,
+        _ => {}
     }
 }
 

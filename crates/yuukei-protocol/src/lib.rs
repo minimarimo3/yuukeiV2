@@ -1049,12 +1049,21 @@ pub enum MemorySnippetKind {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub enum ActorPresence {
+    Present,
+    Away,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
 pub struct ActorSnapshot {
     pub display_name: String,
     pub expression: String,
     pub motion: String,
     pub heading: String,
     pub location: String,
+    pub presence: ActorPresence,
     #[ts(optional)]
     pub speaking: Option<bool>,
     #[ts(optional)]
@@ -1189,6 +1198,7 @@ mod tests {
             motion: "walk".to_string(),
             heading: "right".to_string(),
             location: "desktop".to_string(),
+            presence: ActorPresence::Present,
             speaking: None,
             bubble: None,
         };

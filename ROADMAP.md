@@ -94,6 +94,7 @@
 
 - [x] ドラッグ移動 — 長押し(500ms)で持ち上げ、OSネイティブドラッグ、perch解除(reason: user-drag)、クランプ。合図 住人_つまむ/住人_おろす(入力#移動距離)+default pack反応台本(2761ad1)。startDraggingの完了タイミングは実機確認待ち
 - [x] 自発的な歩行 — Daihon関数 `＜歩く 右端＞`(RuntimeCommand `stage.walk`+`stage.walk.ended`、合図 住人_歩き終わり、入力#理由)。同一モニタ内の水平移動、歩行中は進行方向へ回転(ActorSnapshot.heading)、到着でモーション自動停止+位置永続化、つまみで中断。default packに靴つつき→右端歩行の台本を追加。実機GUIでの見た目確認は未実施(ユーザー確認待ち)
+- [x] 意味上の場所と退場・登場 — Daihon `＜場所 「downloads」＞`、`＜退場 行き先=「downloads」＞`、`＜登場＞`。`ActorSnapshot.location/presence`をevent logから復元し、away中はDesktop Surfaceの身体・吹き出し・音声を提示しない
 - [x] 位置の記憶 — 足元anchorを settings/stage.json へ永続化、起動時にモニタ構成へ正規化して復元(2761ad1)
 
 ### 設定画面UIの改善【設計必要・中物】

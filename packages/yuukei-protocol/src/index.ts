@@ -1,4 +1,5 @@
 export * from "./generated/ActorSnapshot";
+export * from "./generated/ActorPresence";
 export * from "./generated/CapabilityContext";
 export * from "./generated/CapabilityInvocation";
 export * from "./generated/CapabilityRouteSummary";

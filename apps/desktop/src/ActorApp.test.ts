@@ -352,6 +352,27 @@ describe("ActorApp renderer helpers", () => {
     expect(next?.actors.yuukei?.motion).toBe("歩く");
     expect(next?.actors.yuukei?.heading).toBe("left");
   });
+
+  it("applies actor location, exit, and enter hints atomically", () => {
+    const away = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("actor.exit", {
+        targetActorId: "yuukei",
+        payload: { location: "downloads" },
+      }),
+    );
+
+    expect(away?.actors.yuukei?.location).toBe("downloads");
+    expect(away?.actors.yuukei?.presence).toBe("away");
+    expect(away?.actors.yuukei?.speaking).toBe(false);
+
+    const returned = applyCommandHint(
+      away,
+      commandFixture("actor.enter", { targetActorId: "yuukei" }),
+    );
+    expect(returned?.actors.yuukei?.location).toBe("downloads");
+    expect(returned?.actors.yuukei?.presence).toBe("present");
+  });
 });
 
 function hitZone(
@@ -440,6 +461,7 @@ function snapshotFixture(): ResidentSnapshot {
         motion: "idle",
         heading: "",
         location: "desktop",
+        presence: "present",
       },
       another: {
         displayName: "Another",
@@ -447,6 +469,7 @@ function snapshotFixture(): ResidentSnapshot {
         motion: "idle",
         heading: "",
         location: "desktop",
+        presence: "present",
       },
     },
     surfaces: {},

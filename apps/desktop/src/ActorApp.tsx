@@ -1329,6 +1329,43 @@ export function applyCommandHint(
   if (!actor) return snapshot;
 
   if (
+    command.type === "actor.location.set" ||
+    command.type === "actor.exit" ||
+    command.type === "actor.enter"
+  ) {
+    const location =
+      typeof command.payload.location === "string" &&
+      command.payload.location.trim().length > 0
+        ? command.payload.location
+        : actor.location;
+    const presence =
+      command.type === "actor.exit"
+        ? "away"
+        : command.type === "actor.enter"
+          ? "present"
+          : actor.presence;
+    return {
+      ...snapshot,
+      actors: {
+        ...snapshot.actors,
+        [actorId]: {
+          ...actor,
+          location,
+          presence,
+          ...(command.type === "actor.exit"
+            ? {
+                motion: "",
+                heading: "",
+                speaking: false,
+                bubble: undefined,
+              }
+            : {}),
+        },
+      },
+    };
+  }
+
+  if (
     command.type === "avatar.motion" &&
     typeof command.payload.motion === "string"
   ) {
@@ -1370,6 +1407,7 @@ export function applyCommandHint(
     command.type === "dialogue.say" &&
     typeof command.payload.text === "string"
   ) {
+    if (actor.presence === "away") return snapshot;
     return {
       ...snapshot,
       actors: {

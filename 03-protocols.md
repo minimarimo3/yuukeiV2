@@ -150,6 +150,9 @@ type RuntimeCommand = YuukeiMessage & {
 - `dialogue.choices`: 選択肢を表示する。
 - `avatar.expression`: 表情を変える。
 - `avatar.motion`: 動作を変える。
+- `actor.location.set`: 住人の意味上の現在地を変える。payloadの `location` は空でない安定した場所IDであり、OSの実パスや画面座標ではない。在席状態は変えない。
+- `actor.exit`: 住人を現在のSurfaceの舞台から退場させ、`presence` を `away` にする。payloadに `location` があれば、退場と同時に現在地も原子的に変える。
+- `actor.enter`: 住人を現在のSurfaceの舞台へ登場させ、`presence` を `present` にする。payloadに `location` があれば、登場と同時に現在地も原子的に変える。省略時は現在地を保つ。
 - `surface.move`: Surface内または画面上の位置を変える。
 - `surface.attach`: ウィンドウ、フォルダ、スマホウィジェットなどに寄り添う。
 - `ui.notification`: 通知として現れる。
@@ -157,6 +160,10 @@ type RuntimeCommand = YuukeiMessage & {
 - `audio.play`: 音声、UI音、環境音を再生する。
 
 Desktop Surfaceでは、デスクトップ全体を一つの舞台として扱うため、Device Host側の `DesktopStageManager` が高水準の演出命令を実際のwindow操作やoverlay描画へ変換する。DaihonやResident HomeはOS window handle、Tauri `AppHandle`、WebView、Finder/Explorer APIを直接扱わない。
+
+`actor.exit` / `actor.enter` の対象はcommandの `target.actorId` である。Desktop Surfaceはawayのactor windowを隠し、その住人宛の吹き出し、選択肢、音声も提示しない。command自体は生活史として通常どおり記録される。`actor.location.set`、`actor.exit`、`actor.enter` の最新結果はResidentSnapshotへ反映され、Surfaceの再接続とResident Homeのevent-log replayで復元できる。
+
+Resident HomeはDaihon dispatch時、eventの `actorId` が指す住人、指定がなければWorld Packのdefault actorについて、現在の `location` と `presence` を派生contextとしてそれぞれ `入力#場所`、`入力#在席` へ渡す。canonical event本体へこの派生値を追記はしない。
 
 Desktop Stage向けのcommand family:
 
@@ -313,7 +320,9 @@ type ResidentSnapshot = {
     displayName: string;
     expression: string;
     motion: string;
+    heading: string;
     location: string;
+    presence: "present" | "away";
     speaking?: boolean;
     bubble?: string;
   }>;

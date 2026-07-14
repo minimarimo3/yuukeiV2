@@ -50,6 +50,10 @@ Device Hostは、定期的なひとりごとのきっかけとして `presence.t
 
 住人の画面上の位置は、actorごとの足元anchor(下辺中央、logical px)として `YUUKEI_DATA_DIR/settings/stage.json` に永続化する。保存のタイミングはユーザーのドラッグ確定時、表示倍率の変更時、自発歩行(`stage.walk`、03参照)の終了時。起動時は保存位置を現在のモニタ構成へ正規化(モニタ内クランプ・衝突回避)して復元し、保存がないactorは従来の自動配置を使う。perch(ウィンドウ枠への座り)は地形が揮発なので永続化しない。位置はユーザーの操作結果であって観測ではないため、event logには流さずstage状態としてのみ持つ。
 
+画面座標とは別に、住人の物語上の現在地と舞台への在席状態をResident Homeが持つ。`ActorSnapshot.location` は `desktop`、`downloads`、`pictures` のような意味上の場所ID、`ActorSnapshot.presence` は `present` または `away` である。場所IDはOSの実パスではなくWorld Packが台本内で安定して使う語彙であり、フォルダ観測のカテゴリと同じIDを使えば「住人の現在地とユーザーが開いた場所が一致した」場面を書ける。`actor.location.set`、`actor.exit`、`actor.enter` はcanonical event logへ記録し、Resident Homeの再起動時にこの3種を順に再生して現在地と在席状態を復元する。
+
+Desktop Stageは `presence: away` の住人のactor window、吹き出し、選択肢、音声を現在のDesktop Surfaceへ提示しない。トレイの手動表示切替もawayの住人を登場させない。これは現在のSurface上の身体を隠す処理であり、住人の継続性や現在地そのものはSurface Clientへ移さない。
+
 ### Surface Client
 
 住人の身体と演出を担当する表示クライアント。

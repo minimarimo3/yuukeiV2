@@ -1376,6 +1376,67 @@ impl ActionHandler for YuukeiActionHandler {
                 ]);
                 self.commands.lock().await.push(command);
             }
+            "場所" | "location" => {
+                let Some(location) = positional
+                    .first()
+                    .map(DaihonValue::to_display_string)
+                    .filter(|value| !value.trim().is_empty())
+                else {
+                    return Ok(DaihonValue::None);
+                };
+                let mut command = self.command("actor.location.set", speaker_id);
+                command.payload = JsonMap::from([
+                    ("location".to_string(), Value::String(location)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "退場" | "exit" => {
+                let mut command = self.command("actor.exit", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(location) = named
+                    .get("行き先")
+                    .or_else(|| named.get("destination"))
+                    .map(DaihonValue::to_display_string)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    command
+                        .payload
+                        .insert("location".to_string(), Value::String(location));
+                }
+                self.commands.lock().await.push(command);
+            }
+            "登場" | "enter" => {
+                let mut command = self.command("actor.enter", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(location) = named
+                    .get("場所")
+                    .or_else(|| named.get("location"))
+                    .map(DaihonValue::to_display_string)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    command
+                        .payload
+                        .insert("location".to_string(), Value::String(location));
+                }
+                self.commands.lock().await.push(command);
+            }
             "歩く" | "walk" => {
                 let Some(destination) =
                     positional
@@ -1641,6 +1702,8 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         ("recentDownloadFileName", "最近のダウンロード"),
         ("recentDownloadCategory", "最近のダウンロード種類"),
         ("movedDistance", "移動距離"),
+        ("actorLocation", "場所"),
+        ("actorPresence", "在席"),
         ("aiConnected", "AI接続"),
     ] {
         if let Some(value) = event
@@ -1731,6 +1794,70 @@ fn yuukei_function_registry() -> FunctionRegistry {
             return_type: None,
         });
     }
+    for name in ["場所", "location"] {
+        registry.register(FunctionSpec {
+            name: name.to_string(),
+            positional: vec![ParamSpec {
+                name: Some("場所".to_string()),
+                ty: ParamType::String,
+                required: true,
+            }],
+            named: BTreeMap::new(),
+            return_type: None,
+        });
+    }
+    registry.register(FunctionSpec {
+        name: "退場".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([(
+            "行き先".to_string(),
+            ParamSpec {
+                name: Some("行き先".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        )]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "exit".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([(
+            "destination".to_string(),
+            ParamSpec {
+                name: Some("destination".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        )]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "登場".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([(
+            "場所".to_string(),
+            ParamSpec {
+                name: Some("場所".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        )]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "enter".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([(
+            "location".to_string(),
+            ParamSpec {
+                name: Some("location".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        )]),
+        return_type: None,
+    });
     for name in ["歩く", "walk"] {
         registry.register(FunctionSpec {
             name: name.to_string(),
@@ -2879,6 +3006,12 @@ mod tests {
             .payload
             .insert("recentDownloadCategory".to_string(), json!("image"));
         event.payload.insert("aiConnected".to_string(), json!(true));
+        event
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        event
+            .payload
+            .insert("actorPresence".to_string(), json!("away"));
 
         let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
 
@@ -2905,6 +3038,8 @@ mod tests {
             DaihonValue::String("image".to_string())
         );
         assert_eq!(inputs["AI接続"], DaihonValue::Boolean(true));
+        assert_eq!(inputs["場所"], DaihonValue::String("downloads".to_string()));
+        assert_eq!(inputs["在席"], DaihonValue::String("away".to_string()));
     }
 
     #[tokio::test]
@@ -2979,6 +3114,47 @@ mod tests {
         assert_eq!(result.commands[1].payload["motion"], "歩く");
         assert_eq!(result.commands[1].payload["speedPxPerSec"], 120);
         assert_eq!(result.commands[1].payload["sourceFunction"], "walk");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_actor_location_exit_and_enter_functions() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.startup".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### explore folders
+話者: yuukei
+＜場所 「pictures」＞
+＜退場 行き先=「downloads」＞
+＜登場＞
+＜登場 場所=「desktop」＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.startup", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 4);
+        assert_eq!(result.commands[0].kind, "actor.location.set");
+        assert_eq!(result.commands[0].payload["location"], "pictures");
+        assert_eq!(result.commands[0].payload["sourceFunction"], "場所");
+        assert_eq!(result.commands[1].kind, "actor.exit");
+        assert_eq!(result.commands[1].payload["location"], "downloads");
+        assert_eq!(result.commands[1].payload["sourceFunction"], "退場");
+        assert_eq!(result.commands[2].kind, "actor.enter");
+        assert!(!result.commands[2].payload.contains_key("location"));
+        assert_eq!(result.commands[3].kind, "actor.enter");
+        assert_eq!(result.commands[3].payload["location"], "desktop");
+        assert!(result.commands.iter().all(|command| {
+            command
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref())
+                == Some("yuukei")
+        }));
         Ok(())
     }
 

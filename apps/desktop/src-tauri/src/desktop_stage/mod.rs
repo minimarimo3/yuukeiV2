@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWi
 use yuukei_device_host::{
     DesktopWindowFrame, DesktopWindowObservation, StageFootAnchor, DEFAULT_ACTOR_SCALE_PERCENT,
 };
-use yuukei_protocol::RuntimeCommand;
+use yuukei_protocol::{ActorPresence, ResidentSnapshot, RuntimeCommand};
 
 mod drag;
 mod geometry;
@@ -65,6 +65,7 @@ struct DesktopStageState {
     persisted_anchors: BTreeMap<String, StageFootAnchor>,
     active_drags: BTreeMap<String, ActiveActorDrag>,
     active_walks: BTreeMap<String, ActiveStageWalk>,
+    away_actors: BTreeSet<String>,
     conversation_composer: Option<DesktopConversationComposer>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
@@ -83,6 +84,7 @@ impl Default for DesktopStageState {
             persisted_anchors: BTreeMap::new(),
             active_drags: BTreeMap::new(),
             active_walks: BTreeMap::new(),
+            away_actors: BTreeSet::new(),
             conversation_composer: None,
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: false,
@@ -321,6 +323,7 @@ impl DesktopStageManager {
         &self,
         app: &AppHandle,
         catalog: &DesktopActorSurfaceAssetCatalog,
+        resident_snapshot: &ResidentSnapshot,
     ) -> Result<(), String> {
         let monitors = monitor_snapshots(app)?;
         self.sync_overlay_windows(app, &monitors)?;
@@ -362,22 +365,36 @@ impl DesktopStageManager {
             &monitors,
             actor_size,
         );
+        let away_actors = resident_snapshot
+            .actors
+            .iter()
+            .filter(|(_, actor)| actor.presence == ActorPresence::Away)
+            .map(|(actor_id, _)| actor_id.clone())
+            .collect::<BTreeSet<_>>();
         let mut next_actors = BTreeMap::new();
         for spec in &reconcile.desired_specs {
             let bounds = resolved_bounds
                 .get(&spec.actor_id)
                 .cloned()
                 .unwrap_or_else(|| place_actor_window(spec.index, &monitors, &[], actor_size));
+            let should_be_visible = !away_actors.contains(&spec.actor_id);
             if let Some(window) = app.get_webview_window(&spec.label) {
                 apply_actor_window_bounds(&window, &bounds)?;
-                let visible = window.is_visible().unwrap_or(true);
+                if should_be_visible {
+                    window.show().map_err(to_message)?;
+                } else {
+                    window.hide().map_err(to_message)?;
+                }
                 next_actors.insert(
                     spec.actor_id.clone(),
-                    actor_from_spec(spec, bounds, visible),
+                    actor_from_spec(spec, bounds, should_be_visible),
                 );
             } else {
-                create_actor_window(app, spec, &bounds)?;
-                next_actors.insert(spec.actor_id.clone(), actor_from_spec(spec, bounds, true));
+                create_actor_window(app, spec, &bounds, should_be_visible)?;
+                next_actors.insert(
+                    spec.actor_id.clone(),
+                    actor_from_spec(spec, bounds, should_be_visible),
+                );
             }
         }
 
@@ -388,6 +405,8 @@ impl DesktopStageManager {
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
             state.monitors = monitors;
             state.actors = next_actors;
+            state.away_actors = away_actors;
+            clear_away_actor_presentation(&mut state);
             let terrain_windows = state.terrain_windows.clone();
             reapply_perches_to_state(&mut state, &terrain_windows);
             let actor_ids = state.actors.keys().cloned().collect::<BTreeSet<_>>();
@@ -769,6 +788,40 @@ impl DesktopStageManager {
         let Some(actor_id) = command_actor_id(command) else {
             return Ok(());
         };
+        if matches!(command.kind.as_str(), "actor.exit" | "actor.enter") {
+            let visible = command.kind == "actor.enter";
+            let window_label = {
+                let mut state = self
+                    .state
+                    .write()
+                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+                let Some(window_label) = state
+                    .actors
+                    .get(&actor_id)
+                    .map(|actor| actor.window_label.clone())
+                else {
+                    return Ok(());
+                };
+                if visible {
+                    state.away_actors.remove(&actor_id);
+                } else {
+                    state.away_actors.insert(actor_id.clone());
+                    clear_actor_presentation(&mut state, &actor_id);
+                }
+                if let Some(actor) = state.actors.get_mut(&actor_id) {
+                    actor.visible = visible;
+                }
+                window_label
+            };
+            if let Some(window) = app.get_webview_window(&window_label) {
+                if visible {
+                    window.show().map_err(to_message)?;
+                } else {
+                    window.hide().map_err(to_message)?;
+                }
+            }
+            return self.emit_state(app);
+        }
         if command.kind == "stage.perch" {
             let Some(window_key) = command.payload.get("windowKey").and_then(Value::as_str) else {
                 return Ok(());
@@ -857,6 +910,21 @@ impl DesktopStageManager {
 
     pub fn actor_windows(&self, app: &AppHandle) -> Vec<WebviewWindow> {
         actor_webview_windows(app)
+    }
+
+    pub fn actor_is_present(&self, actor_id: &str) -> Result<bool, String> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        Ok(!state.away_actors.contains(actor_id))
+    }
+
+    pub fn actor_window_is_present(&self, window_label: &str) -> Result<bool, String> {
+        let Some(actor_id) = self.actor_id_for_window_label(window_label)? else {
+            return Ok(false);
+        };
+        self.actor_is_present(&actor_id)
     }
 
     fn actor_id_for_window_label(&self, label: &str) -> Result<Option<String>, String> {
@@ -955,7 +1023,7 @@ fn apply_dialogue_say_to_state(
     let Some(actor_id) = command_actor_id(command) else {
         return false;
     };
-    if !state.actors.contains_key(&actor_id) {
+    if !state.actors.contains_key(&actor_id) || state.away_actors.contains(&actor_id) {
         return false;
     }
     let Some(text) = command.payload.get("text").and_then(Value::as_str) else {
@@ -1031,7 +1099,7 @@ fn apply_dialogue_choices_to_state(
     let Some(actor_id) = command_actor_id(command) else {
         return false;
     };
-    if !state.actors.contains_key(&actor_id) {
+    if !state.actors.contains_key(&actor_id) || state.away_actors.contains(&actor_id) {
         return false;
     }
     let Some(choice_id) = command.payload.get("choiceId").and_then(Value::as_str) else {
@@ -1184,6 +1252,33 @@ fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTre
     state
         .active_walks
         .retain(|actor_id, _| actor_ids.contains(actor_id));
+    state
+        .away_actors
+        .retain(|actor_id| actor_ids.contains(actor_id));
+}
+
+fn clear_away_actor_presentation(state: &mut DesktopStageState) {
+    for actor_id in state.away_actors.clone() {
+        clear_actor_presentation(state, &actor_id);
+    }
+}
+
+fn clear_actor_presentation(state: &mut DesktopStageState, actor_id: &str) {
+    state
+        .bubbles
+        .retain(|_, bubble| bubble.actor_id != actor_id);
+    state.bubble_queues.remove(actor_id);
+    state.bubble_scene_keys.remove(actor_id);
+    state.perches.remove(actor_id);
+    state.active_drags.remove(actor_id);
+    state.active_walks.remove(actor_id);
+    if state
+        .conversation_composer
+        .as_ref()
+        .is_some_and(|composer| composer.actor_id == actor_id)
+    {
+        state.conversation_composer = None;
+    }
 }
 
 fn open_conversation_composer_in_state(

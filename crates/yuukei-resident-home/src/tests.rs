@@ -852,6 +852,88 @@ async fn stage_walk_command_and_ended_event_update_actor_snapshot() -> Result<()
 }
 
 #[tokio::test]
+async fn actor_location_exit_and_enter_commands_update_snapshot_atomically() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let actor_command = |kind: &str, location: Option<&str>| {
+        let mut command = RuntimeCommand::new(kind, "daihon", "resident-default");
+        command.target = Some(CommandTarget {
+            device_id: None,
+            surface_id: None,
+            actor_id: Some("yuukei".to_string()),
+        });
+        if let Some(location) = location {
+            command
+                .payload
+                .insert("location".to_string(), json!(location));
+        }
+        command
+    };
+
+    home.emit_internal_command_without_extensions(actor_command(
+        "actor.location.set",
+        Some("pictures"),
+    ))?;
+    let located = home.snapshot()?;
+    assert_eq!(located.actors["yuukei"].location, "pictures");
+    assert_eq!(located.actors["yuukei"].presence, ActorPresence::Present);
+
+    home.emit_internal_command_without_extensions(actor_command("actor.exit", Some("downloads")))?;
+    let away = home.snapshot()?;
+    assert_eq!(away.actors["yuukei"].location, "downloads");
+    assert_eq!(away.actors["yuukei"].presence, ActorPresence::Away);
+
+    home.emit_internal_command_without_extensions(actor_command("actor.enter", None))?;
+    let returned = home.snapshot()?;
+    assert_eq!(returned.actors["yuukei"].location, "downloads");
+    assert_eq!(returned.actors["yuukei"].presence, ActorPresence::Present);
+    Ok(())
+}
+
+#[tokio::test]
+async fn actor_location_and_presence_restore_from_canonical_event_log() -> Result<()> {
+    let event_log = EventLog::in_memory()?;
+    let home = ResidentHome::new("resident-default", world_pack(), event_log.clone()).await?;
+    let mut command = RuntimeCommand::new("actor.exit", "daihon", "resident-default");
+    command.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    command
+        .payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(command)?;
+    drop(home);
+
+    let reopened = ResidentHome::new("resident-default", world_pack(), event_log).await?;
+    let snapshot = reopened.snapshot()?;
+    assert_eq!(snapshot.actors["yuukei"].location, "downloads");
+    assert_eq!(snapshot.actors["yuukei"].presence, ActorPresence::Away);
+    Ok(())
+}
+
+#[tokio::test]
+async fn daihon_dispatch_context_includes_target_actor_location_and_presence() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut exit = RuntimeCommand::new("actor.exit", "daihon", "resident-default");
+    exit.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    exit.payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(exit)?;
+
+    let event = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+    let enriched = home.enrich_event_for_daihon_dispatch(event)?;
+
+    assert_eq!(enriched.payload["actorLocation"], "downloads");
+    assert_eq!(enriched.payload["actorPresence"], "away");
+    Ok(())
+}
+
+#[tokio::test]
 async fn replaced_walk_end_does_not_clear_newer_walk_snapshot() -> Result<()> {
     let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
     for (id, destination, motion) in [

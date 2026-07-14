@@ -822,6 +822,9 @@ pub fn run() {
             let asset_index = build_pack_asset_index(&runtime)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             let asset_catalog = desktop_actor_surface_assets(&runtime);
+            let resident_snapshot = runtime
+                .snapshot()
+                .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             configure_app_menu(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             configure_tray(app.handle())
@@ -881,7 +884,7 @@ pub fn run() {
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             }
             stage
-                .sync_surfaces(app.handle(), &asset_catalog)
+                .sync_surfaces(app.handle(), &asset_catalog, &resident_snapshot)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             if should_show_onboarding {
                 show_settings_window(app.handle())
@@ -1110,8 +1113,10 @@ fn toggle_actor_window(app: &AppHandle) -> Result<(), String> {
     } else {
         for window in windows {
             let label = window.label().to_string();
-            window.show().map_err(to_message)?;
-            state.stage.set_actor_window_visible(app, &label, true)?;
+            if state.stage.actor_window_is_present(&label)? {
+                window.show().map_err(to_message)?;
+                state.stage.set_actor_window_visible(app, &label, true)?;
+            }
         }
     }
     Ok(())
@@ -1323,7 +1328,7 @@ async fn replace_runtime(
     reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
-    state.stage.sync_surfaces(&app, &asset_catalog)?;
+    state.stage.sync_surfaces(&app, &asset_catalog, &snapshot)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
     emit_world_pack_status(&app, &status)?;
@@ -1402,7 +1407,7 @@ async fn replace_runtime_snapshot(
     reconcile_download_observer(&state).await?;
 
     app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
-    state.stage.sync_surfaces(&app, &asset_catalog)?;
+    state.stage.sync_surfaces(&app, &asset_catalog, &snapshot)?;
     app.emit("yuukei-assets-changed", &asset_catalog)
         .map_err(to_message)?;
     emit_world_pack_status(&app, &status)?;
@@ -1740,12 +1745,17 @@ fn spawn_command_forwarder(
     tauri::async_runtime::spawn(async move {
         while let Ok(command) = receiver.recv().await {
             if command.kind == "audio.play" {
-                if let Some(player) = &audio_player {
-                    if let Err(error) = player.play_command(&command) {
-                        eprintln!("Yuukei audio.play ignored: {error}");
+                let actor_is_present = desktop_stage::command_actor_id(&command)
+                    .map(|actor_id| stage.actor_is_present(&actor_id).unwrap_or(true))
+                    .unwrap_or(true);
+                if actor_is_present {
+                    if let Some(player) = &audio_player {
+                        if let Err(error) = player.play_command(&command) {
+                            eprintln!("Yuukei audio.play ignored: {error}");
+                        }
+                    } else {
+                        eprintln!("Yuukei audio.play ignored: audio output unavailable");
                     }
-                } else {
-                    eprintln!("Yuukei audio.play ignored: audio output unavailable");
                 }
             }
             if command.kind == "stage.walk" {

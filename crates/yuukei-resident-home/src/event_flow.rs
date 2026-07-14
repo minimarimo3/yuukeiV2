@@ -265,6 +265,34 @@ impl ResidentHome {
         &self,
         mut event: RuntimeEvent,
     ) -> Result<RuntimeEvent> {
+        let actor_context = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| ResidentHomeError::PoisonedLock)?;
+            let actor_id = event
+                .actor_id
+                .as_deref()
+                .unwrap_or(&self.world_pack.default_actor_id);
+            state.actors.get(actor_id).map(|actor| {
+                (
+                    actor.location.clone(),
+                    match actor.presence {
+                        ActorPresence::Present => "present",
+                        ActorPresence::Away => "away",
+                    }
+                    .to_string(),
+                )
+            })
+        };
+        if let Some((location, presence)) = actor_context {
+            event
+                .payload
+                .insert("actorLocation".to_string(), Value::String(location));
+            event
+                .payload
+                .insert("actorPresence".to_string(), Value::String(presence));
+        }
         let ai_connected = self
             .capabilities
             .lock()
@@ -457,6 +485,12 @@ impl ResidentHome {
                 state
                     .active_walk_commands
                     .insert(actor_id.clone(), command.id.clone());
+            }
+            "actor.location.set" | "actor.exit" | "actor.enter" => {
+                super::apply_actor_presence_command(actor, &command.kind, &command.payload);
+                if command.kind == "actor.exit" {
+                    state.active_walk_commands.remove(&actor_id);
+                }
             }
             _ => {}
         }

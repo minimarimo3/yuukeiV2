@@ -406,6 +406,7 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
+        away_actors: BTreeSet::new(),
         conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
@@ -767,6 +768,7 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
         persisted_anchors: BTreeMap::new(),
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
+        away_actors: BTreeSet::new(),
         conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
@@ -843,6 +845,32 @@ fn command_actor_id_prefers_explicit_target() {
     );
 
     assert_eq!(command_actor_id(&command).as_deref(), Some("targeted"));
+}
+
+#[test]
+fn away_actor_clears_and_rejects_surface_dialogue() {
+    let mut state = bubble_state(&["yuukei"]);
+    assert!(apply_dialogue_say_to_state(
+        &mut state,
+        &say(
+            "before-exit",
+            "yuukei",
+            "いってきます",
+            Some("scene-a"),
+            None
+        ),
+        1_000,
+    ));
+    state.away_actors.insert("yuukei".to_string());
+    clear_actor_presentation(&mut state, "yuukei");
+
+    assert!(state.bubbles.is_empty());
+    assert!(!apply_dialogue_say_to_state(
+        &mut state,
+        &say("while-away", "yuukei", "探検中", Some("scene-b"), None),
+        2_000,
+    ));
+    assert!(state.bubbles.is_empty());
 }
 
 #[test]

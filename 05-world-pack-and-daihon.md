@@ -108,6 +108,12 @@ Daihonに向いているもの:
 
 Daihonは長期記憶エンジンではない。DaihonはResident Homeから渡される変数、event payload、context、runtime query、capability resultを使ってsceneを選び、RuntimeCommandやVariablePatchを返す。
 
+Daihonの `場所`、`退場`、`登場` は、住人の意味上の現在地とSurface上の在席を操作する。`＜場所 「downloads」＞` は現在話者の `location` だけを変更し、表示状態は変えない。`＜退場＞` は現在地を保ったまま `away` にし、`＜退場 行き先=「downloads」＞` は場所変更と退場を一つの `actor.exit` として原子的に行う。後者は `＜場所 「downloads」＞` に続けて `＜退場＞` を実行した場合と同じ最終状態になる。`＜登場＞` は現在地を保って `present` にし、`＜登場 場所=「desktop」＞` は場所変更と登場を一つの `actor.enter` として行う。
+
+場所IDはWorld Pack作者が安定して使う意味語彙であり、OSの実パスではない。`desktop.folder.opened` の `入力#フォルダ` と同じ `downloads`、`pictures` などを使えば、退場中の住人とユーザーが同じフォルダで遭遇するsceneを書ける。複数actorの台本では、これらの関数は現在の `話者` だけを対象にする。
+
+各dispatchには、eventの対象actor、対象指定がなければdefault actorの現在地が `入力#場所`、在席状態が `入力#在席` (`present` / `away`) として渡される。フォルダ遭遇では `条件:（入力#場所 = 入力#フォルダ かつ 入力#在席 = 「away」）` のように判定できる。generic eventでdefault actor以外の現在地を判定したいWorld Packは、actorごとのDaihon変数も併用する。
+
 Daihonのscene選択履歴は、World Pack installごとのアプリデータとして保存する。`頻度: 一度きり` や `頻度: 1日に1回`、直近の繰り返し回避に使う履歴は再起動後も引き継がれるが、別のWorld Packへ切り替えた場合は混ざらない。
 
 `全体#`、`住人#actor#`、`関係#a#b#` スコープの変数も同様にWorld Pack installごとのアプリデータとして保存され、再起動後も引き継がれる。`初期値:` は保存値が存在しないkeyにだけ適用され、保存値と `初期値:` の型が食い違う場合は保存値を破棄して初期値を採用する。イベント内変数、`_一時`、`入力#` は保存されない。

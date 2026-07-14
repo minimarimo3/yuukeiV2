@@ -38,6 +38,7 @@ function snapshot(bubble: string | null = null): ResidentSnapshot {
         motion: "idle",
         heading: "",
         location: "desktop",
+        presence: "present",
         speaking: Boolean(bubble),
         bubble: bubble ?? undefined,
       },

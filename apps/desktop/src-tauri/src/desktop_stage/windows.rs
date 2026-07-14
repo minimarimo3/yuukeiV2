@@ -203,6 +203,7 @@ pub(super) fn create_actor_window(
     app: &AppHandle,
     spec: &ActorWindowSpec,
     bounds: &StageRect,
+    visible: bool,
 ) -> Result<(), String> {
     let window = WebviewWindowBuilder::new(app, &spec.label, actor_window_url(&spec.actor_id))
         .title("")
@@ -219,7 +220,9 @@ pub(super) fn create_actor_window(
         .build()
         .map_err(to_message)?;
     enforce_borderless(&window);
-    window.show().map_err(to_message)?;
+    if visible {
+        window.show().map_err(to_message)?;
+    }
     Ok(())
 }
 

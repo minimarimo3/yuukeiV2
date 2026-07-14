@@ -9,6 +9,7 @@ Yuukeiの変更履歴。[Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)
 ### Added
 
 - Daihon `選択` 式と選択肢バルーン — 住人の問いかけにボタンで答える。タイムアウトで `不明`
+- Daihon `場所`・`退場`・`登場` — 住人の意味上の現在地と在席状態を台本から変更し、フォルダ探検などの一時不在を表現できる
 - `入力#hitSurface` — 肌/服/髪/顔で反応を分けられる
 - ユーザー不在/復帰の検出(`presence.idle.*`、別名 `不在_開始`/`復帰`、`入力#不在分`)
 - VOICEVOX読み上げ(yuukei-voicevox拡張、`speech.synthesis` 初実装、住人ごとの声設定)
