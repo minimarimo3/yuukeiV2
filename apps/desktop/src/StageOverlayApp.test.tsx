@@ -92,16 +92,15 @@ describe("StageOverlayApp", () => {
   });
 
   it("renders stage bubbles from desktop stage state", async () => {
-    render(
-      <StageOverlayApp
-        client={clientFixture(stageState())}
-        monitorId="monitor-0"
-      />,
-    );
+    const client = clientFixture(stageState());
+    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
 
     const bubble = await findBubbleText("ここに出ます");
 
     expect(bubble).toBeInTheDocument();
+    await waitFor(() => {
+      expect(client.surfaceReady).toHaveBeenCalledTimes(1);
+    });
     expect(bubble.closest(".stage-bubble")).toHaveClass(
       "stage-bubble--right",
       "actor-bubble--right",
@@ -361,6 +360,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getActorSurfaceAssets: vi.fn(),
     setActorWindowClickThrough: vi.fn(async () => undefined),
     setStageOverlayClickThrough: vi.fn(async () => undefined),
+    surfaceReady: vi.fn(async () => undefined),
     getDesktopStageState: vi.fn(async () => stage),
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),

@@ -927,6 +927,18 @@ impl DesktopStageManager {
         self.actor_is_present(&actor_id)
     }
 
+    pub fn actor_window_should_be_visible(&self, window_label: &str) -> Result<bool, String> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        Ok(state
+            .actors
+            .values()
+            .find(|actor| actor.window_label == window_label)
+            .is_some_and(|actor| actor.visible))
+    }
+
     fn actor_id_for_window_label(&self, label: &str) -> Result<Option<String>, String> {
         let state = self
             .state

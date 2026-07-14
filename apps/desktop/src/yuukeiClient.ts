@@ -390,7 +390,9 @@ export type YuukeiClient = {
   getRuntimeSettings(): Promise<RuntimeSettingsState>;
   getSceneHistory(): Promise<SceneHistoryState>;
   getAutostartEnabled(): Promise<boolean>;
+  getAutostartCanEnable?(): Promise<boolean>;
   setAutostartEnabled(enabled: boolean): Promise<boolean>;
+  surfaceReady?(): Promise<void>;
   getObservationSettings(): Promise<ObservationSettingsState>;
   getOnboardingState(): Promise<OnboardingState>;
   completeOnboarding(): Promise<OnboardingState>;
@@ -530,8 +532,11 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<RuntimeSettingsState>("get_runtime_settings"),
   getSceneHistory: () => invoke<SceneHistoryState>("get_scene_history"),
   getAutostartEnabled: () => invoke<boolean>("get_autostart_enabled"),
+  getAutostartCanEnable: () =>
+    invoke<boolean>("get_autostart_can_enable"),
   setAutostartEnabled: (enabled: boolean) =>
     invoke<boolean>("set_autostart_enabled", { enabled }),
+  surfaceReady: () => invoke<void>("surface_ready"),
   getObservationSettings: () =>
     invoke<ObservationSettingsState>("get_observation_settings"),
   getOnboardingState: () => invoke<OnboardingState>("get_onboarding_state"),

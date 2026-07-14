@@ -95,6 +95,7 @@ export function StageOverlayApp({
   );
   const [deferUntil, setDeferUntil] = useState<Record<string, number>>({});
   const [, setTimerTick] = useState(0);
+  const [surfaceConnected, setSurfaceConnected] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -118,6 +119,7 @@ export function StageOverlayApp({
       if (!disposed) {
         setStageState(initialState);
         setAppSettings(initialSettings);
+        setSurfaceConnected(true);
       }
     }
 
@@ -132,6 +134,13 @@ export function StageOverlayApp({
       void client.setStageOverlayClickThrough(true);
     };
   }, [client]);
+
+  useEffect(() => {
+    if (!surfaceConnected) return;
+    void client.surfaceReady?.().catch((error) => {
+      console.warn("Failed to mark stage overlay ready", error);
+    });
+  }, [client, surfaceConnected]);
 
   const activeMonitor = useMemo(
     () => selectMonitor(stageState, monitorId),

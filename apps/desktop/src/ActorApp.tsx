@@ -99,6 +99,7 @@ export function ActorApp({
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [surfaceConnected, setSurfaceConnected] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -127,6 +128,7 @@ export function ActorApp({
           setSnapshot(initialSnapshot);
           setAssets(initialAssets);
           setStatus(null);
+          setSurfaceConnected(true);
         }
       } catch (error) {
         if (!disposed) {
@@ -144,6 +146,13 @@ export function ActorApp({
       void client.setActorWindowClickThrough(false);
     };
   }, [client]);
+
+  useEffect(() => {
+    if (!surfaceConnected) return;
+    void client.surfaceReady?.().catch((error) => {
+      console.warn("Failed to mark actor surface ready", error);
+    });
+  }, [client, surfaceConnected]);
 
   const actorAssets = useMemo(
     () => actorSurfaceAssetsForActor(assets, activeActorId),

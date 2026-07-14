@@ -709,6 +709,44 @@ describe("App", () => {
     });
   });
 
+  it("prevents new autostart registration in development builds", async () => {
+    const client = clientFixture({
+      getAutostartCanEnable: vi.fn(async () => false),
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const toggle = await screen.findByRole("checkbox", {
+      name: /ログイン時に自動起動/,
+    });
+    expect(toggle).toBeDisabled();
+    expect(
+      screen.getByText("開発版では利用できません。build版から設定してください。"),
+    ).toBeInTheDocument();
+    expect(client.setAutostartEnabled).not.toHaveBeenCalled();
+  });
+
+  it("allows removing a stale autostart registration from a development build", async () => {
+    const client = clientFixture({
+      getAutostartEnabled: vi.fn(async () => true),
+      getAutostartCanEnable: vi.fn(async () => false),
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    const toggle = await screen.findByRole("checkbox", {
+      name: /ログイン時に自動起動/,
+    });
+    expect(toggle).toBeEnabled();
+    expect(toggle).toBeChecked();
+    await userEvent.click(toggle);
+    await waitFor(() => {
+      expect(client.setAutostartEnabled).toHaveBeenCalledWith(false);
+    });
+  });
+
   it("saves runtime LLM timeout and recent context settings", async () => {
     const client = clientFixture();
 

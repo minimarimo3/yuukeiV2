@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex, RwLock},
@@ -57,6 +57,7 @@ pub struct AppState {
     power_observer: Mutex<Option<PowerObserver>>,
     window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     download_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    ready_surface_windows: StdMutex<HashSet<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +123,62 @@ const PACK_ASSET_SCHEME: &str = "yuukei-pack";
 const MENU_SETTINGS_ID: &str = "settings";
 const MENU_TOGGLE_CHARACTER_ID: &str = "toggle-character";
 const MENU_QUIT_ID: &str = "quit";
+const SURFACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn launched_from_autostart() -> bool {
+    std::env::args_os().any(|argument| argument == "--autostart")
+}
+
+pub(crate) fn track_surface_window_loading(app: &AppHandle, label: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state
+        .ready_surface_windows
+        .lock()
+        .map_err(|_| "surface readiness lock is poisoned".to_string())?
+        .remove(label);
+
+    let app = app.clone();
+    let label = label.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SURFACE_READY_TIMEOUT).await;
+        if app.get_webview_window(&label).is_none() {
+            return;
+        }
+        let state = app.state::<AppState>();
+        let is_ready = state
+            .ready_surface_windows
+            .lock()
+            .map(|labels| labels.contains(&label))
+            .unwrap_or(false);
+        if is_ready {
+            return;
+        }
+
+        if let Some(tray) = app.tray_by_id("yuukei") {
+            let _ = tray.set_tooltip(Some(
+                "Yuukei — 表示の初期化に失敗しました。設定からログを確認してください。",
+            ));
+        }
+
+        let runtime = state.runtime.lock().await;
+        let payload = BTreeMap::from([
+            ("windowLabel".to_string(), Value::String(label.clone())),
+            (
+                "autostart".to_string(),
+                Value::Bool(launched_from_autostart()),
+            ),
+        ]);
+        if let Err(error) = runtime
+            .logger()
+            .record("surface.load.timeout", "device-host", payload)
+        {
+            eprintln!("Yuukei surface readiness timeout ({label}); logging failed: {error}");
+        } else {
+            eprintln!("Yuukei surface readiness timeout ({label}); window kept hidden");
+        }
+    });
+    Ok(())
+}
 
 #[tauri::command]
 async fn attach_surface(
@@ -191,7 +248,17 @@ async fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn get_autostart_can_enable() -> bool {
+    !cfg!(debug_assertions)
+}
+
+#[tauri::command]
 async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    if enabled && cfg!(debug_assertions) {
+        return Err(
+            "開発版では自動起動を有効にできません。build版から設定してください。".to_string(),
+        );
+    }
     let manager = app.autolaunch();
     if enabled {
         manager.enable().map_err(|error| error.to_string())?;
@@ -199,6 +266,27 @@ async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, St
         manager.disable().map_err(|error| error.to_string())?;
     }
     manager.is_enabled().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn surface_ready(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let label = window.label().to_string();
+    if !desktop_stage::is_actor_window_label(&label)
+        && !desktop_stage::is_stage_overlay_label(&label)
+    {
+        return Err(format!("window {label} is not a desktop surface"));
+    }
+    state
+        .ready_surface_windows
+        .lock()
+        .map_err(|_| "surface readiness lock is poisoned".to_string())?
+        .insert(label.clone());
+    if desktop_stage::is_actor_window_label(&label)
+        && !state.stage.actor_window_should_be_visible(&label)?
+    {
+        return Ok(());
+    }
+    window.show().map_err(to_message)
 }
 
 #[tauri::command]
@@ -807,10 +895,11 @@ async fn reset_scene_history(state: State<'_, AppState>) -> Result<SceneHistoryS
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .arg("--autostart")
+                .build(),
+        )
         .register_uri_scheme_protocol(PACK_ASSET_SCHEME, pack_asset_protocol_response)
         .setup(|app| {
             let env = local_runtime_environment(app.handle())
@@ -871,6 +960,7 @@ pub fn run() {
                 power_observer: Mutex::new(Some(power_observer)),
                 window_observer: Mutex::new(None),
                 download_observer: Mutex::new(None),
+                ready_surface_windows: StdMutex::new(HashSet::new()),
             });
             {
                 let state = app.handle().state::<AppState>();
@@ -886,7 +976,7 @@ pub fn run() {
             stage
                 .sync_surfaces(app.handle(), &asset_catalog, &resident_snapshot)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
-            if should_show_onboarding {
+            if should_show_onboarding && !launched_from_autostart() {
                 show_settings_window(app.handle())
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             }
@@ -943,7 +1033,9 @@ pub fn run() {
             get_runtime_settings,
             get_scene_history,
             get_autostart_enabled,
+            get_autostart_can_enable,
             set_autostart_enabled,
+            surface_ready,
             get_observation_settings,
             get_onboarding_state,
             complete_onboarding,

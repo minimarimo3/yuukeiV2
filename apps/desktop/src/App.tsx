@@ -76,6 +76,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     null,
   );
   const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartCanEnable, setAutostartCanEnable] = useState(true);
   const [observationSettings, setObservationSettings] =
     useState<ObservationSettingsState | null>(null);
   const [onboardingState, setOnboardingState] =
@@ -164,6 +165,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         nextRuntimeSettings,
         nextSceneHistory,
         nextAutostartEnabled,
+        nextAutostartCanEnable,
         nextObservationSettings,
         nextOnboardingState,
         nextExtensionState,
@@ -174,6 +176,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         client.getRuntimeSettings(),
         client.getSceneHistory(),
         client.getAutostartEnabled(),
+        client.getAutostartCanEnable?.() ?? Promise.resolve(true),
         client.getObservationSettings(),
         client.getOnboardingState(),
         client.getExtensionSettings(),
@@ -185,6 +188,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         setRuntimeSettings(nextRuntimeSettings);
         setSceneHistory(nextSceneHistory);
         setAutostartEnabled(nextAutostartEnabled);
+        setAutostartCanEnable(nextAutostartCanEnable);
         setObservationSettings(nextObservationSettings);
         setOnboardingState(nextOnboardingState);
         setExtensionState(nextExtensionState);
@@ -772,13 +776,18 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               <span>
                 <strong>ログイン時に自動起動</strong>
                 <small>
-                  このデバイスにログインしたとき、Yuukeiを起動します。
+                  {autostartCanEnable
+                    ? "このデバイスにログインしたとき、Yuukeiを起動します。"
+                    : autostartEnabled
+                      ? "開発版からの新規登録はできません。OFFにしてbuild版から設定し直してください。"
+                      : "開発版では利用できません。build版から設定してください。"}
                 </small>
               </span>
               <input
                 id="autostart-enabled"
                 type="checkbox"
                 checked={autostartEnabled}
+                disabled={!autostartCanEnable && !autostartEnabled}
                 onChange={(event) => {
                   void toggleAutostart(event.currentTarget.checked);
                 }}

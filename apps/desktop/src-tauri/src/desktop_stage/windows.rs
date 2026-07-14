@@ -179,6 +179,7 @@ pub(super) fn create_stage_overlay_window(
     app: &AppHandle,
     monitor: &StageMonitor,
 ) -> Result<(), String> {
+    crate::track_surface_window_loading(app, &monitor.label)?;
     let window = WebviewWindowBuilder::new(app, &monitor.label, stage_overlay_url(&monitor.id))
         .title("")
         .inner_size(monitor.bounds.width, monitor.bounds.height)
@@ -195,7 +196,6 @@ pub(super) fn create_stage_overlay_window(
         .map_err(to_message)?;
     enforce_borderless(&window);
     window.set_ignore_cursor_events(true).map_err(to_message)?;
-    window.show().map_err(to_message)?;
     Ok(())
 }
 
@@ -203,8 +203,9 @@ pub(super) fn create_actor_window(
     app: &AppHandle,
     spec: &ActorWindowSpec,
     bounds: &StageRect,
-    visible: bool,
+    _visible: bool,
 ) -> Result<(), String> {
+    crate::track_surface_window_loading(app, &spec.label)?;
     let window = WebviewWindowBuilder::new(app, &spec.label, actor_window_url(&spec.actor_id))
         .title("")
         .inner_size(bounds.width, bounds.height)
@@ -220,9 +221,6 @@ pub(super) fn create_actor_window(
         .build()
         .map_err(to_message)?;
     enforce_borderless(&window);
-    if visible {
-        window.show().map_err(to_message)?;
-    }
     Ok(())
 }
 
