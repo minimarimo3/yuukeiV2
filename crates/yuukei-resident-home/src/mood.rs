@@ -25,6 +25,9 @@ impl ResidentHome {
         &self,
         source_event: &RuntimeEvent,
     ) -> Result<Option<RuntimeEvent>> {
+        if !runtime_event_is_extension_readable(source_event) {
+            return Ok(None);
+        }
         let router = self
             .capabilities
             .lock()
@@ -39,13 +42,14 @@ impl ResidentHome {
             return Ok(None);
         }
         let now = event_timestamp_or_now(source_event);
+        let interval_minutes = i64::try_from(interval_minutes).unwrap_or(i64::MAX);
         {
             let state = self
                 .state
                 .lock()
                 .map_err(|_| ResidentHomeError::PoisonedLock)?;
             if state.mood.last_evaluated_at.is_some_and(|last| {
-                now.signed_duration_since(last).num_minutes() < interval_minutes as i64
+                now.signed_duration_since(last).num_minutes() < interval_minutes
             }) {
                 return Ok(None);
             }
@@ -164,7 +168,7 @@ impl ResidentHome {
                 kind: None,
                 after_sequence: None,
                 limit: None,
-                extension_readable_only: false,
+                extension_readable_only: true,
             })?
             .records;
         for record in records.into_iter().rev() {
@@ -362,7 +366,8 @@ pub(crate) fn load_mood_state(path: Option<&PathBuf>) -> MoodState {
     let Some(last) = state.last_evaluated_at else {
         return MoodState::default();
     };
-    if Utc::now().signed_duration_since(last) > MOOD_STATE_MAX_AGE {
+    let age = Utc::now().signed_duration_since(last);
+    if age < chrono::Duration::zero() || age > MOOD_STATE_MAX_AGE {
         return MoodState::default();
     }
     state

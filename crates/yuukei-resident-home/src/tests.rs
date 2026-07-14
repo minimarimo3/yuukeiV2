@@ -1270,6 +1270,54 @@ async fn conversation_events_are_queued_while_dialogue_interpret_is_in_flight() 
 }
 
 #[tokio::test]
+async fn choice_events_are_queued_during_interpretation_when_no_choice_is_pending() -> Result<()> {
+    let provider =
+        DialogueInterpretProvider::new(JsonMap::from([("choice".to_string(), json!("はい"))]))
+            .delayed(std::time::Duration::from_millis(80));
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        interpret_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    first.payload.insert("text".to_string(), json!("うん"));
+    let first_home = home.clone();
+    let first_task = tokio::spawn(async move { first_home.ingest_event(first).await });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut choice = RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+    choice
+        .payload
+        .insert("choiceId".to_string(), json!("stale-choice"));
+    choice.payload.insert("choice".to_string(), json!("見る"));
+    choice.payload.insert("index".to_string(), json!(0));
+    assert!(home.ingest_event(choice).await?.is_empty());
+    assert_eq!(
+        home.state
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .interpretation
+            .queued_events
+            .len(),
+        1
+    );
+    first_task.await.expect("first ingest task")?;
+    assert!(home
+        .state
+        .lock()
+        .map_err(|_| ResidentHomeError::PoisonedLock)?
+        .interpretation
+        .queued_events
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_conversation_events_are_record_only_while_dialogue_interpret_is_in_flight(
 ) -> Result<()> {
     let provider =
@@ -2097,6 +2145,45 @@ async fn desktop_folder_opened_enriches_recent_download_inputs_and_ignores_old()
         commands[0].payload["text"],
         "最近のダウンロードはありません。"
     );
+
+    let private_home = ResidentHome::new(
+        "resident-default",
+        folder_download_world(),
+        EventLog::in_memory()?,
+    )
+    .await?;
+    let mut private_download =
+        RuntimeEvent::new("desktop.download.completed", "device", "resident-default");
+    private_download.id = "evt_download_private".to_string();
+    private_download.timestamp = (now - Duration::days(1)).to_rfc3339();
+    private_download
+        .payload
+        .insert("fileName".to_string(), json!("secret.png"));
+    private_download
+        .payload
+        .insert("fileCategory".to_string(), json!("image"));
+    private_download.privacy = Some(Privacy {
+        category: "private-download".to_string(),
+        retention: RetentionPolicy::Manual,
+        extension_readable: false,
+    });
+    private_home
+        .event_log()
+        .append(NewEventLogRecord::from(private_download))?;
+
+    let mut folder = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+    folder.id = "evt_folder_private".to_string();
+    folder.timestamp = now.to_rfc3339();
+    folder
+        .payload
+        .insert("category".to_string(), json!("downloads"));
+    folder.payload.insert("app".to_string(), json!("finder"));
+    let commands = private_home.ingest_event(folder).await?;
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0].payload["text"],
+        "最近のダウンロードはありません。"
+    );
     Ok(())
 }
 
@@ -2379,6 +2466,21 @@ async fn mood_state_persists_restores_and_expires_after_one_hour() -> Result<()>
         ))
         .await?;
     assert_eq!(expired_commands[0].payload["text"], "ふつうに話します。");
+
+    let future_state = MoodState {
+        last_evaluated_at: Some(Utc::now() + chrono::Duration::minutes(61)),
+        current: Some(MoodSnapshot {
+            mood: "さみしい".to_string(),
+            talk_desire: 50,
+            topic: "未来の画面".to_string(),
+        }),
+    };
+    std::fs::write(
+        &mood_path,
+        serde_json::to_vec_pretty(&future_state).expect("future mood json"),
+    )
+    .expect("write future mood state");
+    assert!(load_mood_state(Some(&mood_path)).current.is_none());
     Ok(())
 }
 
@@ -2425,6 +2527,51 @@ async fn life_tick_evaluates_mood_and_records_changed_event() -> Result<()> {
 }
 
 #[tokio::test]
+async fn mood_activity_age_ignores_non_extension_readable_events() -> Result<()> {
+    let now = Utc::now();
+    let event_log = EventLog::in_memory()?;
+    let mut public = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    public.id = "evt_public_activity".to_string();
+    public.timestamp = (now - Duration::seconds(120)).to_rfc3339();
+    event_log.append(NewEventLogRecord::from(public))?;
+    let mut private = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    private.id = "evt_private_activity".to_string();
+    private.timestamp = (now - Duration::seconds(10)).to_rfc3339();
+    private.privacy = Some(Privacy {
+        category: "private-activity".to_string(),
+        retention: RetentionPolicy::Manual,
+        extension_readable: false,
+    });
+    event_log.append(NewEventLogRecord::from(private))?;
+
+    let mood = MoodProvider::new(JsonMap::from([
+        ("mood".to_string(), json!("ふつう")),
+        ("talkDesire".to_string(), json!(0)),
+        ("topic".to_string(), json!("")),
+    ]));
+    let calls = mood.calls();
+    let mut router = CapabilityRouter::new();
+    router.register(mood)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        random_talk_world(),
+        event_log,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        router,
+    )
+    .await?;
+
+    let mut tick = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+    tick.timestamp = now.to_rfc3339();
+    home.ingest_event(tick).await?;
+
+    let calls = calls.lock().expect("mood calls lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].input["secondsSinceLastUserActivity"], 120);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mood_interval_zero_disables_evaluation() -> Result<()> {
     let mut router = CapabilityRouter::new();
     let mood = MoodProvider::new(JsonMap::from([
@@ -2457,6 +2604,42 @@ async fn mood_interval_zero_disables_evaluation() -> Result<()> {
     .await?;
 
     assert!(calls.lock().expect("mood calls lock").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_mood_interval_does_not_wrap_and_reenable_evaluation() -> Result<()> {
+    let mut router = CapabilityRouter::new();
+    let mood = MoodProvider::new(JsonMap::from([
+        ("mood".to_string(), json!("うれしい")),
+        ("talkDesire".to_string(), json!(45)),
+        ("topic".to_string(), json!("机の上")),
+    ]))
+    .with_runtime_settings(JsonMap::from([(
+        "mood.intervalMinutes".to_string(),
+        json!(u64::MAX),
+    )]));
+    let calls = mood.calls();
+    router.register(mood)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        random_talk_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        router,
+    )
+    .await?;
+    home.register_extension(yuukei_intelligence_events_extension())
+        .await?;
+    for _ in 0..2 {
+        home.ingest_event(RuntimeEvent::new(
+            "presence.life_tick",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+    }
+    assert_eq!(calls.lock().expect("mood calls lock").len(), 1);
     Ok(())
 }
 
@@ -3239,6 +3422,33 @@ async fn extension_events_do_not_self_subscribe_and_stop_at_hop_limit() -> Resul
 }
 
 #[tokio::test]
+async fn oversized_extension_hop_metadata_is_rejected_without_overflow() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    home.register_extension(
+        EventEmitterExtension::new("activity")
+            .subscribed_to(["conversation.text"])
+            .emits(["ext.activity.*"])
+            .proposes("ext.activity.tick"),
+    )
+    .await?;
+    let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    event.payload.insert("text".to_string(), json!("hello"));
+    event.payload.insert(
+        "yuukeiExtension".to_string(),
+        json!({ "extensionId": "spoofed", "hopCount": u64::MAX }),
+    );
+    home.ingest_event(event).await?;
+    let records = home.event_log().read(EventLogQuery::default())?.records;
+    assert!(!records
+        .iter()
+        .any(|record| record.kind == "ext.activity.tick"));
+    assert!(records
+        .iter()
+        .any(|record| record.kind == "extension.event.rejected"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn extension_signal_aliases_resolve_only_when_extension_is_enabled() -> Result<()> {
     let mut world = world_pack();
     world.signals.allow = vec!["活動時間_開始".to_string()];
@@ -3398,10 +3608,18 @@ async fn extension_event_log_read_grant_rejects_unregistered_expired_and_out_of_
         ResidentHomeError::EventLogReadDenied(_)
     ));
 
-    let mut out_of_scope = base_grant;
+    let mut out_of_scope = base_grant.clone();
     out_of_scope.event_types = vec!["device.*".to_string()];
     assert!(matches!(
         home.read_event_log_for_extension(out_of_scope).unwrap_err(),
+        ResidentHomeError::EventLogReadDenied(_)
+    ));
+
+    let mut wrong_purpose = base_grant;
+    wrong_purpose.purpose = "unrelated purpose".to_string();
+    assert!(matches!(
+        home.read_event_log_for_extension(wrong_purpose)
+            .unwrap_err(),
         ResidentHomeError::EventLogReadDenied(_)
     ));
     Ok(())
@@ -3419,5 +3637,741 @@ async fn rejects_world_pack_with_missing_required_capability() -> Result<()> {
         error,
         ResidentHomeError::MissingRequiredCapabilities(_)
     ));
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ImmediateChoiceExtension {
+    home: Arc<Mutex<Option<ResidentHome>>>,
+}
+
+#[derive(Clone)]
+struct MismatchedDialogueProvider;
+
+#[async_trait]
+impl CapabilityProvider for MismatchedDialogueProvider {
+    fn registration(&self) -> ProviderRegistration {
+        ProviderRegistration {
+            extension_id: "mismatched-dialogue".to_string(),
+            capabilities: vec![DIALOGUE_GENERATE_CAPABILITY.to_string()],
+            methods: vec!["generate".to_string()],
+            required_permissions: Vec::new(),
+            location: ExecutionLocation::ResidentHome,
+            health: yuukei_protocol::ExtensionHealth::Ready,
+            enabled: true,
+            config_schema: JsonMap::new(),
+            runtime_settings: JsonMap::new(),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _invocation: CapabilityInvocation,
+    ) -> yuukei_capability::Result<CapabilityResult> {
+        Ok(CapabilityResult {
+            invocation_id: "cap_unrelated".to_string(),
+            extension_id: "mismatched-dialogue".to_string(),
+            capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
+            output: JsonMap::from([
+                ("speak".to_string(), json!(true)),
+                ("text".to_string(), json!("採用されません")),
+            ]),
+            metadata: JsonMap::new(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DelayedEventSubscriptionExtension;
+
+#[async_trait]
+impl YuukeiExtension for DelayedEventSubscriptionExtension {
+    fn registration(&self) -> ExtensionSummary {
+        ExtensionSummary {
+            extension_id: "delayed-observer".to_string(),
+            display_name: "Delayed Observer".to_string(),
+            runtime: ExtensionRuntimeKind::Bundled,
+            permissions: ExtensionPermissions::default(),
+            hooks: Vec::new(),
+            event_subscriptions: vec![ExtensionEventSubscription {
+                event_types: vec!["conversation.text".to_string()],
+            }],
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
+            location: ExecutionLocation::ResidentHome,
+            enabled: true,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        _invocation: ExtensionHookInvocation,
+    ) -> yuukei_extension::Result<ExtensionHookResult> {
+        Ok(ExtensionHookResult {
+            action: ExtensionHookAction::Unchanged,
+            command: None,
+            metadata: None,
+        })
+    }
+
+    async fn on_event_appended(
+        &self,
+        invocation: ExtensionEventInvocation,
+    ) -> yuukei_extension::Result<ExtensionEventResult> {
+        if invocation.event.payload["text"] == "first" {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        }
+        Ok(ExtensionEventResult::default())
+    }
+}
+
+#[async_trait]
+impl YuukeiExtension for ImmediateChoiceExtension {
+    fn registration(&self) -> ExtensionSummary {
+        ExtensionSummary {
+            extension_id: "immediate-choice".to_string(),
+            display_name: "Immediate Choice".to_string(),
+            runtime: ExtensionRuntimeKind::Bundled,
+            permissions: ExtensionPermissions::default(),
+            hooks: vec![ExtensionHookSubscription {
+                hook_point: ExtensionHookPoint::BeforeCommandEmit,
+                command_types: vec!["dialogue.choices".to_string()],
+            }],
+            event_subscriptions: Vec::new(),
+            emitted_events: Vec::new(),
+            capabilities: Vec::new(),
+            signal_aliases: Vec::new(),
+            location: ExecutionLocation::ResidentHome,
+            enabled: true,
+        }
+    }
+
+    async fn invoke(
+        &self,
+        invocation: ExtensionHookInvocation,
+    ) -> yuukei_extension::Result<ExtensionHookResult> {
+        let home = self
+            .home
+            .lock()
+            .expect("immediate choice home lock")
+            .clone()
+            .expect("immediate choice home");
+        let choice_id = invocation.command.payload["choiceId"]
+            .as_str()
+            .expect("choice id")
+            .to_string();
+        let choice = invocation.command.payload["choices"][0]
+            .as_str()
+            .expect("first choice")
+            .to_string();
+        let mut event = RuntimeEvent::new("conversation.choice", "surface", invocation.resident_id);
+        event
+            .payload
+            .insert("choiceId".to_string(), json!(choice_id));
+        event.payload.insert("choice".to_string(), json!(choice));
+        event.payload.insert("index".to_string(), json!(0));
+        home.ingest_event(event).await.map_err(|error| {
+            yuukei_extension::ExtensionError::ProcessFailed {
+                extension_id: "immediate-choice".to_string(),
+                display_name: "Immediate Choice".to_string(),
+                kind: yuukei_extension::ProcessFailureKind::Crash,
+                message: error.to_string(),
+                suspended: false,
+            }
+        })?;
+        Ok(ExtensionHookResult {
+            action: ExtensionHookAction::Unchanged,
+            command: None,
+            metadata: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn runtime_event_validation_rejects_cross_resident_and_invalid_envelopes() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+
+    let cross_resident = RuntimeEvent::new("conversation.text", "surface", "resident-other");
+    assert!(matches!(
+        home.ingest_event(cross_resident).await.unwrap_err(),
+        ResidentHomeError::InvalidRuntimeEvent(_)
+    ));
+
+    let mut invalid_timestamp =
+        RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    invalid_timestamp.timestamp = "not-a-timestamp".to_string();
+    assert!(matches!(
+        home.ingest_event(invalid_timestamp).await.unwrap_err(),
+        ResidentHomeError::InvalidRuntimeEvent(_)
+    ));
+
+    let mut unknown_actor = RuntimeEvent::new("avatar.gesture.poke", "surface", "resident-default");
+    unknown_actor.actor_id = Some("unknown".to_string());
+    assert!(matches!(
+        home.ingest_event(unknown_actor).await.unwrap_err(),
+        ResidentHomeError::InvalidRuntimeEvent(_)
+    ));
+
+    assert!(home
+        .event_log()
+        .read(EventLogQuery::default())?
+        .records
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_events_are_dispatched_in_canonical_append_order() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    home.register_extension(DelayedEventSubscriptionExtension)
+        .await?;
+    let mut receiver = home.subscribe_commands();
+
+    let first_home = home.clone();
+    let first = tokio::spawn(async move {
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("first"));
+        first_home.ingest_event(event).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let second_home = home.clone();
+    let second = tokio::spawn(async move {
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!("second"));
+        second_home.ingest_event(event).await
+    });
+
+    let first_dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+    let second_dialogue = next_command_of_kind(&mut receiver, "dialogue.say").await;
+    assert_eq!(first_dialogue.payload["text"], "聞こえています。first");
+    assert_eq!(second_dialogue.payload["text"], "聞こえています。second");
+    first.await.expect("first ingest task")?;
+    second.await.expect("second ingest task")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_restores_existing_cursor_and_keeps_one_active_surface() -> Result<()> {
+    let event_log = EventLog::in_memory()?;
+    let existing =
+        event_log.append(RuntimeEvent::new("app.startup", "device", "resident-default").into())?;
+    let home = ResidentHome::new("resident-default", world_pack(), event_log).await?;
+    assert_eq!(
+        home.snapshot()?.recent_event_cursor,
+        existing.sequence.to_string()
+    );
+
+    let session = |surface_id: &str, active: bool| SurfaceSession {
+        surface_id: surface_id.to_string(),
+        device_id: "device-local".to_string(),
+        kind: SurfaceKind::Desktop,
+        active,
+        capabilities: Vec::new(),
+        presentation: SurfacePresentation {
+            renderer: Some(SurfaceRenderer::Html),
+            transparent: Some(false),
+            accepts_input: Some(true),
+        },
+    };
+    home.attach_surface(session("surface-active", true)).await?;
+    home.attach_surface(session("surface-passive", false))
+        .await?;
+    let snapshot = home.snapshot()?;
+    assert_eq!(
+        snapshot.active_surface_id.as_deref(),
+        Some("surface-active")
+    );
+    assert!(snapshot.surfaces["surface-active"].active);
+    assert!(!snapshot.surfaces["surface-passive"].active);
+
+    home.attach_surface(session("surface-next", true)).await?;
+    let snapshot = home.snapshot()?;
+    assert_eq!(snapshot.active_surface_id.as_deref(), Some("surface-next"));
+    assert!(!snapshot.surfaces["surface-active"].active);
+    assert!(snapshot.surfaces["surface-next"].active);
+    Ok(())
+}
+
+#[tokio::test]
+async fn preconfigured_extension_aliases_are_loaded_during_home_creation() -> Result<()> {
+    let mut world = world_pack();
+    world.signals.allow = vec!["活動時間_開始".to_string()];
+    world.daihon.loaded_scripts[0].source = r#"
+## desktop reactions
+### activity
+合図: ＠活動時間_開始
+話者: yuukei
+「活動開始です。」
+"#
+    .to_string();
+    let mut extensions = ExtensionRegistry::new();
+    extensions.register(
+        EventEmitterExtension::new("activity")
+            .emits(["ext.activity.active-period.start"])
+            .with_signal_alias("活動時間_開始", "ext.activity.active-period.start"),
+    )?;
+    let home = ResidentHome::with_parts_and_extensions(
+        "resident-default",
+        world,
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        CapabilityRouter::new(),
+        extensions,
+    )
+    .await?;
+
+    let commands = home
+        .ingest_event(RuntimeEvent::new(
+            "ext.activity.active-period.start",
+            "extension",
+            "resident-default",
+        ))
+        .await?;
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].payload["text"], "活動開始です。");
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_extension_readable_events_are_not_sent_to_subscriptions_or_ai_context() -> Result<()> {
+    let extension = EventEmitterExtension::new("observer")
+        .subscribed_to(["*"])
+        .with_broad_event_subscription();
+    let calls = extension.calls();
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    home.register_extension(extension).await?;
+
+    let mut private = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    private.payload.insert("text".to_string(), json!("秘密"));
+    private.privacy = Some(Privacy {
+        category: "conversation-secret".to_string(),
+        retention: RetentionPolicy::Manual,
+        extension_readable: false,
+    });
+    home.ingest_event(private).await?;
+    assert!(calls.lock().expect("observer calls lock").is_empty());
+
+    let mut public = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    public.payload.insert("text".to_string(), json!("公開"));
+    home.ingest_event(public).await?;
+    assert_eq!(
+        calls.lock().expect("observer calls lock").as_slice(),
+        ["conversation.text"]
+    );
+    let context = home.recent_dialogue_context("resident-default")?;
+    assert!(!context
+        .iter()
+        .any(|entry| entry.payload.get("text") == Some(&json!("秘密"))));
+    assert!(context
+        .iter()
+        .any(|entry| entry.payload.get("text") == Some(&json!("公開"))));
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_extension_readable_event_does_not_invoke_dialogue_generate() -> Result<()> {
+    let provider = DialogueGenerateProvider::new(JsonMap::from([
+        ("speak".to_string(), json!(true)),
+        ("text".to_string(), json!("漏れません。")),
+    ]));
+    let calls = provider.calls();
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        llm_fallback_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    event.payload.insert("text".to_string(), json!("秘密"));
+    event.privacy = Some(Privacy {
+        category: "conversation-secret".to_string(),
+        retention: RetentionPolicy::Manual,
+        extension_readable: false,
+    });
+    assert!(home.ingest_event(event).await?.is_empty());
+    assert!(calls.lock().expect("dialogue calls lock").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn extension_event_log_grant_requires_private_categories_and_honors_zero_limit() -> Result<()>
+{
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    home.register_extension(
+        EventEmitterExtension::new("memory-extension")
+            .subscribed_to(["conversation.*"])
+            .with_event_log_read(ExtensionEventLogReadPermission {
+                event_types: vec!["conversation.*".to_string()],
+                privacy_categories: vec!["allowed-private".to_string()],
+                allow_payloads: true,
+                allow_references: false,
+                max_records: 10,
+                purpose: "rebuild extension state".to_string(),
+            }),
+    )
+    .await?;
+
+    let mut public = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    public.payload.insert("text".to_string(), json!("public"));
+    home.event_log().append(public.into())?;
+    for (text, category) in [
+        ("allowed", "allowed-private"),
+        ("forbidden", "forbidden-private"),
+    ] {
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!(text));
+        event.privacy = Some(Privacy {
+            category: category.to_string(),
+            retention: RetentionPolicy::Short,
+            extension_readable: true,
+        });
+        home.event_log().append(event.into())?;
+    }
+
+    let grant = |privacy_categories: Vec<String>, max_records: usize| EventLogReadGrant {
+        extension_id: "memory-extension".to_string(),
+        resident_id: "resident-default".to_string(),
+        event_types: Vec::new(),
+        privacy_categories,
+        cursor_after_sequence: Some(0),
+        until_timestamp: None,
+        max_records,
+        allow_payloads: true,
+        allow_references: false,
+        expires_at: future_timestamp(),
+        purpose: "rebuild extension state".to_string(),
+    };
+
+    let public_only = home.read_event_log_for_extension(grant(Vec::new(), 10))?;
+    assert_eq!(public_only.records.len(), 1);
+    assert_eq!(public_only.records[0].payload["text"], "public");
+    let with_private =
+        home.read_event_log_for_extension(grant(vec!["allowed-private".to_string()], 10))?;
+    assert_eq!(with_private.records.len(), 2);
+    assert!(with_private
+        .records
+        .iter()
+        .any(|record| record.payload["text"] == "allowed"));
+    assert!(!with_private
+        .records
+        .iter()
+        .any(|record| record.payload["text"] == "forbidden"));
+    assert!(home
+        .read_event_log_for_extension(grant(Vec::new(), 0))?
+        .records
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn choice_waiter_exists_before_command_hooks_and_rejects_inconsistent_selection() -> Result<()>
+{
+    let home =
+        ResidentHome::new("resident-default", choice_world(5), EventLog::in_memory()?).await?;
+    let holder = Arc::new(Mutex::new(Some(home.clone())));
+    home.register_extension(ImmediateChoiceExtension { home: holder })
+        .await?;
+    let mut start = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    start.payload.insert("text".to_string(), json!("start"));
+    let commands =
+        tokio::time::timeout(std::time::Duration::from_secs(1), home.ingest_event(start))
+            .await
+            .expect("immediate choice should not be lost")?;
+    assert!(commands
+        .iter()
+        .any(|command| command.payload["text"] == "見る枝"));
+
+    let home =
+        ResidentHome::new("resident-default", choice_world(30), EventLog::in_memory()?).await?;
+    let mut receiver = home.subscribe_commands();
+    let ingest_home = home.clone();
+    let ingest = tokio::spawn(async move {
+        ingest_home
+            .ingest_event(RuntimeEvent::new(
+                "conversation.text",
+                "surface",
+                "resident-default",
+            ))
+            .await
+    });
+    let choices = next_command_of_kind(&mut receiver, "dialogue.choices").await;
+    let choice_id = choices.payload["choiceId"]
+        .as_str()
+        .expect("choice id")
+        .to_string();
+    let mut inconsistent = RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+    inconsistent
+        .payload
+        .insert("choiceId".to_string(), json!(choice_id));
+    inconsistent
+        .payload
+        .insert("choice".to_string(), json!("見る"));
+    inconsistent.payload.insert("index".to_string(), json!(1));
+    home.ingest_event(inconsistent).await?;
+
+    let mut valid = RuntimeEvent::new("conversation.choice", "surface", "resident-default");
+    valid
+        .payload
+        .insert("choiceId".to_string(), json!(choice_id));
+    valid.payload.insert("choice".to_string(), json!("見る"));
+    valid.payload.insert("index".to_string(), json!(0));
+    home.ingest_event(valid).await?;
+    let commands = ingest.await.expect("choice dispatch task")?;
+    assert!(commands
+        .iter()
+        .any(|command| command.payload["text"] == "見る枝"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_dialogue_result_is_still_recorded() -> Result<()> {
+    let provider = DialogueGenerateProvider::new(JsonMap::from([(
+        "speak".to_string(),
+        json!("not-a-boolean"),
+    )]));
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        llm_fallback_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    event.payload.insert("text".to_string(), json!("hello"));
+    assert!(home.ingest_event(event).await?.is_empty());
+    let records = home.event_log().read(EventLogQuery::default())?.records;
+    assert!(records.iter().any(|record| {
+        record.kind == "capability.invocation.result"
+            && record.payload["capability"] == DIALOGUE_GENERATE_CAPABILITY
+            && record.payload["output"]["speak"] == "not-a-boolean"
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dialogue_generate_rejects_text_over_the_declared_max_length() -> Result<()> {
+    let provider = DialogueGenerateProvider::new(JsonMap::from([
+        ("speak".to_string(), json!(true)),
+        ("text".to_string(), json!("長".repeat(121))),
+    ]));
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        llm_fallback_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    event.payload.insert("text".to_string(), json!("hello"));
+    assert!(home.ingest_event(event).await?.is_empty());
+    assert!(!home
+        .event_log()
+        .read(EventLogQuery::default())?
+        .records
+        .iter()
+        .any(|record| record.kind == "dialogue.say"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_result_with_mismatched_invocation_is_rejected() -> Result<()> {
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(MismatchedDialogueProvider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        llm_fallback_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    event.payload.insert("text".to_string(), json!("hello"));
+    assert!(home.ingest_event(event).await?.is_empty());
+    let records = home.event_log().read(EventLogQuery::default())?.records;
+    assert!(records
+        .iter()
+        .any(|record| record.kind == "capability.invocation.request"));
+    assert!(!records
+        .iter()
+        .any(|record| record.kind == "capability.invocation.result"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_dialogue_provider_does_not_consume_delegation_cooldown() -> Result<()> {
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        llm_fallback_world(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        CapabilityRouter::new(),
+    )
+    .await?;
+    let mut first = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    first.payload.insert("text".to_string(), json!("before"));
+    assert!(home.ingest_event(first).await?.is_empty());
+
+    home.register_provider(DialogueGenerateProvider::new(JsonMap::from([
+        ("speak".to_string(), json!(true)),
+        ("text".to_string(), json!("接続しました。")),
+    ])))?;
+    let mut second = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    second.payload.insert("text".to_string(), json!("after"));
+    let commands = home.ingest_event(second).await?;
+    assert!(commands
+        .iter()
+        .any(|command| command.payload["text"] == "接続しました。"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_dialogue_cooldown_does_not_wrap_and_disable_itself() -> Result<()> {
+    let mut world = llm_fallback_world();
+    world.llm_delegation.signals[0].cooldown_seconds = Some(u64::MAX);
+    let provider = DialogueGenerateProvider::new(JsonMap::from([
+        ("speak".to_string(), json!(true)),
+        ("text".to_string(), json!("一度だけ")),
+    ]));
+    let calls = provider.calls();
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        world,
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    for text in ["first", "second"] {
+        let mut event = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+        event.payload.insert("text".to_string(), json!(text));
+        home.ingest_event(event).await?;
+    }
+    assert_eq!(calls.lock().expect("dialogue calls lock").len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn retrieved_memories_are_clamped_to_the_contract_limits() -> Result<()> {
+    let mut snippets = (0..12)
+        .map(|index| json!({ "text": format!("fact-{index}"), "kind": "fact" }))
+        .collect::<Vec<_>>();
+    snippets.extend(
+        (0..7).map(|index| json!({ "text": format!("episode-{index}"), "kind": "episode" })),
+    );
+    let memory = MemoryProvider::new(JsonMap::from([(
+        "memories".to_string(),
+        Value::Array(snippets),
+    )]));
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(memory)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        world_pack(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let source = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    let memories = home
+        .retrieve_memories_for_dialogue_generate(&source)
+        .await?
+        .expect("clamped memories");
+    assert_eq!(memories.len(), 15);
+    assert_eq!(
+        memories
+            .iter()
+            .filter(|memory| memory.starts_with("fact-"))
+            .count(),
+        10
+    );
+    assert_eq!(
+        memories
+            .iter()
+            .filter(|memory| memory.starts_with("episode-"))
+            .count(),
+        5
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn speech_synthesis_uses_target_actor_when_payload_omits_speaker() -> Result<()> {
+    let provider = SpeechSynthesisProvider::new(JsonMap::from([
+        ("audioPath".to_string(), json!("C:/tmp/voice.wav")),
+        ("durationMs".to_string(), json!(1000)),
+    ]));
+    let calls = provider.calls();
+    let mut capabilities = CapabilityRouter::new();
+    capabilities.register(provider)?;
+    let home = ResidentHome::with_parts(
+        "resident-default",
+        world_pack(),
+        EventLog::in_memory()?,
+        Arc::new(YuukeiDaihonAdapter::default()),
+        capabilities,
+    )
+    .await?;
+    let source = RuntimeEvent::new("conversation.text", "surface", "resident-default");
+    let mut command = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+    command.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    command
+        .payload
+        .insert("text".to_string(), json!("こんにちは"));
+    home.synthesize_speech_for_dialogue(command, source).await?;
+    let calls = calls.lock().expect("speech calls lock");
+    assert_eq!(calls[0].actor_id.as_deref(), Some("yuukei"));
+    assert_eq!(calls[0].input["speakerId"], "yuukei");
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_uses_default_walk_motion_and_ignores_away_dialogue() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    let mut walk = RuntimeCommand::new("stage.walk", "daihon", "resident-default");
+    walk.target = target.clone();
+    walk.payload
+        .insert("destination".to_string(), json!("right-edge"));
+    home.emit_internal_command_without_extensions(walk)?;
+    let actor = &home.snapshot()?.actors["yuukei"];
+    assert_eq!(actor.motion, "walk");
+    assert_eq!(actor.heading, "right");
+
+    let mut exit = RuntimeCommand::new("actor.exit", "daihon", "resident-default");
+    exit.target = target.clone();
+    home.emit_internal_command_without_extensions(exit)?;
+    let mut dialogue = RuntimeCommand::new("dialogue.say", "daihon", "resident-default");
+    dialogue.target = target;
+    dialogue
+        .payload
+        .insert("text".to_string(), json!("不在中の発話"));
+    home.emit_internal_command_without_extensions(dialogue)?;
+    let actor = &home.snapshot()?.actors["yuukei"];
+    assert_eq!(actor.presence, ActorPresence::Away);
+    assert_eq!(actor.speaking, Some(false));
+    assert_eq!(actor.bubble, None);
     Ok(())
 }

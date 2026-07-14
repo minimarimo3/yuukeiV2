@@ -45,24 +45,28 @@ impl ResidentHome {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let speaker_id = command
+            .target
+            .as_ref()
+            .and_then(|target| target.actor_id.clone())
+            .or_else(|| {
+                command
+                    .payload
+                    .get("speakerId")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
             capability: SPEECH_SYNTHESIS_CAPABILITY.to_string(),
             method: "synthesize".to_string(),
             resident_id: command.resident_id.clone(),
-            actor_id: command
-                .target
-                .as_ref()
-                .and_then(|target| target.actor_id.clone()),
+            actor_id: speaker_id.clone(),
             input: JsonMap::from([
                 ("text".to_string(), Value::String(text)),
                 (
                     "speakerId".to_string(),
-                    command
-                        .payload
-                        .get("speakerId")
-                        .cloned()
-                        .unwrap_or(Value::Null),
+                    speaker_id.map(Value::String).unwrap_or(Value::Null),
                 ),
                 (
                     "emotion".to_string(),

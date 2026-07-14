@@ -52,6 +52,9 @@ impl ResidentHome {
         &self,
         trigger_event: &RuntimeEvent,
     ) -> Result<()> {
+        if !runtime_event_is_extension_readable(trigger_event) {
+            return Ok(());
+        }
         if !matches!(
             trigger_event.kind.as_str(),
             "app.startup" | "device.sleep.before"
@@ -76,7 +79,7 @@ impl ResidentHome {
                 kind: None,
                 after_sequence: None,
                 limit: None,
-                extension_readable_only: false,
+                extension_readable_only: true,
             })?
             .records;
         let indexed_dates = indexed_memory_dates(&records);
@@ -200,6 +203,9 @@ impl ResidentHome {
         &self,
         source_event: &RuntimeEvent,
     ) -> Result<Option<Vec<String>>> {
+        if !runtime_event_is_extension_readable(source_event) {
+            return Ok(None);
+        }
         let router = self
             .capabilities
             .lock()
@@ -260,11 +266,24 @@ impl ResidentHome {
         let Ok(output) = serde_json::from_value::<MemoryRetrieveOutput>(output_value) else {
             return Ok(None);
         };
+        let mut fact_count = 0;
+        let mut episode_count = 0;
         let memories = output
             .memories
             .into_iter()
-            .map(|memory| memory.text)
-            .filter(|text| !text.trim().is_empty())
+            .filter_map(|memory| {
+                let (count, limit) = match memory.kind {
+                    MemorySnippetKind::Fact => (&mut fact_count, MEMORY_RETRIEVE_FACT_LIMIT),
+                    MemorySnippetKind::Episode => {
+                        (&mut episode_count, MEMORY_RETRIEVE_EPISODE_LIMIT)
+                    }
+                };
+                if *count >= limit || memory.text.trim().is_empty() {
+                    return None;
+                }
+                *count += 1;
+                Some(memory.text)
+            })
             .collect::<Vec<_>>();
         Ok((!memories.is_empty()).then_some(memories))
     }

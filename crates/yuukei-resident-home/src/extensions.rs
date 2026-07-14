@@ -5,6 +5,13 @@ impl ResidentHome {
         &self,
         record: &EventLogRecord,
     ) -> Result<Vec<RuntimeEvent>> {
+        if record
+            .privacy
+            .as_ref()
+            .is_some_and(|privacy| !privacy.extension_readable)
+        {
+            return Ok(Vec::new());
+        }
         let registry = self
             .extensions
             .lock()
@@ -67,7 +74,7 @@ impl ResidentHome {
             ));
         }
 
-        let hop_count = extension_event_hop_count(source_record) + 1;
+        let hop_count = extension_event_hop_count(source_record).saturating_add(1);
         if hop_count > MAX_EXTENSION_EVENT_HOPS {
             return Err(format!(
                 "extension event hop count exceeded {MAX_EXTENSION_EVENT_HOPS}: {hop_count}"
@@ -359,8 +366,17 @@ impl ResidentHome {
         timeout_duration: Duration,
         source_event: &RuntimeEvent,
     ) -> Result<Option<CapabilityResult>> {
+        let expected_invocation_id = invocation.id.clone();
+        let expected_capability = invocation.capability.clone();
         match timeout(timeout_duration, router.invoke(invocation)).await {
-            Ok(Ok(result)) => Ok(Some(result)),
+            Ok(Ok(result)) => {
+                if result.invocation_id != expected_invocation_id
+                    || result.capability != expected_capability
+                {
+                    return Ok(None);
+                }
+                Ok(Some(result))
+            }
             Ok(Err(error)) => {
                 self.handle_capability_error(&error, source_event).await?;
                 Ok(None)
@@ -425,6 +441,6 @@ fn extension_event_hop_count(record: &EventLogRecord) -> u32 {
         .and_then(Value::as_object)
         .and_then(|metadata| metadata.get("hopCount"))
         .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
+        .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
         .unwrap_or(0)
 }

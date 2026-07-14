@@ -2,6 +2,7 @@ use super::*;
 
 impl ResidentHome {
     pub async fn ingest_event(&self, event: RuntimeEvent) -> Result<Vec<RuntimeCommand>> {
+        self.validate_runtime_event(&event)?;
         let appended_event = self
             .event_log
             .append(NewEventLogRecord::from(event.clone()))?;
@@ -13,11 +14,62 @@ impl ResidentHome {
         if self.defer_event_while_interpreting(event.clone(), appended_event.clone())? {
             return Ok(Vec::new());
         }
+        let _processing = self.event_processing.lock().await;
         let mut emitted = self
             .process_appended_runtime_event(event, appended_event)
             .await?;
         emitted.extend(self.drain_interpretation_queue().await?);
         Ok(emitted)
+    }
+
+    pub(crate) fn validate_runtime_event(&self, event: &RuntimeEvent) -> Result<()> {
+        let resident_id = self.resident_id()?;
+        if event.resident_id != resident_id {
+            return Err(ResidentHomeError::InvalidRuntimeEvent(format!(
+                "residentId {} does not match this Resident Home ({resident_id})",
+                event.resident_id
+            )));
+        }
+        for (field, value) in [
+            ("id", event.id.as_str()),
+            ("type", event.kind.as_str()),
+            ("timestamp", event.timestamp.as_str()),
+            ("source", event.source.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(ResidentHomeError::InvalidRuntimeEvent(format!(
+                    "{field} must not be empty"
+                )));
+            }
+        }
+        if DateTime::parse_from_rfc3339(&event.timestamp).is_err() {
+            return Err(ResidentHomeError::InvalidRuntimeEvent(format!(
+                "timestamp is not RFC 3339: {}",
+                event.timestamp
+            )));
+        }
+        if let Some(actor_id) = event.actor_id.as_deref() {
+            if !self
+                .world_pack
+                .actors
+                .iter()
+                .any(|actor| actor.id == actor_id)
+            {
+                return Err(ResidentHomeError::InvalidRuntimeEvent(format!(
+                    "actor is not declared by the active World Pack: {actor_id}"
+                )));
+            }
+        }
+        if event
+            .privacy
+            .as_ref()
+            .is_some_and(|privacy| privacy.category.trim().is_empty())
+        {
+            return Err(ResidentHomeError::InvalidRuntimeEvent(
+                "privacy.category must not be empty".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn defer_event_while_interpreting(
@@ -72,6 +124,9 @@ impl ResidentHome {
             let Some((event, record)) = next else {
                 break;
             };
+            if self.resolve_pending_choice_event(&event)? {
+                continue;
+            }
             emitted.extend(self.process_appended_runtime_event(event, record).await?);
         }
         Ok(emitted)
@@ -328,7 +383,7 @@ impl ResidentHome {
                 kind: Some("desktop.download.completed".to_string()),
                 after_sequence: None,
                 limit: None,
-                extension_readable_only: false,
+                extension_readable_only: true,
             })?
             .records;
         for record in records.into_iter().rev() {
@@ -452,14 +507,16 @@ impl ResidentHome {
         };
         match command.kind.as_str() {
             "dialogue.say" => {
-                if let Some(text) = command
-                    .payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                {
-                    actor.speaking = Some(true);
-                    actor.bubble = Some(text);
+                if actor.presence == ActorPresence::Present {
+                    if let Some(text) = command
+                        .payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                    {
+                        actor.speaking = Some(true);
+                        actor.bubble = Some(text);
+                    }
                 }
             }
             "avatar.expression" => {
@@ -474,9 +531,14 @@ impl ResidentHome {
                 }
             }
             "stage.walk" => {
-                if let Some(motion) = command.payload.get("motion").and_then(Value::as_str) {
-                    actor.motion = motion.to_string();
-                }
+                actor.motion = command
+                    .payload
+                    .get("motion")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|motion| !motion.is_empty())
+                    .unwrap_or("walk")
+                    .to_string();
                 actor.heading = match command.payload.get("destination").and_then(Value::as_str) {
                     Some("right-edge") => "right".to_string(),
                     Some("left-edge") => "left".to_string(),

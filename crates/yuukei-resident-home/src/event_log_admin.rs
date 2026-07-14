@@ -58,6 +58,12 @@ impl ResidentHome {
             extension_readable_only: true,
         })?;
 
+        if validated.max_records == 0 {
+            return Ok(EventLogPage {
+                records: Vec::new(),
+                next_cursor: None,
+            });
+        }
         let mut records = Vec::new();
         for mut record in page.records {
             if !event_type_matches(&validated.event_types, &record.kind) {
@@ -69,13 +75,10 @@ impl ResidentHome {
                     continue;
                 }
             }
-            if !validated.privacy_categories.is_empty()
-                && !record
-                    .privacy
-                    .as_ref()
-                    .is_some_and(|privacy| validated.privacy_categories.contains(&privacy.category))
-            {
-                continue;
+            if let Some(privacy) = &record.privacy {
+                if !validated.privacy_categories.contains(&privacy.category) {
+                    continue;
+                }
             }
             if !validated.allow_payloads {
                 record.payload.clear();
@@ -228,6 +231,12 @@ impl ResidentHome {
             return Err(ResidentHomeError::EventLogReadDenied(format!(
                 "grant expired at {}",
                 grant.expires_at
+            )));
+        }
+        if grant.purpose.trim().is_empty() || grant.purpose != permission.purpose {
+            return Err(ResidentHomeError::EventLogReadDenied(format!(
+                "grant purpose does not match manifest permission: {}",
+                grant.extension_id
             )));
         }
 

@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{
-    sync::{broadcast, oneshot},
+    sync::{broadcast, oneshot, Mutex as AsyncMutex},
     time::timeout,
 };
 use yuukei_capability::{
@@ -38,9 +38,10 @@ use yuukei_protocol::{
     DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
     MemoryForgetEntry, MemoryForgetInput, MemoryForgetOutput, MemoryIndexEvent, MemoryIndexInput,
     MemoryIndexOutput, MemoryListInput, MemoryListOutput, MemoryRetrieveInput,
-    MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery, MemoryUpdateInput,
-    MemoryUpdateOutput, MoodEvaluateInput, MoodEvaluateOutput, NewEventLogRecord, ResidentSnapshot,
-    RuntimeCommand, RuntimeEvent, SignalAliasTable, SurfaceSession,
+    MemoryRetrieveLimits, MemoryRetrieveOutput, MemoryRetrieveQuery, MemorySnippetKind,
+    MemoryUpdateInput, MemoryUpdateOutput, MoodEvaluateInput, MoodEvaluateOutput,
+    NewEventLogRecord, ResidentSnapshot, RuntimeCommand, RuntimeEvent, SignalAliasTable,
+    SurfaceSession,
 };
 use yuukei_world::{
     DaihonAdapter, DaihonChoiceRequest, DaihonDiagnosticEntry, DaihonDiagnosticReport,
@@ -74,6 +75,8 @@ pub enum ResidentHomeError {
     Capability(#[from] CapabilityError),
     #[error("extension error: {0}")]
     Extension(#[from] ExtensionError),
+    #[error("invalid runtime event: {0}")]
+    InvalidRuntimeEvent(String),
     #[error("event log read denied: {0}")]
     EventLogReadDenied(String),
     #[error("world pack requires unavailable capabilities: {0}")]
@@ -89,6 +92,7 @@ pub type Result<T> = std::result::Result<T, ResidentHomeError>;
 pub const MAX_EXTENSION_EVENT_HOPS: u32 = 4;
 const DEFAULT_LLM_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RECENT_CONTEXT_COUNT: usize = 20;
+const MAX_DIALOGUE_GENERATE_LENGTH: usize = 120;
 const MEMORY_RETRIEVE_TIMEOUT: Duration = Duration::from_secs(10);
 const SPEECH_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MOOD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -111,6 +115,7 @@ impl ResidentHomeError {
             Self::EventLog(_)
             | Self::Capability(_)
             | Self::Extension(_)
+            | Self::InvalidRuntimeEvent(_)
             | Self::EventLogReadDenied(_)
             | Self::MissingRequiredCapabilities(_)
             | Self::PoisonedLock
@@ -128,6 +133,7 @@ pub struct ResidentHome {
     extensions: Arc<Mutex<ExtensionRegistry>>,
     runtime_settings: ResidentRuntimeSettings,
     state: Arc<Mutex<HomeState>>,
+    event_processing: Arc<AsyncMutex<()>>,
     command_tx: broadcast::Sender<RuntimeCommand>,
 }
 
@@ -256,8 +262,9 @@ impl ResidentHome {
         runtime_settings: ResidentRuntimeSettings,
     ) -> Result<Self> {
         world_pack.validate()?;
+        let aliases = SignalAliasTable::with_standard_and_donated(extensions.signal_aliases());
         daihon
-            .load_world_with_signal_aliases(&world_pack, &SignalAliasTable::default())
+            .load_world_with_signal_aliases(&world_pack, &aliases)
             .await?;
         let missing_capabilities = world_pack
             .capabilities
@@ -293,6 +300,15 @@ impl ResidentHome {
             })
             .collect();
         restore_actor_presence_state(&event_log, &resident_id, &mut actors)?;
+        let recent_event_cursor = event_log
+            .read(EventLogQuery {
+                resident_id: Some(resident_id.clone()),
+                ..EventLogQuery::default()
+            })?
+            .records
+            .last()
+            .map(|record| record.sequence)
+            .unwrap_or(0);
         let mood = load_mood_state(runtime_settings.mood_state_path.as_ref());
         let (command_tx, _) = broadcast::channel(128);
         Ok(Self {
@@ -308,12 +324,13 @@ impl ResidentHome {
                 actors,
                 active_walk_commands: BTreeMap::new(),
                 surfaces: BTreeMap::new(),
-                recent_event_cursor: 0,
+                recent_event_cursor,
                 daihon_diagnostics: Vec::new(),
                 llm_delegation: LlmDelegationCounters::default(),
                 interpretation: InterpretationState::default(),
                 mood,
             })),
+            event_processing: Arc::new(AsyncMutex::new(())),
             command_tx,
         })
     }
@@ -385,9 +402,20 @@ impl ResidentHome {
                 .lock()
                 .map_err(|_| ResidentHomeError::PoisonedLock)?;
             state.recent_event_cursor = appended.sequence;
-            state.active_surface_id = Some(session.surface_id.clone());
+            if session.active {
+                for attached in state.surfaces.values_mut() {
+                    attached.active = false;
+                }
+                state.active_surface_id = Some(session.surface_id.clone());
+            } else if state.active_surface_id.as_deref() == Some(&session.surface_id) {
+                state.active_surface_id = None;
+            }
             state.surfaces.insert(session.surface_id.clone(), session);
         }
+        if self.defer_event_while_interpreting(event.clone(), appended.clone())? {
+            return self.snapshot();
+        }
+        let _processing = self.event_processing.lock().await;
         self.process_appended_runtime_event(event, appended).await?;
         self.snapshot()
     }

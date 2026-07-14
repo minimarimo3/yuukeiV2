@@ -25,20 +25,31 @@ impl ResidentHome {
         event: &RuntimeEvent,
         aliases: &SignalAliasTable,
     ) -> Result<Vec<RuntimeCommand>> {
+        if !runtime_event_is_extension_readable(event) {
+            return Ok(Vec::new());
+        }
         let Some(delegation) = self
             .world_pack
             .llm_delegation_for_signal_with_aliases(&event.kind, aliases)
         else {
             return Ok(Vec::new());
         };
+        if !self
+            .capabilities
+            .lock()
+            .map_err(|_| ResidentHomeError::PoisonedLock)?
+            .has_healthy_provider(DIALOGUE_GENERATE_CAPABILITY)
+        {
+            return Ok(Vec::new());
+        }
         let canonical_signal = aliases.canonicalize(&delegation.signal);
         if !self.try_start_llm_delegation(&canonical_signal, delegation.cooldown_seconds)? {
             return Ok(Vec::new());
         }
 
-        let memories = self.retrieve_memories_for_dialogue_generate(event).await?;
-        let input =
-            self.dialogue_generate_input(event, &self.world_pack.default_actor_id, None, memories)?;
+        let mut input =
+            self.dialogue_generate_input(event, &self.world_pack.default_actor_id, None, None)?;
+        input.memories = self.retrieve_memories_for_dialogue_generate(event).await?;
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
             capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
@@ -67,20 +78,20 @@ impl ResidentHome {
             return Ok(Vec::new());
         };
 
-        let output_value = Value::Object(result.output.clone().into_iter().collect());
-        let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
-            return Ok(Vec::new());
-        };
         self.record_capability_result(CapabilityResultRecord {
             invocation_id: result.invocation_id,
             extension_id: result.extension_id,
             capability: result.capability,
-            output: result.output,
+            output: result.output.clone(),
             metadata: result.metadata,
             source_event: event,
             source_command_id: None,
             actor_id: invocation.actor_id.as_deref(),
         })?;
+        let output_value = Value::Object(result.output.into_iter().collect());
+        let Ok(output) = serde_json::from_value::<DialogueGenerateOutput>(output_value) else {
+            return Ok(Vec::new());
+        };
         self.commands_from_dialogue_generate_output(output, event)
     }
 
@@ -113,9 +124,8 @@ impl ResidentHome {
         }
         if let Some(cooldown_seconds) = cooldown_seconds {
             if let Some(last_called_at) = state.llm_delegation.cooldowns.get(signal) {
-                if now.signed_duration_since(*last_called_at).num_seconds()
-                    < cooldown_seconds as i64
-                {
+                let cooldown_seconds = i64::try_from(cooldown_seconds).unwrap_or(i64::MAX);
+                if now.signed_duration_since(*last_called_at).num_seconds() < cooldown_seconds {
                     return Ok(false);
                 }
             }
@@ -181,7 +191,9 @@ impl ResidentHome {
                 profile: actor.profile.clone(),
             },
             recent_context: self.recent_dialogue_context(&event.resident_id)?,
-            constraints: DialogueGenerateConstraints { max_length: 120 },
+            constraints: DialogueGenerateConstraints {
+                max_length: MAX_DIALOGUE_GENERATE_LENGTH,
+            },
         })
     }
 
@@ -200,7 +212,7 @@ impl ResidentHome {
                 kind: None,
                 after_sequence: None,
                 limit: None,
-                extension_readable_only: false,
+                extension_readable_only: true,
             })?
             .records;
         if records.len() > limit {
@@ -224,7 +236,7 @@ impl ResidentHome {
         if !output.speak {
             return Ok(Vec::new());
         }
-        let Some(text) = output.text.filter(|text| !text.trim().is_empty()) else {
+        let Some(text) = output.text.filter(|text| valid_generated_text(text)) else {
             return Ok(Vec::new());
         };
         self.record_llm_speech_budget_use()?;
@@ -289,18 +301,23 @@ impl ResidentHome {
         source_event: &RuntimeEvent,
         request: DaihonGenerateRequest,
     ) -> Result<Option<DaihonGenerateResponse>> {
+        if !runtime_event_is_extension_readable(source_event) {
+            return Ok(None);
+        }
         let actor_id = request
             .speaker_id
             .as_deref()
             .unwrap_or(&self.world_pack.default_actor_id)
             .to_string();
-        let input = self.dialogue_generate_input(
+        let mut input = self.dialogue_generate_input(
             source_event,
             &actor_id,
             Some(request.instruction.clone()),
-            self.retrieve_memories_for_dialogue_generate(source_event)
-                .await?,
+            None,
         )?;
+        input.memories = self
+            .retrieve_memories_for_dialogue_generate(source_event)
+            .await?;
         let invocation = CapabilityInvocation {
             id: new_id("cap"),
             capability: DIALOGUE_GENERATE_CAPABILITY.to_string(),
@@ -346,7 +363,7 @@ impl ResidentHome {
         if !output.speak {
             return Ok(None);
         }
-        let Some(text) = output.text.filter(|text| !text.trim().is_empty()) else {
+        let Some(text) = output.text.filter(|text| valid_generated_text(text)) else {
             return Ok(None);
         };
         Ok(Some(DaihonGenerateResponse {
@@ -375,6 +392,9 @@ impl ResidentHome {
         source_event: &RuntimeEvent,
         request: DaihonInterpretRequest,
     ) -> Result<String> {
+        if !runtime_event_is_extension_readable(source_event) {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        }
         let input = DialogueInterpretInput {
             question: request.question,
             choices: request.choices.clone(),
@@ -453,6 +473,9 @@ impl ResidentHome {
         source_event: &RuntimeEvent,
         request: DaihonExtractRequest,
     ) -> Result<String> {
+        if !runtime_event_is_extension_readable(source_event) {
+            return Ok(UNKNOWN_INTERPRETATION.to_string());
+        }
         let input = DialogueExtractInput {
             instruction: request.instruction,
             input: DialogueInterpretTextInput {
@@ -584,6 +607,17 @@ pub(crate) fn json_map_omitting_null_values(value: Value) -> JsonMap {
             .collect(),
         other => JsonMap::from([("value".to_string(), other)]),
     }
+}
+
+pub(crate) fn runtime_event_is_extension_readable(event: &RuntimeEvent) -> bool {
+    event
+        .privacy
+        .as_ref()
+        .is_none_or(|privacy| privacy.extension_readable)
+}
+
+fn valid_generated_text(text: &str) -> bool {
+    !text.trim().is_empty() && text.chars().count() <= MAX_DIALOGUE_GENERATE_LENGTH
 }
 
 fn generated_command(
