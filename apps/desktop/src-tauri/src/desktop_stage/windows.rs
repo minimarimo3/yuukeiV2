@@ -84,10 +84,12 @@ pub(super) fn create_stage_overlay_window(
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
+        .visible(false)
         .build()
         .map_err(to_message)?;
     enforce_borderless(&window);
     window.set_ignore_cursor_events(true).map_err(to_message)?;
+    window.show().map_err(to_message)?;
     Ok(())
 }
 
@@ -107,9 +109,11 @@ pub(super) fn create_actor_window(
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
+        .visible(false)
         .build()
         .map_err(to_message)?;
     enforce_borderless(&window);
+    window.show().map_err(to_message)?;
     Ok(())
 }
 
@@ -130,6 +134,10 @@ pub(super) fn create_actor_window(
 ///    install a window subclass that forwards `WM_NCACTIVATE` with `lParam = -1`,
 ///    the documented signal telling `DefWindowProc` not to redraw the non-client
 ///    area, which stops the flicker while leaving tao's focus bookkeeping intact.
+///
+/// New actor and overlay windows are built hidden, passed through this function,
+/// and only then shown. This prevents their initial decorated native frame from
+/// becoming visible before the Windows-specific style fix is installed.
 ///
 /// No-op on platforms where the builder already produced a borderless window.
 pub(crate) fn enforce_borderless(window: &WebviewWindow) {
