@@ -18,6 +18,17 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 6. [06-build-guidance-for-codex.md](06-build-guidance-for-codex.md): 新規実装時の判断基準と作る順番。
 7. [08-daihon-language-reference.md](08-daihon-language-reference.md): World Pack作者向けのDaihon言語リファレンス。
 
+## User and Author Guides
+
+設計資料ではなく、Yuukeiを使う人・World Pack作者・Extension作者向けの手順を探している場合は、次から始めます。
+
+- [USERGUIDE.md](USERGUIDE.md): インストール、初回設定、住人との触れ合い、AI・音声・プライバシー。
+- [docs/user/README.md](docs/user/README.md): 初心者向け作者ガイドの入口と、World Pack / Daihon / Extensionの選び分け。
+- [docs/user/01-world-pack-guide.md](docs/user/01-world-pack-guide.md): World Packの作成。
+- [docs/user/02-daihon-guide.md](docs/user/02-daihon-guide.md): Daihonのチュートリアル。
+- [docs/user/03-extension-guide.md](docs/user/03-extension-guide.md): process Extensionの作成。
+- [docs/user/04-testing-and-distribution.md](docs/user/04-testing-and-distribution.md): テスト、配布、トラブルシューティング。
+
 ## Non-Negotiable Product Intent
 
 - Yuukeiは、ユーザーのデジタル生活圏に住むUI内生活者を実現する。

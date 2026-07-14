@@ -2,7 +2,7 @@
 
 Yuukei(ゆうけい)は、あなたのデバイスに「住人」が住みつくアプリです。住人はデスクトップで生活し、話しかけたり、触ったり、あなたの帰りを待ったりします。ウィンドウは住人にとっての地形で、フォルダは部屋です。
 
-この文書は、Yuukeiを使う人のための案内です。World Packの台本を書きたい人は [08-daihon-language-reference.md](08-daihon-language-reference.md) を見てください。
+この文書は、Yuukeiを使う人のための案内です。自分の住人、台本、拡張機能を作りたい人は [ユーザー・作者ガイド](docs/user/README.md) から始めてください。
 
 ## 1. インストール
 
@@ -80,3 +80,13 @@ Yuukeiは住人との生活を「生活の記録(イベントログ)」として
 | AIの返事がない | 接続先(LM Studio等)が起動しているか。APIキーが正しいか。AIなしでも生活は続きます |
 | フォルダやウィンドウに反応しない | 「観測とプライバシー」がONか。macOSでは初回にアクセシビリティ/オートメーションの許可を求められることがあります |
 | 動きがおかしい | いったん終了して起動し直す。直らなければ「生活の記録」から直近の記録を確認 |
+
+## 9. 自分で住人や機能を作る
+
+作者向けの詳しいガイドがあります。
+
+- [World Packを作る](docs/user/01-world-pack-guide.md) — 住人、VRM、合図、能力、Pack配布の基本。
+- [Daihonをはじめから書く](docs/user/02-daihon-guide.md) — セリフ、条件、変数、選択肢、AI関数、デスクトップ演出。
+- [Extensionを作る](docs/user/03-extension-guide.md) — hook、event購読、capability、設定、権限。
+- [テスト・配布・トラブルシューティング](docs/user/04-testing-and-distribution.md) — CLI、診断、zip配布、安全確認。
+- [Daihon言語リファレンス](08-daihon-language-reference.md) — 全構文とエラーコードを引くための資料。
