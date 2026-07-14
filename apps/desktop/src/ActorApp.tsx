@@ -238,6 +238,7 @@ function VrmStage({
     let animationFrame = 0;
     let hitTestTimer = 0;
     let lastPassthrough: boolean | null = null;
+    let windowPointerInputLocked = false;
     let lastAnchorSignature = "";
     let gesture: PointerGestureState = idlePointerGesture();
     let nextGestureId = 0;
@@ -368,12 +369,33 @@ function VrmStage({
 
     async function updateClickThrough() {
       if (!isTauriRuntime()) return;
-      const solid = await pointerHitsVisibleSurface(renderer);
-      const passthrough = !solid;
+      const solid = windowPointerInputLocked
+        ? true
+        : await pointerHitsVisibleSurface(renderer);
+      // The actor can animate away from the held pixel while the user is
+      // waiting for the long press. Re-check the lock after the async hit test
+      // so a stale transparent result cannot make the whole window ignore the
+      // pointer in the middle of a gesture.
+      const passthrough = !windowPointerInputLocked && !solid;
       if (lastPassthrough !== passthrough) {
         lastPassthrough = passthrough;
         await onHitTestChange(passthrough);
       }
+    }
+
+    function setWindowPointerInputLock(locked: boolean) {
+      windowPointerInputLocked = locked;
+      if (locked) {
+        if (lastPassthrough === false) return;
+        lastPassthrough = false;
+        void onHitTestChange(false).catch((error) => {
+          console.warn("Failed to keep actor window interactive", error);
+        });
+        return;
+      }
+      void updateClickThrough().catch((error) => {
+        console.warn("Failed to refresh actor window hit test", error);
+      });
     }
 
     function handlePointerDown(event: PointerEvent) {
@@ -493,11 +515,23 @@ function VrmStage({
     }
 
     function executePointerGestureEffect(effect: PointerGestureEffect) {
+      if (effect.type === "setWindowPointerInputLock") {
+        setWindowPointerInputLock(effect.locked);
+        return;
+      }
       if (effect.type === "capturePointer") {
         try {
           checkedCanvas.setPointerCapture(effect.pointerId);
         } catch (error) {
           console.warn("Failed to capture avatar pointer", error);
+          // Let the current transition finish scheduling its hold before the
+          // cancellation clears it again.
+          window.queueMicrotask(() => {
+            dispatchPointerGesture({
+              type: "pointerCaptureLost",
+              pointerId: effect.pointerId,
+            });
+          });
         }
         return;
       }
@@ -712,12 +746,18 @@ function VrmStage({
       dispatchPointerEnd(event, "pointerReleased");
     const handlePointerCancel = (event: PointerEvent) =>
       dispatchPointerEnd(event, "pointerCancelled");
+    const handleLostPointerCapture = (event: PointerEvent) =>
+      dispatchPointerGesture({
+        type: "pointerCaptureLost",
+        pointerId: event.pointerId,
+      });
 
     window.addEventListener("resize", resize);
     canvas.addEventListener("pointerdown", handlePointerDown);
     canvas.addEventListener("pointermove", handlePointerMove);
     canvas.addEventListener("pointerup", handlePointerUp);
     canvas.addEventListener("pointercancel", handlePointerCancel);
+    canvas.addEventListener("lostpointercapture", handleLostPointerCapture);
     canvas.addEventListener("contextmenu", handleContextMenu);
     resize();
     void loadActors().catch((error) => {
@@ -735,6 +775,10 @@ function VrmStage({
       canvas.removeEventListener("pointermove", handlePointerMove);
       canvas.removeEventListener("pointerup", handlePointerUp);
       canvas.removeEventListener("pointercancel", handlePointerCancel);
+      canvas.removeEventListener(
+        "lostpointercapture",
+        handleLostPointerCapture,
+      );
       canvas.removeEventListener("contextmenu", handleContextMenu);
       for (const timer of holdTimers.values()) window.clearTimeout(timer);
       holdTimers.clear();

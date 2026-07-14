@@ -88,6 +88,9 @@ describe("pointer gesture state machine", () => {
         holdStatus: "scheduled",
       });
       expect(effectsOfType(result.effects, "scheduleHold")).toHaveLength(1);
+      expect(
+        effectsOfType(result.effects, "setWindowPointerInputLock"),
+      ).toEqual([{ type: "setWindowPointerInputLock", locked: true }]);
     });
 
     it("returns from pressing to idle on pointerReleased", () => {
@@ -97,6 +100,9 @@ describe("pointer gesture state machine", () => {
       });
 
       expect(result.state).toEqual(idlePointerGesture());
+      expect(
+        effectsOfType(result.effects, "setWindowPointerInputLock"),
+      ).toEqual([{ type: "setWindowPointerInputLock", locked: false }]);
     });
 
     it("emits notifyPoke for a semantic short press", () => {
@@ -253,6 +259,29 @@ describe("pointer gesture state machine", () => {
       expect(effectsOfType(result.effects, "notifyPoke")).toEqual([]);
     });
 
+    it("returns pressing to idle when pointer capture is unexpectedly lost", () => {
+      const result = transition(pressing(), {
+        type: "pointerCaptureLost",
+        pointerId,
+      });
+
+      expect(result.state).toEqual(idlePointerGesture());
+      expect(effectsOfType(result.effects, "cancelHold")).toHaveLength(1);
+      expect(
+        effectsOfType(result.effects, "setWindowPointerInputLock"),
+      ).toEqual([{ type: "setWindowPointerInputLock", locked: false }]);
+    });
+
+    it("cancels an active drag when pointer capture is unexpectedly lost", () => {
+      const result = transition(dragging(), {
+        type: "pointerCaptureLost",
+        pointerId,
+      });
+
+      expect(result.state.type).toBe("cancellingDrag");
+      expect(effectsOfType(result.effects, "cancelWindowDrag")).toHaveLength(1);
+    });
+
     it("moves dragging to cancellingDrag and requests cancel", () => {
       const result = transition(dragging(), {
         type: "pointerCancelled",
@@ -282,7 +311,9 @@ describe("pointer gesture state machine", () => {
       });
 
       expect(result.state).toEqual(idlePointerGesture());
-      expect(result.effects).toEqual([]);
+      expect(
+        effectsOfType(result.effects, "setWindowPointerInputLock"),
+      ).toEqual([{ type: "setWindowPointerInputLock", locked: false }]);
     });
 
     it("returns cancellingDrag to idle when Device Host cancellation fails", () => {
@@ -398,6 +429,23 @@ describe("pointer gesture state machine", () => {
       expect(effectsOfType(started.effects, "finishWindowDrag")).toHaveLength(
         1,
       );
+    });
+
+    it("does not replace a pending finish when normal release loses capture", () => {
+      const released = transition(startingDrag(), {
+        type: "pointerReleased",
+        pointerId,
+      });
+      const captureLost = transition(released.state, {
+        type: "pointerCaptureLost",
+        pointerId,
+      });
+
+      expect(captureLost.state).toMatchObject({
+        type: "startingDrag",
+        releaseIntent: "finish",
+      });
+      expect(captureLost.effects).toEqual([]);
     });
 
     it("records cancel intent while start is pending and cancels after start", () => {

@@ -86,6 +86,7 @@ export type PointerGestureEvent =
   | (ActivePointerGesture & { type: "holdElapsed" })
   | { type: "pointerReleased"; pointerId: number }
   | { type: "pointerCancelled"; pointerId: number }
+  | { type: "pointerCaptureLost"; pointerId: number }
   | (ActivePointerGesture & {
       type: "windowDragStarted";
       actorId: string;
@@ -144,6 +145,10 @@ export type PointerGestureEvent =
   | { type: "avatarDropNotifyFailed"; gestureId: number; error: unknown };
 
 export type PointerGestureEffect =
+  | {
+      type: "setWindowPointerInputLock";
+      locked: boolean;
+    }
   | (ActivePointerGesture & {
       type: "capturePointer";
     })
@@ -224,6 +229,10 @@ export function reducePointerGesture(
         holdStatus: "scheduled",
       },
       effects: [
+        {
+          type: "setWindowPointerInputLock",
+          locked: true,
+        },
         {
           type: "capturePointer",
           gestureId: event.gestureId,
@@ -334,6 +343,10 @@ export function reducePointerGesture(
     return releasePointer(state, event, "cancel");
   }
 
+  if (event.type === "pointerCaptureLost") {
+    return releasePointer(state, event, "cancel");
+  }
+
   if (event.type === "windowDragStarted") {
     if (state.type !== "startingDrag" || !matchesDragStart(state, event)) {
       return unchanged(state);
@@ -421,6 +434,7 @@ export function reducePointerGesture(
           gestureId: state.gestureId,
           pointerId: state.pointerId,
         },
+        { type: "setWindowPointerInputLock", locked: false },
       ],
     };
   }
@@ -444,6 +458,7 @@ export function reducePointerGesture(
     return {
       state: idlePointerGesture(),
       effects: [
+        { type: "setWindowPointerInputLock", locked: false },
         {
           type: "notifyDrop",
           gestureId: state.gestureId,
@@ -458,7 +473,10 @@ export function reducePointerGesture(
     if (state.type !== "endingDrag" || !matchesDragSession(state, event)) {
       return unchanged(state);
     }
-    return { state: idlePointerGesture(), effects: [] };
+    return {
+      state: idlePointerGesture(),
+      effects: [{ type: "setWindowPointerInputLock", locked: false }],
+    };
   }
 
   if (
@@ -468,7 +486,10 @@ export function reducePointerGesture(
     if (state.type !== "cancellingDrag" || !matchesDragSession(state, event)) {
       return unchanged(state);
     }
-    return { state: idlePointerGesture(), effects: [] };
+    return {
+      state: idlePointerGesture(),
+      effects: [{ type: "setWindowPointerInputLock", locked: false }],
+    };
   }
 
   if (
@@ -492,7 +513,9 @@ function releasePointer(
   state: PointerGestureState,
   event: Extract<
     PointerGestureEvent,
-    { type: "pointerReleased" | "pointerCancelled" }
+    {
+      type: "pointerReleased" | "pointerCancelled" | "pointerCaptureLost";
+    }
   >,
   intent: "finish" | "cancel",
 ): PointerGestureTransition {
@@ -510,6 +533,7 @@ function releasePointer(
         pointerId: state.pointerId,
       },
       releaseCapture,
+      { type: "setWindowPointerInputLock", locked: false },
     ];
     if (intent === "finish" && state.semanticHit) {
       effects.push({
@@ -521,6 +545,10 @@ function releasePointer(
     return { state: idlePointerGesture(), effects };
   }
   if (state.type === "startingDrag") {
+    // Releasing pointer capture emits lostpointercapture as part of a normal
+    // pointerup/pointercancel path. Preserve the intent already recorded by
+    // that first terminal event instead of changing finish into cancel.
+    if (state.releaseIntent !== "none") return unchanged(state);
     return {
       state: { ...state, releaseIntent: intent },
       effects: [releaseCapture],
