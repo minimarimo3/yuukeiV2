@@ -1,10 +1,12 @@
 use tauri::WebviewWindow;
+use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, STYLESTRUCT, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCACTIVATE, WM_NCDESTROY,
-    WM_STYLECHANGED, WM_STYLECHANGING, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+    EnumWindows, GetClassNameW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+    GWL_STYLE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WINDOWPOS, WM_NCACTIVATE, WM_NCDESTROY, WM_STYLECHANGED, WM_STYLECHANGING,
+    WM_WINDOWPOSCHANGING, WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     WS_THICKFRAME,
 };
 
@@ -14,6 +16,8 @@ const SUBCLASS_ID: usize = 0x594B_00AC;
 /// Styles that can make Windows draw a native caption or resize frame.
 const CAPTION_STYLE_MASK: u32 =
     WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+
+const TASKBAR_WINDOW_CLASSES: [&str; 2] = ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
 
 /// Install a subclass that stops the native caption from flashing on activation
 /// and style changes. See [`super::enforce_borderless`] for the full rationale.
@@ -29,7 +33,75 @@ pub(super) fn suppress_activation_flicker(window: &WebviewWindow) {
         let hwnd = HWND(hwnd_value as *mut core::ffi::c_void);
         strip_caption_styles(hwnd);
         let _ = SetWindowSubclass(hwnd, Some(caption_subclass_proc), SUBCLASS_ID, 0);
+        place_behind_shell_taskbars(hwnd);
     });
+}
+
+/// Keep a Yuukei window in the topmost band but immediately behind Explorer's
+/// main and secondary taskbars. `EnumWindows` is in front-to-back Z order, so
+/// the last matching taskbar is the one after which the window must be placed.
+///
+/// This does not clear `WS_EX_TOPMOST`: using a topmost taskbar as the insertion
+/// target preserves the window's topmost status while leaving every taskbar in
+/// front. The caller already owns the window thread.
+unsafe fn place_behind_shell_taskbars(hwnd: HWND) {
+    let Some(taskbar) = shell_taskbar_insert_after() else {
+        return;
+    };
+    let _ = SetWindowPos(
+        hwnd,
+        Some(taskbar),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    );
+}
+
+unsafe fn shell_taskbar_insert_after() -> Option<HWND> {
+    let mut context = TopLevelWindows::default();
+    let _ = EnumWindows(
+        Some(collect_top_level_window),
+        LPARAM(&mut context as *mut TopLevelWindows as isize),
+    );
+    let classes = context
+        .windows
+        .iter()
+        .map(|window| (window.class_name.as_str(), window.topmost))
+        .collect::<Vec<_>>();
+    taskbar_insert_after_index(&classes).map(|index| context.windows[index].hwnd)
+}
+
+#[derive(Default)]
+struct TopLevelWindows {
+    windows: Vec<TopLevelWindow>,
+}
+
+struct TopLevelWindow {
+    hwnd: HWND,
+    class_name: String,
+    topmost: bool,
+}
+
+unsafe extern "system" fn collect_top_level_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let context = &mut *(lparam.0 as *mut TopLevelWindows);
+    let mut class_name = [0u16; 256];
+    let len = GetClassNameW(hwnd, &mut class_name);
+    if len > 0 {
+        context.windows.push(TopLevelWindow {
+            hwnd,
+            class_name: String::from_utf16_lossy(&class_name[..len as usize]),
+            topmost: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0,
+        });
+    }
+    true.into()
+}
+
+fn taskbar_insert_after_index(windows: &[(&str, bool)]) -> Option<usize> {
+    windows
+        .iter()
+        .rposition(|(class_name, topmost)| *topmost && TASKBAR_WINDOW_CLASSES.contains(class_name))
 }
 
 unsafe fn strip_caption_styles(hwnd: HWND) {
@@ -74,6 +146,19 @@ unsafe extern "system" fn caption_subclass_proc(
             }
             DefSubclassProc(hwnd, msg, wparam, lparam)
         }
+        // Tauri's repeated `always_on_top`, showing, and focus operations can
+        // request a new Z position. Rewrite every such request before Windows
+        // applies it, so no later stage emission or focus change can put this
+        // window ahead of an auto-hidden taskbar when it is revealed.
+        WM_WINDOWPOSCHANGING if lparam.0 != 0 => {
+            let window_pos = &mut *(lparam.0 as *mut WINDOWPOS);
+            if !window_pos.flags.contains(SWP_NOZORDER) {
+                if let Some(taskbar) = shell_taskbar_insert_after() {
+                    window_pos.hwndInsertAfter = taskbar;
+                }
+            }
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
         // `lParam = -1` tells `DefWindowProc` to skip repainting the non-client
         // area, so any still-pending activation frame repaint is suppressed.
         WM_NCACTIVATE => DefSubclassProc(hwnd, msg, wparam, LPARAM(-1)),
@@ -82,5 +167,37 @@ unsafe extern "system" fn caption_subclass_proc(
             DefSubclassProc(hwnd, msg, wparam, lparam)
         }
         _ => DefSubclassProc(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::taskbar_insert_after_index;
+
+    #[test]
+    fn taskbar_target_is_the_last_shell_taskbar_in_z_order() {
+        let classes = [
+            ("ApplicationWindow", false),
+            ("Shell_TrayWnd", true),
+            ("Chrome_WidgetWin_1", true),
+            ("Shell_SecondaryTrayWnd", true),
+            ("ApplicationFrameWindow", false),
+        ];
+
+        assert_eq!(taskbar_insert_after_index(&classes), Some(3));
+    }
+
+    #[test]
+    fn taskbar_target_is_absent_without_explorer_taskbars() {
+        let classes = [("ApplicationWindow", false), ("Chrome_WidgetWin_1", true)];
+
+        assert_eq!(taskbar_insert_after_index(&classes), None);
+    }
+
+    #[test]
+    fn non_topmost_shell_window_is_not_used_as_the_insertion_target() {
+        let classes = [("Shell_TrayWnd", true), ("Shell_SecondaryTrayWnd", false)];
+
+        assert_eq!(taskbar_insert_after_index(&classes), Some(0));
     }
 }
