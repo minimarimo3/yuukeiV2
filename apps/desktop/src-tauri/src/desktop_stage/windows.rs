@@ -31,6 +31,91 @@ pub fn stage_overlay_window_label(index: usize) -> String {
     format!("{STAGE_OVERLAY_LABEL_PREFIX}{index}")
 }
 
+// Auto-hidden Windows taskbars keep a two-physical-pixel reveal strip inside
+// the monitor even though the reported work area spans the whole monitor.
+const AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX: u32 = 2;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct AutoHideTaskbarEdges {
+    pub(super) left: bool,
+    pub(super) top: bool,
+    pub(super) right: bool,
+    pub(super) bottom: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PhysicalStageBounds {
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+impl PhysicalStageBounds {
+    fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub(super) fn right(self) -> i32 {
+        (i64::from(self.x) + i64::from(self.width)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
+    }
+
+    pub(super) fn bottom(self) -> i32 {
+        (i64::from(self.y) + i64::from(self.height)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
+    }
+}
+
+fn reserve_auto_hide_taskbar_edges(
+    mut work_area: PhysicalStageBounds,
+    monitor: PhysicalStageBounds,
+    edges: AutoHideTaskbarEdges,
+) -> PhysicalStageBounds {
+    let touches_left = work_area.x == monitor.x;
+    let touches_top = work_area.y == monitor.y;
+    let touches_right = work_area.right() == monitor.right();
+    let touches_bottom = work_area.bottom() == monitor.bottom();
+
+    if edges.left && touches_left {
+        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.width.saturating_sub(1));
+        work_area.x = work_area.x.saturating_add(reserve as i32);
+        work_area.width -= reserve;
+    }
+    if edges.top && touches_top {
+        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.height.saturating_sub(1));
+        work_area.y = work_area.y.saturating_add(reserve as i32);
+        work_area.height -= reserve;
+    }
+    if edges.right && touches_right {
+        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.width.saturating_sub(1));
+        work_area.width -= reserve;
+    }
+    if edges.bottom && touches_bottom {
+        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.height.saturating_sub(1));
+        work_area.height -= reserve;
+    }
+
+    work_area
+}
+
+fn auto_hide_taskbar_edges(monitor: PhysicalStageBounds) -> AutoHideTaskbarEdges {
+    #[cfg(windows)]
+    {
+        windows_caption::auto_hide_taskbar_edges(monitor)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = monitor;
+        AutoHideTaskbarEdges::default()
+    }
+}
+
 pub(super) fn monitor_snapshots(app: &AppHandle) -> Result<Vec<StageMonitor>, String> {
     let monitors = app.available_monitors().map_err(to_message)?;
     if monitors.is_empty() {
@@ -53,15 +138,36 @@ pub(super) fn monitor_snapshots(app: &AppHandle) -> Result<Vec<StageMonitor>, St
         .map(|(index, monitor)| {
             let scale_factor = usable_scale_factor(monitor.scale_factor());
             let work_area = monitor.work_area();
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            let physical_monitor = PhysicalStageBounds::new(
+                monitor_position.x,
+                monitor_position.y,
+                monitor_size.width,
+                monitor_size.height,
+            );
+            // Leave the Shell-owned reveal strip outside every topmost stage
+            // window. Click-through alone does not remove an HWND from AppBar
+            // edge handling while another application is fullscreen.
+            let physical_work_area = reserve_auto_hide_taskbar_edges(
+                PhysicalStageBounds::new(
+                    work_area.position.x,
+                    work_area.position.y,
+                    work_area.size.width,
+                    work_area.size.height,
+                ),
+                physical_monitor,
+                auto_hide_taskbar_edges(physical_monitor),
+            );
             StageMonitor {
                 id: format!("monitor-{index}"),
                 label: stage_overlay_window_label(index),
                 name: monitor.name().cloned(),
                 bounds: StageRect {
-                    x: work_area.position.x as f64 / scale_factor,
-                    y: work_area.position.y as f64 / scale_factor,
-                    width: work_area.size.width as f64 / scale_factor,
-                    height: work_area.size.height as f64 / scale_factor,
+                    x: physical_work_area.x as f64 / scale_factor,
+                    y: physical_work_area.y as f64 / scale_factor,
+                    width: physical_work_area.width as f64 / scale_factor,
+                    height: physical_work_area.height as f64 / scale_factor,
                 },
                 scale_factor,
             }
@@ -149,6 +255,76 @@ pub(crate) fn enforce_borderless(window: &WebviewWindow) {
     #[cfg(not(windows))]
     {
         let _ = window;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        reserve_auto_hide_taskbar_edges, AutoHideTaskbarEdges, PhysicalStageBounds,
+        AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX,
+    };
+
+    #[test]
+    fn reserves_bottom_edge_when_auto_hide_taskbar_uses_full_work_area() {
+        let monitor = PhysicalStageBounds::new(0, 0, 1920, 1080);
+        let work_area = monitor;
+
+        let reserved = reserve_auto_hide_taskbar_edges(
+            work_area,
+            monitor,
+            AutoHideTaskbarEdges {
+                bottom: true,
+                ..AutoHideTaskbarEdges::default()
+            },
+        );
+
+        assert_eq!(reserved.x, 0);
+        assert_eq!(reserved.y, 0);
+        assert_eq!(reserved.width, 1920);
+        assert_eq!(reserved.height, 1080 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX);
+    }
+
+    #[test]
+    fn does_not_double_reserve_an_edge_already_excluded_from_work_area() {
+        let monitor = PhysicalStageBounds::new(0, 0, 1920, 1080);
+        let work_area = PhysicalStageBounds::new(0, 0, 1920, 1078);
+
+        let reserved = reserve_auto_hide_taskbar_edges(
+            work_area,
+            monitor,
+            AutoHideTaskbarEdges {
+                bottom: true,
+                ..AutoHideTaskbarEdges::default()
+            },
+        );
+
+        assert_eq!(reserved, work_area);
+    }
+
+    #[test]
+    fn reserves_each_reported_edge_without_moving_unrelated_edges() {
+        let monitor = PhysicalStageBounds::new(-1920, 6, 1920, 1080);
+        let work_area = monitor;
+
+        let reserved = reserve_auto_hide_taskbar_edges(
+            work_area,
+            monitor,
+            AutoHideTaskbarEdges {
+                left: true,
+                top: true,
+                right: true,
+                bottom: true,
+            },
+        );
+
+        assert_eq!(reserved.x, -1920 + AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.y, 6 + AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.width, 1920 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX * 2);
+        assert_eq!(
+            reserved.height,
+            1080 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX * 2
+        );
     }
 }
 use super::*;
