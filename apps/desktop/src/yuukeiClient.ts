@@ -532,8 +532,7 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<RuntimeSettingsState>("get_runtime_settings"),
   getSceneHistory: () => invoke<SceneHistoryState>("get_scene_history"),
   getAutostartEnabled: () => invoke<boolean>("get_autostart_enabled"),
-  getAutostartCanEnable: () =>
-    invoke<boolean>("get_autostart_can_enable"),
+  getAutostartCanEnable: () => invoke<boolean>("get_autostart_can_enable"),
   setAutostartEnabled: (enabled: boolean) =>
     invoke<boolean>("set_autostart_enabled", { enabled }),
   surfaceReady: () => invoke<void>("surface_ready"),

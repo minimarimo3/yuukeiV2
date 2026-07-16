@@ -722,7 +722,9 @@ describe("App", () => {
     });
     expect(toggle).toBeDisabled();
     expect(
-      screen.getByText("開発版では利用できません。build版から設定してください。"),
+      screen.getByText(
+        "開発版では利用できません。build版から設定してください。",
+      ),
     ).toBeInTheDocument();
     expect(client.setAutostartEnabled).not.toHaveBeenCalled();
   });

@@ -1,11 +1,14 @@
+#[cfg(target_os = "macos")]
 use yuukei_device_host::LocalYuukeiRuntime;
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PowerEvent {
     SleepBefore,
     Wake,
 }
 
+#[cfg(target_os = "macos")]
 pub async fn emit_power_event(runtime: LocalYuukeiRuntime, event: PowerEvent) {
     let result = match event {
         PowerEvent::SleepBefore => runtime.emit_device_sleep_before().await,
@@ -28,6 +31,7 @@ pub async fn emit_power_event(runtime: LocalYuukeiRuntime, event: PowerEvent) {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn power_event_name(event: PowerEvent) -> &'static str {
     match event {
         PowerEvent::SleepBefore => "device.sleep.before",
