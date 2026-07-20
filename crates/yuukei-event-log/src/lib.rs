@@ -1,11 +1,12 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
-use rusqlite::{params, Connection, OptionalExtension};
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 use yuukei_protocol::{EventLogRecord, NewEventLogRecord, Privacy};
 
@@ -22,6 +23,12 @@ pub enum EventLogError {
     Json(#[from] serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid RFC 3339 timestamp: {0}")]
+    InvalidTimestamp(String),
+    #[error("event log export target is part of the active database: {}", .0.display())]
+    ExportTargetsDatabase(PathBuf),
+    #[error("event log limit is too large: {0}")]
+    LimitOutOfRange(usize),
     #[error("event log lock is poisoned")]
     PoisonedLock,
 }
@@ -31,6 +38,7 @@ pub type Result<T> = std::result::Result<T, EventLogError>;
 #[derive(Clone)]
 pub struct EventLog {
     connection: Arc<Mutex<Connection>>,
+    database_path: Option<Arc<PathBuf>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -98,15 +106,25 @@ pub struct ExportSummary {
 
 impl EventLog {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let connection = Connection::open(path)?;
-        Self::from_connection(connection)
+        let requested_path = path.as_ref();
+        let connection = Connection::open(requested_path)?;
+        let database_path = match connection.path() {
+            Some("") => None,
+            Some(path) => absolute_path(Path::new(path)).ok(),
+            None => absolute_path(requested_path).ok(),
+        }
+        .map(Arc::new);
+        Self::from_connection(connection, database_path)
     }
 
     pub fn in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, None)
     }
 
-    fn from_connection(connection: Connection) -> Result<Self> {
+    fn from_connection(
+        connection: Connection,
+        database_path: Option<Arc<PathBuf>>,
+    ) -> Result<Self> {
         connection.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -132,6 +150,7 @@ impl EventLog {
         )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            database_path,
         })
     }
 
@@ -140,61 +159,21 @@ impl EventLog {
             .connection
             .lock()
             .map_err(|_| EventLogError::PoisonedLock)?;
-        let payload = serde_json::to_string(&record.payload)?;
-        let causality = record
-            .causality
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let privacy = record
-            .privacy
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-
-        let result = connection.execute(
-            r#"
-            INSERT INTO event_log_records (
-                id, kind, timestamp, resident_id, source, device_id, surface_id,
-                actor_id, payload, causality, privacy
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            "#,
-            params![
-                record.id,
-                record.kind,
-                record.timestamp,
-                record.resident_id,
-                record.source,
-                record.device_id,
-                record.surface_id,
-                record.actor_id,
-                payload,
-                causality,
-                privacy,
-            ],
-        );
-
-        match result {
-            Ok(_) => {
-                let sequence = connection.last_insert_rowid();
-                read_by_sequence(&connection, sequence)?
-                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
-            }
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(EventLogError::DuplicateRecord(record.id))
-            }
-            Err(error) => Err(error.into()),
-        }
+        append_to_connection(&connection, record)
     }
 
     pub fn append_batch(&self, records: Vec<NewEventLogRecord>) -> Result<Vec<EventLogRecord>> {
-        records
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let appended = records
             .into_iter()
-            .map(|record| self.append(record))
-            .collect()
+            .map(|record| append_to_connection(&transaction, record))
+            .collect::<Result<Vec<_>>>()?;
+        transaction.commit()?;
+        Ok(appended)
     }
 
     pub fn get_by_id(&self, id: &str) -> Result<Option<EventLogRecord>> {
@@ -221,58 +200,15 @@ impl EventLog {
             .connection
             .lock()
             .map_err(|_| EventLogError::PoisonedLock)?;
-        let mut statement = connection.prepare(
-            r#"
-            SELECT sequence, id, kind, timestamp, resident_id, source, device_id, surface_id,
-                   actor_id, payload, causality, privacy
-            FROM event_log_records
-            ORDER BY sequence ASC
-            "#,
-        )?;
-
-        let mut records = Vec::new();
-        let rows = statement.query_map([], row_to_record)?;
-        for row in rows {
-            let record = row?;
-            if matches_query(&record, &query) {
-                records.push(record);
-                if let Some(limit) = query.limit {
-                    if records.len() >= limit {
-                        break;
-                    }
-                }
-            }
-        }
-
-        let next_cursor = records.last().map(|record| record.sequence);
-        Ok(EventLogPage {
-            records,
-            next_cursor,
-        })
+        read_from_connection(&connection, &query)
     }
 
     pub fn read_newest(&self, query: EventLogAdminQuery) -> Result<EventLogPage> {
-        let mut records = self.read(EventLogQuery::default())?.records;
-        records.retain(|record| matches_admin_query(record, &query));
-        records.reverse();
-        let next_cursor = if let Some(limit) = query.limit {
-            if records.len() > limit {
-                records
-                    .get(limit.saturating_sub(1))
-                    .map(|record| record.sequence)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if let Some(limit) = query.limit {
-            records.truncate(limit);
-        }
-        Ok(EventLogPage {
-            records,
-            next_cursor,
-        })
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        read_newest_from_connection(&connection, &query)
     }
 
     pub fn export_jsonl(
@@ -280,6 +216,8 @@ impl EventLog {
         query: EventLogQuery,
         path: impl AsRef<Path>,
     ) -> Result<ExportSummary> {
+        let path = path.as_ref();
+        self.reject_database_export_target(path)?;
         let page = self.read(query)?;
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
@@ -301,7 +239,12 @@ impl EventLog {
             limit: None,
             extension_readable_only: false,
         };
-        let mut matching = self.read(query)?.records;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut matching = read_from_connection(&transaction, &query)?.records;
         if !selector.ids.is_empty() {
             matching.retain(|record| selector.ids.contains(&record.id));
         }
@@ -309,22 +252,22 @@ impl EventLog {
             matching.retain(|record| record.sequence <= limit);
         }
 
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| EventLogError::PoisonedLock)?;
-        let mut deleted = 0;
-        for record in matching {
-            deleted += connection.execute(
-                "DELETE FROM event_log_records WHERE sequence = ?1",
-                params![record.sequence],
-            )?;
-        }
+        let sequences = matching
+            .into_iter()
+            .map(|record| record.sequence)
+            .collect::<Vec<_>>();
+        let deleted = delete_sequences(&transaction, sequences)?;
+        transaction.commit()?;
         Ok(DeleteSummary { deleted })
     }
 
     pub fn count_delete(&self, selector: EventLogDeleteSelector) -> Result<usize> {
-        Ok(self.records_matching_delete(selector)?.len())
+        let selector = prepare_delete_selector(selector)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        count_matching_delete(&connection, &selector)
     }
 
     pub fn delete_before(&self, timestamp: impl AsRef<str>) -> Result<DeleteSummary> {
@@ -348,9 +291,16 @@ impl EventLog {
         selector: EventLogDeleteSelector,
         audit_record: NewEventLogRecord,
     ) -> Result<DeleteSummary> {
-        let summary = self.delete_matching(selector)?;
-        self.append(audit_record)?;
-        Ok(summary)
+        let selector = prepare_delete_selector(selector)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = delete_matching_records(&transaction, &selector)?;
+        append_to_connection(&transaction, audit_record)?;
+        transaction.commit()?;
+        Ok(DeleteSummary { deleted })
     }
 
     pub fn trim_to_record_limit(
@@ -358,8 +308,14 @@ impl EventLog {
         max_records: usize,
         fraction_divisor: usize,
     ) -> Result<TrimSummary> {
-        let records = self.read(EventLogQuery::default())?.records;
-        if records.len() <= max_records {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| EventLogError::PoisonedLock)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record_count = count_records(&transaction)?;
+        if record_count <= max_records {
+            transaction.commit()?;
             return Ok(TrimSummary {
                 deleted: 0,
                 oldest_timestamp: None,
@@ -367,59 +323,333 @@ impl EventLog {
             });
         }
         let delete_count = (max_records / fraction_divisor.max(1)).max(1);
-        let matching = records.into_iter().take(delete_count).collect::<Vec<_>>();
-        let oldest_timestamp = matching.first().map(|record| record.timestamp.clone());
-        let newest_timestamp = matching.last().map(|record| record.timestamp.clone());
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| EventLogError::PoisonedLock)?;
-        let mut deleted = 0;
-        for record in matching {
-            deleted += connection.execute(
-                "DELETE FROM event_log_records WHERE sequence = ?1",
-                params![record.sequence],
-            )?;
-        }
+        let (oldest_timestamp, last_sequence, newest_timestamp) =
+            trim_boundaries(&transaction, delete_count)?;
+        let deleted = transaction.execute(
+            "DELETE FROM event_log_records WHERE sequence <= ?1",
+            params![last_sequence],
+        )?;
+        transaction.commit()?;
         Ok(TrimSummary {
             deleted,
-            oldest_timestamp,
-            newest_timestamp,
+            oldest_timestamp: Some(oldest_timestamp),
+            newest_timestamp: Some(newest_timestamp),
         })
     }
 
     fn delete_matching(&self, selector: EventLogDeleteSelector) -> Result<DeleteSummary> {
-        let matching = self.records_matching_delete(selector)?;
-        let connection = self
+        let selector = prepare_delete_selector(selector)?;
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| EventLogError::PoisonedLock)?;
-        let mut deleted = 0;
-        for record in matching {
-            deleted += connection.execute(
-                "DELETE FROM event_log_records WHERE sequence = ?1",
-                params![record.sequence],
-            )?;
-        }
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let deleted = delete_matching_records(&transaction, &selector)?;
+        transaction.commit()?;
         Ok(DeleteSummary { deleted })
     }
 
-    fn records_matching_delete(
-        &self,
-        selector: EventLogDeleteSelector,
-    ) -> Result<Vec<EventLogRecord>> {
-        let records = self.read(EventLogQuery::default())?.records;
-        Ok(records
-            .into_iter()
-            .filter(|record| match &selector {
-                EventLogDeleteSelector::BeforeTimestamp(timestamp) => {
-                    record.timestamp.as_str() < timestamp.as_str()
+    fn reject_database_export_target(&self, path: &Path) -> Result<()> {
+        let Some(database_path) = self.database_path.as_deref() else {
+            return Ok(());
+        };
+        let target = normalized_path(path)?;
+        let canonical_database_path = normalized_path(database_path)?;
+        for base_path in [database_path.clone(), canonical_database_path] {
+            for protected_path in [
+                base_path.clone(),
+                path_with_suffix(&base_path, "-wal"),
+                path_with_suffix(&base_path, "-shm"),
+                path_with_suffix(&base_path, "-journal"),
+            ] {
+                if normalized_path(&protected_path)? == target {
+                    return Err(EventLogError::ExportTargetsDatabase(target));
                 }
-                EventLogDeleteSelector::KindPrefix(prefix) => record.kind.starts_with(prefix),
-                EventLogDeleteSelector::All => true,
-            })
-            .collect())
+            }
+        }
+        Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+enum PreparedDeleteSelector {
+    BeforeTimestamp(DateTime<Utc>),
+    KindPrefix(String),
+    All,
+}
+
+fn append_to_connection(
+    connection: &Connection,
+    record: NewEventLogRecord,
+) -> Result<EventLogRecord> {
+    let payload = serde_json::to_string(&record.payload)?;
+    let causality = record
+        .causality
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let privacy = record
+        .privacy
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let result = connection.execute(
+        r#"
+        INSERT INTO event_log_records (
+            id, kind, timestamp, resident_id, source, device_id, surface_id,
+            actor_id, payload, causality, privacy
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "#,
+        params![
+            &record.id,
+            &record.kind,
+            &record.timestamp,
+            &record.resident_id,
+            &record.source,
+            record.device_id.as_deref(),
+            record.surface_id.as_deref(),
+            record.actor_id.as_deref(),
+            &payload,
+            causality.as_deref(),
+            privacy.as_deref(),
+        ],
+    );
+
+    match result {
+        Ok(_) => {
+            let sequence = connection.last_insert_rowid();
+            read_by_sequence(connection, sequence)?
+                .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
+        }
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Err(EventLogError::DuplicateRecord(record.id))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_from_connection(connection: &Connection, query: &EventLogQuery) -> Result<EventLogPage> {
+    if query.limit == Some(0) {
+        return Ok(EventLogPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    }
+    let mut statement = connection.prepare(
+        r#"
+        SELECT sequence, id, kind, timestamp, resident_id, source, device_id, surface_id,
+               actor_id, payload, causality, privacy
+        FROM event_log_records
+        ORDER BY sequence ASC
+        "#,
+    )?;
+
+    let mut records = Vec::new();
+    let rows = statement.query_map([], row_to_record)?;
+    for row in rows {
+        let record = row?;
+        if matches_query(&record, query) {
+            records.push(record);
+            if query.limit.is_some_and(|limit| records.len() >= limit) {
+                break;
+            }
+        }
+    }
+
+    let next_cursor = records.last().map(|record| record.sequence);
+    Ok(EventLogPage {
+        records,
+        next_cursor,
+    })
+}
+
+fn read_newest_from_connection(
+    connection: &Connection,
+    query: &EventLogAdminQuery,
+) -> Result<EventLogPage> {
+    if query.limit == Some(0) {
+        return Ok(EventLogPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    }
+    let mut statement = connection.prepare(
+        r#"
+        SELECT sequence, id, kind, timestamp, resident_id, source, device_id, surface_id,
+               actor_id, payload, causality, privacy
+        FROM event_log_records
+        ORDER BY sequence DESC
+        "#,
+    )?;
+
+    let mut records = Vec::new();
+    let mut has_more = false;
+    let rows = statement.query_map([], row_to_record)?;
+    for row in rows {
+        let record = row?;
+        if !matches_admin_query(&record, query) {
+            continue;
+        }
+        if query.limit.is_some_and(|limit| records.len() >= limit) {
+            has_more = true;
+            break;
+        }
+        records.push(record);
+    }
+
+    let next_cursor = has_more
+        .then(|| records.last().map(|record| record.sequence))
+        .flatten();
+    Ok(EventLogPage {
+        records,
+        next_cursor,
+    })
+}
+
+fn prepare_delete_selector(selector: EventLogDeleteSelector) -> Result<PreparedDeleteSelector> {
+    match selector {
+        EventLogDeleteSelector::BeforeTimestamp(timestamp) => Ok(
+            PreparedDeleteSelector::BeforeTimestamp(parse_timestamp(&timestamp)?),
+        ),
+        EventLogDeleteSelector::KindPrefix(prefix) => {
+            Ok(PreparedDeleteSelector::KindPrefix(prefix))
+        }
+        EventLogDeleteSelector::All => Ok(PreparedDeleteSelector::All),
+    }
+}
+
+fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| EventLogError::InvalidTimestamp(timestamp.to_string()))
+}
+
+fn count_matching_delete(
+    connection: &Connection,
+    selector: &PreparedDeleteSelector,
+) -> Result<usize> {
+    match selector {
+        PreparedDeleteSelector::BeforeTimestamp(timestamp) => {
+            Ok(sequences_before_timestamp(connection, timestamp)?.len())
+        }
+        PreparedDeleteSelector::KindPrefix(prefix) => count_query(
+            connection,
+            "SELECT COUNT(*) FROM event_log_records WHERE instr(kind, ?1) = 1",
+            Some(prefix),
+        ),
+        PreparedDeleteSelector::All => {
+            count_query(connection, "SELECT COUNT(*) FROM event_log_records", None)
+        }
+    }
+}
+
+fn count_query(connection: &Connection, sql: &str, parameter: Option<&str>) -> Result<usize> {
+    let count: i64 = match parameter {
+        Some(parameter) => connection.query_row(sql, params![parameter], |row| row.get(0))?,
+        None => connection.query_row(sql, [], |row| row.get(0))?,
+    };
+    usize::try_from(count).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count).into())
+}
+
+fn count_records(connection: &Connection) -> Result<usize> {
+    count_query(connection, "SELECT COUNT(*) FROM event_log_records", None)
+}
+
+fn sequences_before_timestamp(connection: &Connection, cutoff: &DateTime<Utc>) -> Result<Vec<i64>> {
+    let mut statement = connection
+        .prepare("SELECT sequence, timestamp FROM event_log_records ORDER BY sequence ASC")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut sequences = Vec::new();
+    for row in rows {
+        let (sequence, timestamp) = row?;
+        if parse_timestamp(&timestamp)? < *cutoff {
+            sequences.push(sequence);
+        }
+    }
+    Ok(sequences)
+}
+
+fn delete_matching_records(
+    connection: &Connection,
+    selector: &PreparedDeleteSelector,
+) -> Result<usize> {
+    match selector {
+        PreparedDeleteSelector::BeforeTimestamp(timestamp) => delete_sequences(
+            connection,
+            sequences_before_timestamp(connection, timestamp)?,
+        ),
+        PreparedDeleteSelector::KindPrefix(prefix) => Ok(connection.execute(
+            "DELETE FROM event_log_records WHERE instr(kind, ?1) = 1",
+            params![prefix],
+        )?),
+        PreparedDeleteSelector::All => Ok(connection.execute("DELETE FROM event_log_records", [])?),
+    }
+}
+
+fn delete_sequences(
+    connection: &Connection,
+    sequences: impl IntoIterator<Item = i64>,
+) -> Result<usize> {
+    let mut statement =
+        connection.prepare_cached("DELETE FROM event_log_records WHERE sequence = ?1")?;
+    let mut deleted = 0;
+    for sequence in sequences {
+        deleted += statement.execute(params![sequence])?;
+    }
+    Ok(deleted)
+}
+
+fn trim_boundaries(connection: &Connection, delete_count: usize) -> Result<(String, i64, String)> {
+    let oldest_timestamp = connection.query_row(
+        "SELECT timestamp FROM event_log_records ORDER BY sequence ASC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let offset = i64::try_from(delete_count.saturating_sub(1))
+        .map_err(|_| EventLogError::LimitOutOfRange(delete_count))?;
+    let (last_sequence, newest_timestamp) = connection.query_row(
+        "SELECT sequence, timestamp FROM event_log_records ORDER BY sequence ASC LIMIT 1 OFFSET ?1",
+        params![offset],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((oldest_timestamp, last_sequence, newest_timestamp))
+}
+
+fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
+    if let Ok(path) = fs::canonicalize(path) {
+        return Ok(path);
+    }
+    let absolute = absolute_path(path)?;
+    let Some(parent) = absolute.parent() else {
+        return Ok(absolute);
+    };
+    let Ok(parent) = fs::canonicalize(parent) else {
+        return Ok(absolute);
+    };
+    Ok(absolute
+        .file_name()
+        .map(|file_name| parent.join(file_name))
+        .unwrap_or(parent))
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 fn read_by_sequence(connection: &Connection, sequence: i64) -> Result<Option<EventLogRecord>> {
@@ -576,6 +806,13 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_memory_path_is_not_treated_as_a_database_file() -> Result<()> {
+        let log = EventLog::open(":memory:")?;
+        assert!(log.database_path.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_ids_are_rejected() -> Result<()> {
         let log = EventLog::in_memory()?;
         log.append(record("evt_1", "conversation.text"))?;
@@ -583,6 +820,21 @@ mod tests {
             .append(record("evt_1", "conversation.text"))
             .unwrap_err();
         assert!(matches!(error, EventLogError::DuplicateRecord(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn append_batch_rolls_back_all_records_when_one_fails() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        let error = log
+            .append_batch(vec![
+                record("evt_duplicate", "conversation.text"),
+                record("evt_duplicate", "dialogue.say"),
+            ])
+            .unwrap_err();
+
+        assert!(matches!(error, EventLogError::DuplicateRecord(_)));
+        assert!(log.read(EventLogQuery::default())?.records.is_empty());
         Ok(())
     }
 
@@ -611,6 +863,27 @@ mod tests {
     }
 
     #[test]
+    fn zero_limits_return_empty_pages_without_advancing_the_cursor() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_1", "conversation.text"))?;
+
+        let oldest = log.read(EventLogQuery {
+            limit: Some(0),
+            ..Default::default()
+        })?;
+        assert!(oldest.records.is_empty());
+        assert_eq!(oldest.next_cursor, None);
+
+        let newest = log.read_newest(EventLogAdminQuery {
+            limit: Some(0),
+            ..Default::default()
+        })?;
+        assert!(newest.records.is_empty());
+        assert_eq!(newest.next_cursor, None);
+        Ok(())
+    }
+
+    #[test]
     fn export_and_delete_records() -> Result<()> {
         let dir = tempdir()?;
         let export_path = dir.path().join("events.jsonl");
@@ -628,6 +901,30 @@ mod tests {
         })?;
         assert_eq!(deleted.deleted, 1);
         assert_eq!(log.read(EventLogQuery::default())?.records.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn export_rejects_the_active_database_path_without_damaging_it() -> Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("events.sqlite3");
+        let log = EventLog::open(&path)?;
+        log.append(record("evt_1", "conversation.text"))?;
+
+        let error = log
+            .export_jsonl(EventLogQuery::default(), &path)
+            .unwrap_err();
+        assert!(matches!(error, EventLogError::ExportTargetsDatabase(_)));
+        let wal_path = path_with_suffix(&path, "-wal");
+        let error = log
+            .export_jsonl(EventLogQuery::default(), wal_path)
+            .unwrap_err();
+        assert!(matches!(error, EventLogError::ExportTargetsDatabase(_)));
+        assert_eq!(log.read(EventLogQuery::default())?.records.len(), 1);
+
+        drop(log);
+        let reopened = EventLog::open(path)?;
+        assert_eq!(reopened.read(EventLogQuery::default())?.records.len(), 1);
         Ok(())
     }
 
@@ -722,6 +1019,132 @@ mod tests {
                 .map(|record| record.kind.as_str())
                 .collect::<Vec<_>>(),
             vec!["event_log.deleted", "conversation.text"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_before_compares_rfc3339_timestamps_as_instants() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        let mut offset_earlier = record("evt_offset_earlier", "conversation.text");
+        offset_earlier.timestamp = "2026-07-01T10:00:00+09:00".to_string();
+        log.append(offset_earlier)?;
+        let mut fractional_earlier = record("evt_fractional_earlier", "conversation.text");
+        fractional_earlier.timestamp = "2026-07-01T02:00:00Z".to_string();
+        log.append(fractional_earlier)?;
+        let mut later = record("evt_later", "conversation.text");
+        later.timestamp = "2026-07-01T11:30:00+09:00".to_string();
+        log.append(later)?;
+        let mut equal = record("evt_equal", "conversation.text");
+        equal.timestamp = "2026-07-01T02:00:00.500Z".to_string();
+        log.append(equal)?;
+
+        let cutoff = "2026-07-01T02:00:00.500Z";
+        assert_eq!(
+            log.count_delete(EventLogDeleteSelector::BeforeTimestamp(cutoff.to_string()))?,
+            2
+        );
+        assert_eq!(log.delete_before(cutoff)?, DeleteSummary { deleted: 2 });
+        assert_eq!(
+            log.read(EventLogQuery::default())?
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_later", "evt_equal"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_delete_timestamp_is_rejected_without_deleting_records() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_1", "conversation.text"))?;
+
+        let error = log.delete_before("not-a-timestamp").unwrap_err();
+        assert!(matches!(error, EventLogError::InvalidTimestamp(_)));
+        assert_eq!(log.read(EventLogQuery::default())?.records.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn kind_prefix_deletion_treats_sql_wildcards_as_plain_text() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_percent", "desktop.%literal"))?;
+        log.append(record("evt_underscore", "desktop._literal"))?;
+        log.append(record("evt_window", "desktop.window"))?;
+
+        assert_eq!(
+            log.delete_by_kind_prefix("desktop.%")?,
+            DeleteSummary { deleted: 1 }
+        );
+        assert_eq!(
+            log.delete_by_kind_prefix("desktop._")?,
+            DeleteSummary { deleted: 1 }
+        );
+        assert_eq!(
+            log.read(EventLogQuery::default())?.records[0].id,
+            "evt_window"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_rolls_back_when_one_record_cannot_be_deleted() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_1", "conversation.text"))?;
+        log.append(record("evt_2", "conversation.text"))?;
+        {
+            let connection = log
+                .connection
+                .lock()
+                .map_err(|_| EventLogError::PoisonedLock)?;
+            connection.execute_batch(
+                r#"
+                CREATE TRIGGER reject_evt_2_delete
+                BEFORE DELETE ON event_log_records
+                WHEN OLD.id = 'evt_2'
+                BEGIN
+                    SELECT RAISE(ABORT, 'blocked for test');
+                END;
+                "#,
+            )?;
+        }
+
+        let error = log.delete(DeleteSelector::default()).unwrap_err();
+        assert!(matches!(error, EventLogError::Sqlite(_)));
+        assert_eq!(
+            log.read(EventLogQuery::default())?
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_1", "evt_2"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_with_audit_rolls_back_when_the_audit_cannot_be_appended() -> Result<()> {
+        let log = EventLog::in_memory()?;
+        log.append(record("evt_delete", "conversation.text"))?;
+        log.append(record("evt_audit", "dialogue.say"))?;
+
+        let error = log
+            .delete_with_audit(
+                EventLogDeleteSelector::KindPrefix("conversation.".to_string()),
+                record("evt_audit", "event_log.deleted"),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, EventLogError::DuplicateRecord(_)));
+        assert_eq!(
+            log.read(EventLogQuery::default())?
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evt_delete", "evt_audit"]
         );
         Ok(())
     }
