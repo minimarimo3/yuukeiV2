@@ -2,6 +2,7 @@
 ### startup
 合図: ＠アプリ_起動
 話者: ゆ
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
 「起きました。今は＜入力#時間帯＞ですね。」
 
 ### surface attached
@@ -14,6 +15,7 @@
 条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「yuukei」）
 話者: ゆ
 ＜表情 照れ＞
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「わ、頭は急に触らないでください……！」
 
 ### poke partner head
@@ -21,12 +23,14 @@
 条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「partner」）
 話者: パ
 ＜表情 照れ＞
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「わ、頭は急に触らないでください……！」
 
 ### pat yuukei head
 合図: ＠住人_なでる
 条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「yuukei」）
 話者: パ
+ゆ: ＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
 ＜表情 笑顔＞
 「ふふ、ゆうけいさん、ちょっと得意げです。」
 
@@ -34,6 +38,7 @@
 合図: ＠住人_なでる
 条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「partner」）
 話者: ゆ
+パ: ＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
 ＜表情 笑顔＞
 「パートナーさん、いま少し照れましたね。」
 
@@ -64,11 +69,13 @@
 ### before sleep
 合図: ＠端末_スリープ前
 話者: ゆ
+＜動作 sleep_enter 繰り返し=いいえ 終了後=sleep_loop＞
 「少し眠ります。」
 
 ### wake
 合図: ＠端末_復帰
 話者: ゆ
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
 「おかえりなさい。」
 
 ### cloth pull yuukei shoes
@@ -82,24 +89,28 @@
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「yuukei」）
 話者: ゆ
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「服はひっぱらないでください。のびちゃいます。」
 
 ### cloth pull partner sleeve
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」 かつ （入力#hitZoneId = 「leftArm」 または 入力#hitZoneId = 「rightArm」））
 話者: パ
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「……そで、伸びます。」
 
 ### cloth pull partner shoes
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」 かつ （入力#hitZoneId = 「leftFoot」 または 入力#hitZoneId = 「rightFoot」））
 話者: パ
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「……くつ。ひっぱっても、伸びません。」
 
 ### cloth pull partner
 合図: ＠住人_つつく
 条件:（入力#hitSurface = 「cloth」 かつ 入力#actorId = 「partner」）
 話者: パ
+＜動作 poke_react 繰り返し=いいえ 終了後=idle_breathe＞
 「……服、伸びます。」
 
 ### hair touch yuukei
@@ -107,6 +118,7 @@
 条件:（入力#hitSurface = 「hair」 かつ 入力#actorId = 「yuukei」）
 話者: ゆ
 ＜表情 照れ＞
+＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
 「髪は……そっと、でお願いします。」
 
 ### hair touch partner
@@ -114,6 +126,7 @@
 条件:（入力#hitSurface = 「hair」 かつ 入力#actorId = 「partner」）
 話者: パ
 ＜表情 照れ＞
+＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
 「くすぐったい、です。」
 
 ### grab yuukei
@@ -121,6 +134,7 @@
 条件: 入力#actorId = 「yuukei」
 話者: ゆ
 ＜表情 驚き＞
+＜動作 grab_start 繰り返し=いいえ 終了後=grab_hold＞
 「わわっ、急に持ち上げないでください……！」
 
 ### grab partner
@@ -128,12 +142,14 @@
 条件: 入力#actorId = 「partner」
 話者: パ
 ＜表情 驚き＞
+＜動作 grab_start 繰り返し=いいえ 終了後=grab_hold＞
 「うわ。……浮いてます。」
 
 ### drop yuukei far
 合図: ＠住人_おろす
 条件:（入力#actorId = 「yuukei」 かつ 入力#移動距離 >= 400）
 話者: ゆ
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
 「ずいぶん遠くまで来ましたね。ここが今日の定位置ですか？」
 
 ### drop yuukei near
@@ -141,16 +157,19 @@
 条件: 入力#actorId = 「yuukei」
 話者: ゆ
 ＜表情 笑顔＞
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
 「はい、ここですね。落ち着きます。」
 
 ### drop partner far
 合図: ＠住人_おろす
 条件:（入力#actorId = 「partner」 かつ 入力#移動距離 >= 400）
 話者: パ
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
 「……引っ越し、ですか。」
 
 ### drop partner near
 合図: ＠住人_おろす
 条件: 入力#actorId = 「partner」
 話者: パ
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
 「着地。」

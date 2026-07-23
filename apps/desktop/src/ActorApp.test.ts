@@ -340,6 +340,34 @@ describe("ActorApp renderer helpers", () => {
     expect(next?.actors.another?.speaking).toBe(true);
   });
 
+  it("keeps the return motion in the snapshot for one-shot avatar motions", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("avatar.motion", {
+        targetActorId: "yuukei",
+        payload: {
+          motion: "wave",
+          loop: false,
+          returnMotion: "idle_breathe",
+        },
+      }),
+    );
+
+    expect(next?.actors.yuukei?.motion).toBe("idle_breathe");
+  });
+
+  it("keeps looping avatar motions as the current snapshot motion", () => {
+    const next = applyCommandHint(
+      snapshotFixture(),
+      commandFixture("avatar.motion", {
+        targetActorId: "yuukei",
+        payload: { motion: "sleep_loop", loop: true },
+      }),
+    );
+
+    expect(next?.actors.yuukei?.motion).toBe("sleep_loop");
+  });
+
   it("applies stage.walk motion and heading hints immediately", () => {
     const next = applyCommandHint(
       snapshotFixture(),

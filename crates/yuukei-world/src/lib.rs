@@ -1365,15 +1365,33 @@ impl ActionHandler for YuukeiActionHandler {
                 let Some(value) = function_value(&positional, &named) else {
                     return Ok(DaihonValue::None);
                 };
+                let return_motion = named
+                    .get("終了後")
+                    .or_else(|| named.get("returnMotion"))
+                    .map(DaihonValue::to_display_string)
+                    .filter(|value| !value.trim().is_empty());
+                let loop_motion = named
+                    .get("繰り返し")
+                    .or_else(|| named.get("loop"))
+                    .and_then(DaihonValue::as_bool)
+                    .unwrap_or(return_motion.is_none());
                 let mut command = self.command("avatar.motion", speaker_id);
                 command.payload = JsonMap::from([
                     ("motion".to_string(), Value::String(value)),
+                    ("loop".to_string(), Value::Bool(loop_motion)),
                     ("speakerId".to_string(), Value::String(actor_id)),
                     (
                         "sourceFunction".to_string(),
                         Value::String(name.to_string()),
                     ),
                 ]);
+                if !loop_motion {
+                    if let Some(return_motion) = return_motion {
+                        command
+                            .payload
+                            .insert("returnMotion".to_string(), Value::String(return_motion));
+                    }
+                }
                 self.commands.lock().await.push(command);
             }
             "場所" | "location" => {
@@ -1790,7 +1808,40 @@ fn yuukei_function_registry() -> FunctionRegistry {
                 ty: ParamType::String,
                 required: true,
             }],
-            named: BTreeMap::new(),
+            named: BTreeMap::from([
+                (
+                    "繰り返し".to_string(),
+                    ParamSpec {
+                        name: Some("繰り返し".to_string()),
+                        ty: ParamType::Boolean,
+                        required: false,
+                    },
+                ),
+                (
+                    "loop".to_string(),
+                    ParamSpec {
+                        name: Some("loop".to_string()),
+                        ty: ParamType::Boolean,
+                        required: false,
+                    },
+                ),
+                (
+                    "終了後".to_string(),
+                    ParamSpec {
+                        name: Some("終了後".to_string()),
+                        ty: ParamType::String,
+                        required: false,
+                    },
+                ),
+                (
+                    "returnMotion".to_string(),
+                    ParamSpec {
+                        name: Some("returnMotion".to_string()),
+                        ty: ParamType::String,
+                        required: false,
+                    },
+                ),
+            ]),
             return_type: None,
         });
     }
@@ -3082,6 +3133,35 @@ mod tests {
         assert_eq!(result.commands[1].kind, "stage.perch.release");
         assert_eq!(result.commands[1].payload["speakerId"], "yuukei");
         assert_eq!(result.commands[1].payload["sourceFunction"], "枠から降りる");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_one_shot_motion_with_return_motion() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.startup".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### motion playback
+話者: yuukei
+＜動作 wave 繰り返し=いいえ 終了後=idle_breathe＞
+＜motion idle_breathe＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.startup", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 2);
+        assert_eq!(result.commands[0].kind, "avatar.motion");
+        assert_eq!(result.commands[0].payload["motion"], "wave");
+        assert_eq!(result.commands[0].payload["loop"], false);
+        assert_eq!(result.commands[0].payload["returnMotion"], "idle_breathe");
+        assert_eq!(result.commands[1].payload["motion"], "idle_breathe");
+        assert_eq!(result.commands[1].payload["loop"], true);
+        assert!(!result.commands[1].payload.contains_key("returnMotion"));
         Ok(())
     }
 

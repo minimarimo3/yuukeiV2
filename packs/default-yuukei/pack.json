@@ -18,8 +18,25 @@
         "kind": "vrm",
         "model": "character/character_1.vrm",
         "motions": {
+          "idle_breathe": "motion/idle_breathe.vrma",
+          "idle_look_around": "motion/idle_look_around.vrma",
+          "idle_weight_shift": "motion/idle_weight_shift.vrma",
           "walk": "motion/walk.vrma",
-          "歩く": "motion/walk.vrma"
+          "歩く": "motion/walk.vrma",
+          "grab_start": "motion/grab_start.vrma",
+          "grab_hold": "motion/grab_hold.vrma",
+          "drop_land": "motion/drop_land.vrma",
+          "drop_recover": "motion/drop_recover.vrma",
+          "perch_sit_down": "motion/perch_sit_down.vrma",
+          "perch_idle": "motion/perch_idle.vrma",
+          "perch_stand_up": "motion/perch_stand_up.vrma",
+          "wave": "motion/wave.vrma",
+          "poke_react": "motion/poke_react.vrma",
+          "pat_react": "motion/pat_react.vrma",
+          "sleep_enter": "motion/sleep_enter.vrma",
+          "sleep_loop": "motion/sleep_loop.vrma",
+          "wake_up": "motion/wake_up.vrma",
+          "talk_small": "motion/talk_small.vrma"
         },
         "hitZones": [
           {
@@ -53,8 +70,25 @@
         "kind": "vrm",
         "model": "character/character_2.vrm",
         "motions": {
+          "idle_breathe": "motion/idle_breathe.vrma",
+          "idle_look_around": "motion/idle_look_around.vrma",
+          "idle_weight_shift": "motion/idle_weight_shift.vrma",
           "walk": "motion/walk.vrma",
-          "歩く": "motion/walk.vrma"
+          "歩く": "motion/walk.vrma",
+          "grab_start": "motion/grab_start.vrma",
+          "grab_hold": "motion/grab_hold.vrma",
+          "drop_land": "motion/drop_land.vrma",
+          "drop_recover": "motion/drop_recover.vrma",
+          "perch_sit_down": "motion/perch_sit_down.vrma",
+          "perch_idle": "motion/perch_idle.vrma",
+          "perch_stand_up": "motion/perch_stand_up.vrma",
+          "wave": "motion/wave.vrma",
+          "poke_react": "motion/poke_react.vrma",
+          "pat_react": "motion/pat_react.vrma",
+          "sleep_enter": "motion/sleep_enter.vrma",
+          "sleep_loop": "motion/sleep_loop.vrma",
+          "wake_up": "motion/wake_up.vrma",
+          "talk_small": "motion/talk_small.vrma"
         },
         "hitZones": [
           {

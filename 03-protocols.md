@@ -149,7 +149,7 @@ type RuntimeCommand = YuukeiMessage & {
 - `dialogue.say`: セリフを表示する。
 - `dialogue.choices`: 選択肢を表示する。
 - `avatar.expression`: 表情を変える。
-- `avatar.motion`: 動作を変える。
+- `avatar.motion`: 動作を変える。`payload.motion` はWorld Packの `motions` に登録したモーションID。`loop` は省略時 `true`。`loop: false` のcommandはSurfaceが1回だけ再生し、終了時に任意の `returnMotion` へ遷移する。Resident Homeのsnapshotには単発動作そのものを残さず、`returnMotion`（省略時は空文字）を現在動作として保持するため、Surface再接続で驚きや着地を再演しない。
 - `actor.location.set`: 住人の意味上の現在地を変える。payloadの `location` は空でない安定した場所IDであり、OSの実パスや画面座標ではない。在席状態は変えない。
 - `actor.exit`: 住人を現在のSurfaceの舞台から退場させ、`presence` を `away` にする。payloadに `location` があれば、退場と同時に現在地も原子的に変える。
 - `actor.enter`: 住人を現在のSurfaceの舞台へ登場させ、`presence` を `present` にする。payloadに `location` があれば、登場と同時に現在地も原子的に変える。省略時は現在地を保つ。

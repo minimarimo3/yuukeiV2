@@ -51,6 +51,8 @@ out/
 packages/*/dist/
 packs/default-yuukei/character/*
 packs/default-yuukei/motion/*
+!packs/default-yuukei/motion/*.vrma
+!packs/default-yuukei/motion/*.qa.json
 pnpm-debug.log*
 src-tauri/**/*.rs.bk
 src-tauri/*.log

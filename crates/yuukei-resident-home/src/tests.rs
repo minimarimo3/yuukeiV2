@@ -852,6 +852,42 @@ async fn stage_walk_command_and_ended_event_update_actor_snapshot() -> Result<()
 }
 
 #[tokio::test]
+async fn one_shot_motion_snapshot_keeps_only_its_return_motion() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut one_shot = RuntimeCommand::new("avatar.motion", "daihon", "resident-default");
+    one_shot.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    one_shot.payload = JsonMap::from([
+        ("motion".to_string(), json!("wave")),
+        ("loop".to_string(), json!(false)),
+        ("returnMotion".to_string(), json!("idle_breathe")),
+    ]);
+
+    home.emit_internal_command_without_extensions(one_shot)?;
+
+    assert_eq!(home.snapshot()?.actors["yuukei"].motion, "idle_breathe");
+
+    let mut looping = RuntimeCommand::new("avatar.motion", "daihon", "resident-default");
+    looping.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    looping.payload = JsonMap::from([
+        ("motion".to_string(), json!("sleep_loop")),
+        ("loop".to_string(), json!(true)),
+    ]);
+
+    home.emit_internal_command_without_extensions(looping)?;
+
+    assert_eq!(home.snapshot()?.actors["yuukei"].motion, "sleep_loop");
+    Ok(())
+}
+
+#[tokio::test]
 async fn actor_location_exit_and_enter_commands_update_snapshot_atomically() -> Result<()> {
     let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
     let actor_command = |kind: &str, location: Option<&str>| {

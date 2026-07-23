@@ -526,8 +526,22 @@ impl ResidentHome {
                 }
             }
             "avatar.motion" => {
-                if let Some(motion) = command.payload.get("motion").and_then(Value::as_str) {
-                    actor.motion = motion.to_string();
+                if command
+                    .payload
+                    .get("loop")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+                {
+                    if let Some(motion) = command.payload.get("motion").and_then(Value::as_str) {
+                        actor.motion = motion.to_string();
+                    }
+                } else {
+                    actor.motion = command
+                        .payload
+                        .get("returnMotion")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                 }
             }
             "stage.walk" => {

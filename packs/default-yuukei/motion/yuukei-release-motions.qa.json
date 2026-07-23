@@ -1,0 +1,446 @@
+{
+  "armature": "Armature",
+  "blenderVersion": "5.2.0 LTS",
+  "fps": 30,
+  "motionCount": 18,
+  "motions": {
+    "idle_breathe": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\idle_breathe.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 121,
+      "durationSeconds": 4.0
+    },
+    "idle_look_around": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\idle_look_around.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 86,
+      "durationSeconds": 2.8333333333333335
+    },
+    "idle_weight_shift": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\idle_weight_shift.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 121,
+      "durationSeconds": 4.0
+    },
+    "walk": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\walk.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 25,
+      "durationSeconds": 0.8
+    },
+    "grab_start": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\grab_start.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 14,
+      "durationSeconds": 0.43333333333333335
+    },
+    "grab_hold": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\grab_hold.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 31,
+      "durationSeconds": 1.0
+    },
+    "drop_land": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\drop_land.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 24,
+      "durationSeconds": 0.7666666666666667
+    },
+    "drop_recover": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\drop_recover.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 26,
+      "durationSeconds": 0.8333333333333334
+    },
+    "perch_sit_down": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\perch_sit_down.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 26,
+      "durationSeconds": 0.8333333333333334
+    },
+    "perch_idle": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\perch_idle.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 61,
+      "durationSeconds": 2.0
+    },
+    "perch_stand_up": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\perch_stand_up.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 28,
+      "durationSeconds": 0.9
+    },
+    "wave": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\wave.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 66,
+      "durationSeconds": 2.1666666666666665
+    },
+    "poke_react": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\poke_react.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 24,
+      "durationSeconds": 0.7666666666666667
+    },
+    "pat_react": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\pat_react.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 46,
+      "durationSeconds": 1.5
+    },
+    "sleep_enter": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\sleep_enter.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 60,
+      "durationSeconds": 1.9666666666666666
+    },
+    "sleep_loop": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\sleep_loop.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 91,
+      "durationSeconds": 3.0
+    },
+    "wake_up": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\wake_up.vrma",
+      "loop": false,
+      "frameStart": 1,
+      "frameEnd": 58,
+      "durationSeconds": 1.9
+    },
+    "talk_small": {
+      "file": "C:\\Users\\minimarimo3\\Sagyouba\\yuukeiV2\\packs\\default-yuukei\\motion\\talk_small.vrma",
+      "loop": true,
+      "frameStart": 1,
+      "frameEnd": 25,
+      "durationSeconds": 0.8
+    }
+  },
+  "authoredAngleChecks": {
+    "measurementCount": 635,
+    "violations": [],
+    "pass": true
+  },
+  "loopEndpointChecks": [
+    {
+      "motion": "idle_breathe",
+      "start": 1,
+      "end": 121,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "idle_weight_shift",
+      "start": 1,
+      "end": 121,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "walk",
+      "start": 1,
+      "end": 25,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "grab_hold",
+      "start": 1,
+      "end": 31,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "perch_idle",
+      "start": 1,
+      "end": 61,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "sleep_loop",
+      "start": 1,
+      "end": 91,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    },
+    {
+      "motion": "talk_small",
+      "start": 1,
+      "end": 25,
+      "max_endpoint_difference": 0.0,
+      "pass": true
+    }
+  ],
+  "vrmaImportChecks": {
+    "pass": true,
+    "results": [
+      {
+        "motion": "idle_breathe",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          121.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "idle_look_around",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          86.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "idle_weight_shift",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          121.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "walk",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          26.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "grab_start",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          15.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "grab_hold",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          31.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "drop_land",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          24.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "drop_recover",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          26.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "perch_sit_down",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          26.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "perch_idle",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          61.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "perch_stand_up",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          28.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "wave",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          67.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "poke_react",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          24.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "pat_react",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          46.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "sleep_enter",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          61.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "sleep_loop",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          91.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "wake_up",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          58.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      },
+      {
+        "motion": "talk_small",
+        "operatorResult": [
+          "FINISHED"
+        ],
+        "curveCount": 155,
+        "frameRange": [
+          1.0,
+          26.0
+        ],
+        "newObjectCount": 0,
+        "pass": true
+      }
+    ]
+  },
+  "biomechanicsBasis": {
+    "principles": [
+      "Keep quiet-standing center of mass over the base of support and retain small postural sway.",
+      "Coordinate arm swing with the contralateral leg during walking.",
+      "Use hip, knee, and ankle flexion together for a soft landing; avoid knee valgus.",
+      "Keep authored joint rotations below conservative active-ROM QA limits.",
+      "Keep locomotion in-place because DesktopStageManager owns screen translation."
+    ],
+    "sources": [
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC4618057/",
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC2817299/",
+      "https://pmc.ncbi.nlm.nih.gov/articles/PMC2815098/",
+      "https://pubmed.ncbi.nlm.nih.gov/21070485/",
+      "https://vrm.dev/en/vrm/vrm_features/",
+      "https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_vrm_animation-1.0"
+    ]
+  }
+}

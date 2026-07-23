@@ -59,6 +59,9 @@ type LoadedActor = {
   mixer: THREE.AnimationMixer;
   actions: Map<string, THREE.AnimationAction>;
   currentMotionId: string | null;
+  activeOneShotAction: THREE.AnimationAction | null;
+  returnMotionId: string | null;
+  processedMotionCommandId: string | null;
   baseRotationY: number;
   hitZones: ResolvedActorHitZone[];
   boneNodes: Map<string, THREE.Object3D>;
@@ -69,6 +72,8 @@ type LoadedActor = {
 type VrmStageProps = {
   assets: ActorSurfaceAsset[];
   snapshot: ResidentSnapshot | null;
+  motionCommands: Readonly<Record<string, RuntimeCommand>>;
+  onMotionCommandConsumed(actorId: string, commandId: string): void;
   onStageAnchorReport(actorId: string, anchor: StageAnchor): Promise<void>;
   onHitTestChange(passthrough: boolean): Promise<void>;
   onAvatarGesturePoke(gesture: AvatarGesturePokeInput): Promise<void>;
@@ -98,6 +103,9 @@ export function ActorApp({
   );
   const [snapshot, setSnapshot] = useState<ResidentSnapshot | null>(null);
   const [assets, setAssets] = useState<ActorSurfaceAsset[]>([]);
+  const [motionCommands, setMotionCommands] = useState<
+    Record<string, RuntimeCommand>
+  >({});
   const [status, setStatus] = useState<string | null>(null);
   const [surfaceConnected, setSurfaceConnected] = useState(false);
 
@@ -114,6 +122,13 @@ export function ActorApp({
         );
         unlisteners.push(
           await client.onCommand((command) => {
+            const commandActorId = actorIdForCommand(command);
+            if (command.type === "avatar.motion" && commandActorId) {
+              setMotionCommands((current) => ({
+                ...current,
+                [commandActorId]: command,
+              }));
+            }
             setSnapshot((current) => applyCommandHint(current, command));
           }),
         );
@@ -159,6 +174,17 @@ export function ActorApp({
     [assets, activeActorId],
   );
   const visibleStatus = status ?? (activeActorId ? null : "actorId is missing");
+  const consumeMotionCommand = useCallback(
+    (commandActorId: string, commandId: string) => {
+      setMotionCommands((current) => {
+        if (current[commandActorId]?.id !== commandId) return current;
+        const next = { ...current };
+        delete next[commandActorId];
+        return next;
+      });
+    },
+    [],
+  );
   const setClickThrough = useCallback(
     (passthrough: boolean) => client.setActorWindowClickThrough(passthrough),
     [client],
@@ -187,6 +213,8 @@ export function ActorApp({
       <VrmStage
         assets={actorAssets}
         snapshot={snapshot}
+        motionCommands={motionCommands}
+        onMotionCommandConsumed={consumeMotionCommand}
         onStageAnchorReport={reportStageAnchor}
         onHitTestChange={setClickThrough}
         onAvatarGesturePoke={sendAvatarGesturePoke}
@@ -221,6 +249,8 @@ export async function loadInitialActorSurfaceState(
 function VrmStage({
   assets,
   snapshot,
+  motionCommands,
+  onMotionCommandConsumed,
   onStageAnchorReport,
   onHitTestChange,
   onAvatarGesturePoke,
@@ -230,11 +260,17 @@ function VrmStage({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const snapshotRef = useRef<ResidentSnapshot | null>(snapshot);
+  const motionCommandsRef =
+    useRef<Readonly<Record<string, RuntimeCommand>>>(motionCommands);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
   }, [snapshot]);
+
+  useEffect(() => {
+    motionCommandsRef.current = motionCommands;
+  }, [motionCommands]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -328,12 +364,22 @@ function VrmStage({
           mixer: new THREE.AnimationMixer(vrm.scene),
           actions: new Map(),
           currentMotionId: null,
+          activeOneShotAction: null,
+          returnMotionId: null,
+          processedMotionCommandId: null,
           baseRotationY: vrm.scene.rotation.y,
           hitZones,
           boneNodes,
           humanoidBoneByObject,
           mouthOffsetY: estimateMouthOffsetY(vrm.scene),
         };
+        loaded.mixer.addEventListener("finished", (event) => {
+          if (event.action !== loaded.activeOneShotAction) return;
+          loaded.activeOneShotAction = null;
+          const returnMotionId = loaded.returnMotionId;
+          loaded.returnMotionId = null;
+          applyMotion(loaded, returnMotionId ?? undefined);
+        });
         loadedActors.set(asset.actorId, loaded);
         await loadMotionActions(asset.renderer, loaded);
       }
@@ -347,7 +393,22 @@ function VrmStage({
       for (const loaded of loadedActors.values()) {
         const actor = currentSnapshot?.actors[loaded.actorId];
         applyExpression(loaded.vrm, actor?.expression);
-        applyMotion(loaded, actor?.motion);
+        const motionCommand = motionCommandsRef.current[loaded.actorId];
+        if (applyMotionCommand(loaded, motionCommand) && motionCommand) {
+          onMotionCommandConsumed(loaded.actorId, motionCommand.id);
+        }
+        const snapshotMotionId = normalizeMotionId(actor?.motion);
+        if (
+          loaded.activeOneShotAction &&
+          snapshotMotionId !== loaded.returnMotionId
+        ) {
+          loaded.activeOneShotAction.fadeOut(0.18);
+          loaded.activeOneShotAction = null;
+          loaded.returnMotionId = null;
+        }
+        if (!loaded.activeOneShotAction) {
+          applyMotion(loaded, actor?.motion);
+        }
         loaded.vrm.scene.rotation.y = headingRotationY(
           loaded.baseRotationY,
           actor?.heading,
@@ -806,6 +867,7 @@ function VrmStage({
     client,
     onAvatarGesturePoke,
     onHitTestChange,
+    onMotionCommandConsumed,
     onConversationOpen,
     onStageAnchorReport,
   ]);
@@ -922,11 +984,65 @@ function applyMotion(loaded: LoadedActor, motion: string | undefined) {
     ? (loaded.actions.get(motionId) ?? loaded.actions.get(motion ?? ""))
     : undefined;
   if (next) {
+    next.setLoop(THREE.LoopRepeat, Infinity);
+    next.clampWhenFinished = false;
     next.reset().fadeIn(0.18).play();
     loaded.currentMotionId = motionId;
   } else {
     loaded.currentMotionId = null;
   }
+}
+
+function applyMotionCommand(
+  loaded: LoadedActor,
+  command: RuntimeCommand | undefined,
+): boolean {
+  if (
+    command?.type !== "avatar.motion" ||
+    command.id === loaded.processedMotionCommandId
+  ) {
+    return false;
+  }
+  loaded.processedMotionCommandId = command.id;
+
+  const motion =
+    typeof command.payload.motion === "string"
+      ? command.payload.motion
+      : undefined;
+  if (command.payload.loop !== false) {
+    loaded.activeOneShotAction?.fadeOut(0.18);
+    loaded.activeOneShotAction = null;
+    loaded.returnMotionId = null;
+    applyMotion(loaded, motion);
+    return true;
+  }
+
+  const motionId = normalizeMotionId(motion);
+  const returnMotionId =
+    typeof command.payload.returnMotion === "string"
+      ? normalizeMotionId(command.payload.returnMotion)
+      : null;
+  const previous = loaded.currentMotionId
+    ? loaded.actions.get(loaded.currentMotionId)
+    : undefined;
+  const next = motionId
+    ? (loaded.actions.get(motionId) ?? loaded.actions.get(motion ?? ""))
+    : undefined;
+  previous?.fadeOut(0.18);
+  if (!next) {
+    loaded.activeOneShotAction = null;
+    loaded.returnMotionId = null;
+    applyMotion(loaded, returnMotionId ?? undefined);
+    return true;
+  }
+
+  next.setLoop(THREE.LoopOnce, 1);
+  next.clampWhenFinished = true;
+  next.reset().fadeIn(0.18).play();
+  loaded.currentMotionId = motionId;
+  loaded.activeOneShotAction = next;
+  loaded.returnMotionId = returnMotionId;
+  return true;
 }
 
 export function headingRotationY(
@@ -1327,11 +1443,7 @@ export function applyCommandHint(
   command: RuntimeCommand,
 ): ResidentSnapshot | null {
   if (!snapshot) return snapshot;
-  const actorId =
-    command.target?.actorId ??
-    (typeof command.payload.speakerId === "string"
-      ? command.payload.speakerId
-      : undefined);
+  const actorId = actorIdForCommand(command);
   if (!actorId || !snapshot.actors[actorId]) return snapshot;
 
   const actor = snapshot.actors[actorId];
@@ -1378,13 +1490,19 @@ export function applyCommandHint(
     command.type === "avatar.motion" &&
     typeof command.payload.motion === "string"
   ) {
+    const motion =
+      command.payload.loop === false
+        ? typeof command.payload.returnMotion === "string"
+          ? command.payload.returnMotion
+          : ""
+        : command.payload.motion;
     return {
       ...snapshot,
       actors: {
         ...snapshot.actors,
         [actorId]: {
           ...actor,
-          motion: command.payload.motion,
+          motion,
         },
       },
     };
@@ -1445,6 +1563,17 @@ export function applyCommandHint(
     };
   }
   return snapshot;
+}
+
+export function actorIdForCommand(
+  command: Pick<RuntimeCommand, "target" | "payload">,
+): string | undefined {
+  return (
+    command.target?.actorId ??
+    (typeof command.payload.speakerId === "string"
+      ? command.payload.speakerId
+      : undefined)
+  );
 }
 
 function isTauriRuntime() {
