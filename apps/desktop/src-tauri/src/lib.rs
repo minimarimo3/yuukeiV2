@@ -286,7 +286,12 @@ fn surface_ready(window: WebviewWindow, state: State<'_, AppState>) -> Result<()
     {
         return Ok(());
     }
-    window.show().map_err(to_message)
+    window.show().map_err(to_message)?;
+    // Surface windows start hidden while their WebViews initialize. Reapply
+    // the native Windows caption and taskbar ordering protection after the
+    // readiness transition so showing cannot win a race with subclass setup.
+    desktop_stage::enforce_borderless(&window);
+    Ok(())
 }
 
 #[tauri::command]

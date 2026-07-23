@@ -1,6 +1,7 @@
 use tauri::WebviewWindow;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SHAppBarMessage, SetWindowSubclass, ABE_BOTTOM,
     ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX, APPBARDATA,
@@ -69,14 +70,18 @@ pub(super) fn suppress_activation_flicker(window: &WebviewWindow) {
 }
 
 /// Keep a Yuukei window in the topmost band but immediately behind Explorer's
-/// main and secondary taskbars. `EnumWindows` is in front-to-back Z order, so
-/// the last matching taskbar is the one after which the window must be placed.
+/// taskbar on the same monitor. `EnumWindows` is in front-to-back Z order, so
+/// the last matching taskbar for that monitor is the one after which the window
+/// must be placed.
 ///
 /// This does not clear `WS_EX_TOPMOST`: using a topmost taskbar as the insertion
-/// target preserves the window's topmost status while leaving every taskbar in
-/// front. The caller already owns the window thread.
+/// target preserves the window's topmost status while leaving that monitor's
+/// taskbar in front. A taskbar on another monitor must not be used as the
+/// insertion target: doing so can demote the taskbar on this window's monitor
+/// and prevent its auto-hide reveal gesture. The caller already owns the window
+/// thread.
 unsafe fn place_behind_shell_taskbars(hwnd: HWND) {
-    let Some(taskbar) = shell_taskbar_insert_after() else {
+    let Some(taskbar) = shell_taskbar_insert_after(hwnd) else {
         return;
     };
     let _ = SetWindowPos(
@@ -90,7 +95,8 @@ unsafe fn place_behind_shell_taskbars(hwnd: HWND) {
     );
 }
 
-unsafe fn shell_taskbar_insert_after() -> Option<HWND> {
+unsafe fn shell_taskbar_insert_after(hwnd: HWND) -> Option<HWND> {
+    let target_monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize;
     let mut context = TopLevelWindows::default();
     let _ = EnumWindows(
         Some(collect_top_level_window),
@@ -99,9 +105,9 @@ unsafe fn shell_taskbar_insert_after() -> Option<HWND> {
     let classes = context
         .windows
         .iter()
-        .map(|window| (window.class_name.as_str(), window.topmost))
+        .map(|window| (window.class_name.as_str(), window.topmost, window.monitor))
         .collect::<Vec<_>>();
-    taskbar_insert_after_index(&classes).map(|index| context.windows[index].hwnd)
+    taskbar_insert_after_index(&classes, target_monitor).map(|index| context.windows[index].hwnd)
 }
 
 #[derive(Default)]
@@ -113,6 +119,7 @@ struct TopLevelWindow {
     hwnd: HWND,
     class_name: String,
     topmost: bool,
+    monitor: isize,
 }
 
 unsafe extern "system" fn collect_top_level_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -124,15 +131,19 @@ unsafe extern "system" fn collect_top_level_window(hwnd: HWND, lparam: LPARAM) -
             hwnd,
             class_name: String::from_utf16_lossy(&class_name[..len as usize]),
             topmost: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0,
+            monitor: MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize,
         });
     }
     true.into()
 }
 
-fn taskbar_insert_after_index(windows: &[(&str, bool)]) -> Option<usize> {
-    windows
-        .iter()
-        .rposition(|(class_name, topmost)| *topmost && TASKBAR_WINDOW_CLASSES.contains(class_name))
+fn taskbar_insert_after_index(
+    windows: &[(&str, bool, isize)],
+    target_monitor: isize,
+) -> Option<usize> {
+    windows.iter().rposition(|(class_name, topmost, monitor)| {
+        *topmost && *monitor == target_monitor && TASKBAR_WINDOW_CLASSES.contains(class_name)
+    })
 }
 
 unsafe fn strip_caption_styles(hwnd: HWND) {
@@ -184,7 +195,7 @@ unsafe extern "system" fn caption_subclass_proc(
         WM_WINDOWPOSCHANGING if lparam.0 != 0 => {
             let window_pos = &mut *(lparam.0 as *mut WINDOWPOS);
             if !window_pos.flags.contains(SWP_NOZORDER) {
-                if let Some(taskbar) = shell_taskbar_insert_after() {
+                if let Some(taskbar) = shell_taskbar_insert_after(hwnd) {
                     window_pos.hwndInsertAfter = taskbar;
                 }
             }
@@ -208,27 +219,45 @@ mod tests {
     #[test]
     fn taskbar_target_is_the_last_shell_taskbar_in_z_order() {
         let classes = [
-            ("ApplicationWindow", false),
-            ("Shell_TrayWnd", true),
-            ("Chrome_WidgetWin_1", true),
-            ("Shell_SecondaryTrayWnd", true),
-            ("ApplicationFrameWindow", false),
+            ("ApplicationWindow", false, 1),
+            ("Shell_TrayWnd", true, 1),
+            ("Chrome_WidgetWin_1", true, 1),
+            ("Shell_SecondaryTrayWnd", true, 1),
+            ("ApplicationFrameWindow", false, 1),
         ];
 
-        assert_eq!(taskbar_insert_after_index(&classes), Some(3));
+        assert_eq!(taskbar_insert_after_index(&classes, 1), Some(3));
     }
 
     #[test]
     fn taskbar_target_is_absent_without_explorer_taskbars() {
-        let classes = [("ApplicationWindow", false), ("Chrome_WidgetWin_1", true)];
+        let classes = [
+            ("ApplicationWindow", false, 1),
+            ("Chrome_WidgetWin_1", true, 1),
+        ];
 
-        assert_eq!(taskbar_insert_after_index(&classes), None);
+        assert_eq!(taskbar_insert_after_index(&classes, 1), None);
     }
 
     #[test]
     fn non_topmost_shell_window_is_not_used_as_the_insertion_target() {
-        let classes = [("Shell_TrayWnd", true), ("Shell_SecondaryTrayWnd", false)];
+        let classes = [
+            ("Shell_TrayWnd", true, 1),
+            ("Shell_SecondaryTrayWnd", false, 1),
+        ];
 
-        assert_eq!(taskbar_insert_after_index(&classes), Some(0));
+        assert_eq!(taskbar_insert_after_index(&classes, 1), Some(0));
+    }
+
+    #[test]
+    fn taskbar_on_another_monitor_is_not_used_as_the_insertion_target() {
+        let classes = [
+            ("Shell_TrayWnd", true, 1),
+            ("ApplicationWindow", true, 1),
+            ("Shell_SecondaryTrayWnd", true, 2),
+        ];
+
+        assert_eq!(taskbar_insert_after_index(&classes, 1), Some(0));
+        assert_eq!(taskbar_insert_after_index(&classes, 2), Some(2));
     }
 }
