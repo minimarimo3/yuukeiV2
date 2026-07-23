@@ -14,7 +14,8 @@ use tauri::{
     http::{Response, StatusCode},
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, UriSchemeContext, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, Manager, State, UriSchemeContext, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tokio::sync::Mutex;
@@ -58,6 +59,18 @@ pub struct AppState {
     window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     download_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     ready_surface_windows: StdMutex<HashSet<String>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupErrorInfo {
+    pack_root: String,
+    detail: String,
+}
+
+#[derive(Default)]
+struct StartupErrorState {
+    error: StdMutex<Option<StartupErrorInfo>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -123,10 +136,21 @@ const PACK_ASSET_SCHEME: &str = "yuukei-pack";
 const MENU_SETTINGS_ID: &str = "settings";
 const MENU_TOGGLE_CHARACTER_ID: &str = "toggle-character";
 const MENU_QUIT_ID: &str = "quit";
+const STARTUP_ERROR_WINDOW_LABEL: &str = "startup-error";
 const SURFACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn launched_from_autostart() -> bool {
     std::env::args_os().any(|argument| argument == "--autostart")
+}
+
+#[tauri::command]
+fn get_startup_error(state: State<'_, StartupErrorState>) -> Result<StartupErrorInfo, String> {
+    state
+        .error
+        .lock()
+        .map_err(|_| "startup error state lock is poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "startup error is not available".to_string())
 }
 
 pub(crate) fn track_surface_window_loading(app: &AppHandle, label: &str) -> Result<(), String> {
@@ -894,6 +918,7 @@ async fn reset_scene_history(state: State<'_, AppState>) -> Result<SceneHistoryS
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(StartupErrorState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -904,9 +929,18 @@ pub fn run() {
         .setup(|app| {
             let env = local_runtime_environment(app.handle())
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
-            let runtime =
-                tauri::async_runtime::block_on(LocalYuukeiRuntime::open_selected_in(env.clone()))
-                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+            let runtime = match tauri::async_runtime::block_on(
+                LocalYuukeiRuntime::open_selected_in(env.clone()),
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let detail = error.to_string();
+                    eprintln!("Yuukei startup stopped: {detail}");
+                    show_startup_error_window(app.handle(), &env, detail)
+                        .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
+                    return Ok(());
+                }
+            };
             println!("Yuukei app log: {}", runtime.paths().app_log_path.display());
             let asset_index = build_pack_asset_index(&runtime)
                 .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
@@ -988,6 +1022,13 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if window.label() == STARTUP_ERROR_WINDOW_LABEL {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    window.app_handle().exit(1);
+                }
+                return;
+            }
             if desktop_stage::is_stage_overlay_label(window.label())
                 && matches!(event, WindowEvent::Focused(false))
             {
@@ -1085,10 +1126,45 @@ pub fn run() {
             set_app_actor_scale_percent,
             set_app_conversation_send_shortcut,
             set_runtime_settings,
-            reset_scene_history
+            reset_scene_history,
+            get_startup_error
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Yuukei desktop");
+}
+
+fn show_startup_error_window(
+    app: &AppHandle,
+    env: &LocalRuntimeEnvironment,
+    detail: String,
+) -> Result<(), String> {
+    let info = StartupErrorInfo {
+        pack_root: env.default_world_root.display().to_string(),
+        detail,
+    };
+    app.state::<StartupErrorState>()
+        .error
+        .lock()
+        .map_err(|_| "startup error state lock is poisoned".to_string())?
+        .replace(info);
+
+    if let Some(settings) = app.get_webview_window("settings") {
+        let _ = settings.hide();
+    }
+    let window = WebviewWindowBuilder::new(
+        app,
+        STARTUP_ERROR_WINDOW_LABEL,
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("Yuukei 起動エラー")
+    .inner_size(760.0, 560.0)
+    .min_inner_size(520.0, 420.0)
+    .center()
+    .visible(true)
+    .build()
+    .map_err(to_message)?;
+    let _ = window.set_focus();
+    Ok(())
 }
 
 fn local_runtime_environment(app: &AppHandle) -> Result<LocalRuntimeEnvironment, String> {
