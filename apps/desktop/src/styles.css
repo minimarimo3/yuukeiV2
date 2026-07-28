@@ -41,7 +41,7 @@ body[data-surface="actor"] {
   background: transparent;
 }
 
-body[data-surface="stage-overlay"] {
+body[data-surface="bubble"] {
   overflow: hidden;
   min-width: 1px;
   min-height: 1px;
@@ -57,7 +57,7 @@ body[data-surface="actor"] #root {
   background: transparent;
 }
 
-body[data-surface="stage-overlay"] #root {
+body[data-surface="bubble"] #root {
   background: transparent;
 }
 
@@ -344,17 +344,16 @@ input {
   border-left: 13px solid rgba(255, 255, 255, 0.96);
 }
 
-.stage-overlay-shell {
-  position: fixed;
-  inset: 0;
+.bubble-surface-shell {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
   background: transparent;
 }
 
-.stage-overlay-layer {
-  position: absolute;
-  inset: 0;
-  background: transparent;
+body[data-surface="bubble"] .actor-bubble-content {
+  max-height: 220px;
 }
 
 .stage-bubble {

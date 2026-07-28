@@ -328,7 +328,6 @@ export type StageAnchor = {
 
 export type StageMonitor = {
   id: string;
-  label: string;
   name?: string;
   bounds: StageRect;
   scaleFactor: number;
@@ -418,7 +417,8 @@ export type YuukeiClient = {
   deleteEventLogAll(): Promise<EventLogDeleteResult>;
   getActorSurfaceAssets(): Promise<ActorSurfaceAssetCatalog>;
   setActorWindowClickThrough(passthrough: boolean): Promise<void>;
-  setStageOverlayClickThrough(passthrough: boolean): Promise<void>;
+  setBubbleSurfaceClickThrough(passthrough: boolean): Promise<void>;
+  placeBubbleSurface(bubbleId: string, bounds: StageRect): Promise<void>;
   getDesktopStageState(): Promise<DesktopStageState>;
   reportActorStageAnchor(actorId: string, anchor: StageAnchor): Promise<void>;
   dismissStageBubble(bubbleId: string): Promise<void>;
@@ -564,8 +564,10 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<ActorSurfaceAssetCatalog>("get_actor_surface_assets"),
   setActorWindowClickThrough: (passthrough: boolean) =>
     invoke<void>("set_actor_window_click_through", { passthrough }),
-  setStageOverlayClickThrough: (passthrough: boolean) =>
-    invoke<void>("set_stage_overlay_click_through", { passthrough }),
+  setBubbleSurfaceClickThrough: (passthrough: boolean) =>
+    invoke<void>("set_bubble_surface_click_through", { passthrough }),
+  placeBubbleSurface: (bubbleId: string, bounds: StageRect) =>
+    invoke<void>("place_bubble_surface", { bubbleId, bounds }),
   getDesktopStageState: () =>
     invoke<DesktopStageState>("get_desktop_stage_state"),
   reportActorStageAnchor: (actorId: string, anchor: StageAnchor) =>

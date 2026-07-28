@@ -6,7 +6,7 @@ import {
 } from "./stageBubbleLayout";
 
 describe("stageBubbleLayout", () => {
-  it("keeps stage bubbles inside the overlay viewport", () => {
+  it("keeps stage bubbles inside the monitor viewport", () => {
     const placement = computeStageBubblePlacement(
       { x: 790, y: 8, visible: true },
       { width: 800, height: 260 },

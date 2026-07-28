@@ -121,8 +121,8 @@ pub(super) fn actor_window_url(actor_id: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?actorId={}", encode_path_segment(actor_id)).into())
 }
 
-pub(super) fn stage_overlay_url(monitor_id: &str) -> WebviewUrl {
-    WebviewUrl::App(format!("index.html?stageOverlayId={monitor_id}").into())
+pub(super) fn bubble_surface_url(actor_id: &str) -> WebviewUrl {
+    WebviewUrl::App(format!("index.html?bubbleActorId={}", encode_path_segment(actor_id)).into())
 }
 
 pub(super) fn encode_path_segment(value: &str) -> String {

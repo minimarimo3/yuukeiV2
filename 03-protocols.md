@@ -159,7 +159,7 @@ type RuntimeCommand = YuukeiMessage & {
 - `ui.error_burst`: エラー群のような感情表現を出す。
 - `audio.play`: 音声、UI音、環境音を再生する。
 
-Desktop Surfaceでは、デスクトップ全体を一つの舞台として扱うため、Device Host側の `DesktopStageManager` が高水準の演出命令を実際のwindow操作やoverlay描画へ変換する。DaihonやResident HomeはOS window handle、Tauri `AppHandle`、WebView、Finder/Explorer APIを直接扱わない。
+Desktop Surfaceでは、デスクトップ全体を一つの舞台として扱うため、Device Host側の `DesktopStageManager` が高水準の演出命令を実際のwindow操作やSurface描画へ変換する。舞台が画面全体であることは、モニタ全面のnative windowを常設することを意味しない。actorと吹き出しは内容に密着した個別window、screen-wide effectは実行中だけ存在する一時windowとして管理する。DaihonやResident HomeはOS window handle、Tauri `AppHandle`、WebView、Finder/Explorer APIを直接扱わない。
 
 `actor.exit` / `actor.enter` の対象はcommandの `target.actorId` である。Desktop Surfaceはawayのactor windowを隠し、その住人宛の吹き出し、選択肢、音声も提示しない。command自体は生活史として通常どおり記録される。`actor.location.set`、`actor.exit`、`actor.enter` の最新結果はResidentSnapshotへ反映され、Surfaceの再接続とResident Homeのevent-log replayで復元できる。
 
@@ -168,9 +168,9 @@ Resident HomeはDaihon dispatch時、eventの `actorId` が指す住人、指定
 Desktop Stage向けのcommand family:
 
 - `actor.place`: 住人を画面上のanchorへ移動する。`payload.anchor` は `screenRect`、`activeWindow`、将来の `osWindow` などの意味的anchorを持てる。Device Hostが許可済みOS観測から座標へ解決し、解決不能なら安全なfallback位置を使う。
-- `screen.effect.start`: 雨、暗転、画面揺れ、集中線などのscreen-wide effectを開始する。`payload.kind`、`effectId`、`durationMs`、`intensity`、`clickThrough` などを持てる。
-- `screen.effect.stop`: `effectId` または `kind` を指定してscreen-wide effectを止める。
-- `screen.dialogBurst.start`: 偽エラーダイアログなどの演出overlayを開始する。実OS native dialogを大量生成せず、Yuukei所有の透明overlay window上に描画する。
+- `screen.effect.start`: 雨、暗転、画面揺れ、集中線などのscreen-wide effectを開始する。`payload.kind`、`effectId`、`durationMs`、`intensity`、`clickThrough` などを持てる。Device Hostは最初のactive effect開始時にだけ一時effect windowを生成する。
+- `screen.effect.stop`: `effectId` または `kind` を指定してscreen-wide effectを止める。active effectが0件になったら一時effect windowを閉じる。
+- `screen.dialogBurst.start`: 偽エラーダイアログなどの演出overlayを開始する。実OS native dialogを大量生成せず、演出中だけ存在するYuukei所有の一時effect window上に描画する。
 - `screen.dialogBurst.clear`: dialog burstを全消去する。ESCやemergency clearなど、Device Host側の安全操作からも呼べる。
 - `stage.perch`: 住人を対象ウィンドウの枠(v1は上辺のみ)へ座らせる。`payload.windowKey` で対象を指定し、Device Hostが地形スナップショットから座標へ解決して追従する(対象の移動・リサイズに追いつく)。対象ウィンドウが消えたら住人はデスクトップ(通常位置)へ降り、`stage.perch.ended`(reason: `window-closed`)をRuntimeEventとして返す。配置はウィンドウ単位まで。フォルダ内アイコン単位の座標はv1では扱わない。
 - `stage.perch.release`: 座っている住人をデスクトップへ降ろす。
@@ -179,7 +179,7 @@ Desktop Stage向けのcommand family:
 
 ユーザーは住人を長押し(500ms)でつまんで、デスクトップの好きな場所へ動かせる。長押し未満のクリックは従来どおり `avatar.gesture.poke`。つまんだ時点で `avatar.gesture.grab` が発行され、perch中なら座りは解除されて `stage.perch.ended`(reason: `user-drag`)が返る。移動中はOSネイティブのウィンドウドラッグを使い、離した位置はモニタ内へクランプして確定、`avatar.gesture.drop` が発行される。確定した位置はDevice Hostのstage状態として永続化される(02)。
 
-これらは演出意図のprotocolであり、OS API呼び出しそのものではない。World PackとDaihonは「雨を降らせる」「この住人をこのanchorに座らせる」といった意図を出し、Desktop Device HostとSurfaceがmonitor、actor window、bubble、effect overlay、OS window anchor、cursorなどの整合性を管理する。
+これらは演出意図のprotocolであり、OS API呼び出しそのものではない。World PackとDaihonは「雨を降らせる」「この住人をこのanchorに座らせる」といった意図を出し、Desktop Device HostとSurfaceがmonitor、actor window、内容密着のbubble window、一時effect window、OS window anchor、cursorなどの整合性を管理する。
 
 RuntimeCommandはSurfaceにとっての描画命令であり、長期状態のsource of truthではない。再接続時はcommand履歴ではなくResidentSnapshotを使って復元する。
 

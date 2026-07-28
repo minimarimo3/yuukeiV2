@@ -296,7 +296,7 @@ async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, St
 fn surface_ready(window: WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
     let label = window.label().to_string();
     if !desktop_stage::is_actor_window_label(&label)
-        && !desktop_stage::is_stage_overlay_label(&label)
+        && !desktop_stage::is_bubble_surface_window_label(&label)
     {
         return Err(format!("window {label} is not a desktop surface"));
     }
@@ -308,6 +308,11 @@ fn surface_ready(window: WebviewWindow, state: State<'_, AppState>) -> Result<()
     if desktop_stage::is_actor_window_label(&label)
         && !state.stage.actor_window_should_be_visible(&label)?
     {
+        return Ok(());
+    }
+    // Bubble surfaces stay hidden until their WebView measures the actual
+    // content and reports a tightly bounded placement.
+    if desktop_stage::is_bubble_surface_window_label(&label) {
         return Ok(());
     }
     window.show().map_err(to_message)?;
@@ -488,12 +493,30 @@ fn set_actor_window_click_through(window: WebviewWindow, passthrough: bool) -> R
 }
 
 #[tauri::command]
-fn set_stage_overlay_click_through(window: WebviewWindow, passthrough: bool) -> Result<(), String> {
+fn set_bubble_surface_click_through(
+    window: WebviewWindow,
+    passthrough: bool,
+) -> Result<(), String> {
+    if !desktop_stage::is_bubble_surface_window_label(window.label()) {
+        return Err(format!("window {} is not a bubble surface", window.label()));
+    }
     window
         .set_ignore_cursor_events(passthrough)
         .map_err(to_message)?;
     desktop_stage::enforce_borderless(&window);
     Ok(())
+}
+
+#[tauri::command]
+fn place_bubble_surface(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    bubble_id: String,
+    bounds: desktop_stage::StageRect,
+) -> Result<(), String> {
+    state
+        .stage
+        .place_bubble_surface(&window, &bubble_id, bounds)
 }
 
 #[tauri::command]
@@ -1038,7 +1061,8 @@ pub fn run() {
             delete_event_log_all,
             get_actor_surface_assets,
             set_actor_window_click_through,
-            set_stage_overlay_click_through,
+            set_bubble_surface_click_through,
+            place_bubble_surface,
             get_desktop_stage_state,
             report_actor_stage_anchor,
             dismiss_stage_bubble,

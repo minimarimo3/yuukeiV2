@@ -334,7 +334,8 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       actors: [],
     })),
     setActorWindowClickThrough: vi.fn(async () => undefined),
-    setStageOverlayClickThrough: vi.fn(async () => undefined),
+    setBubbleSurfaceClickThrough: vi.fn(async () => undefined),
+    placeBubbleSurface: vi.fn(async () => undefined),
     getDesktopStageState: vi.fn(async () => ({
       monitors: [],
       actors: [],

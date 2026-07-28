@@ -2,20 +2,15 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  BubbleSurfaceApp,
+  bubbleSurfaceBounds,
   bubbleTypingProgress,
-  StageOverlayApp,
-  stageOverlayPassthrough,
-} from "./StageOverlayApp";
+} from "./BubbleSurfaceApp";
 import type { DesktopStageState, YuukeiClient } from "./yuukeiClient";
 
-describe("StageOverlayApp", () => {
+describe("BubbleSurfaceApp", () => {
   afterEach(() => {
     cleanup();
-  });
-
-  it("keeps transparent overlay space click-through around interactive content", () => {
-    expect(stageOverlayPassthrough(false)).toBe(true);
-    expect(stageOverlayPassthrough(true)).toBe(false);
   });
 
   it("uses code-point reading progress for bubbles without pending speech", () => {
@@ -62,6 +57,29 @@ describe("StageOverlayApp", () => {
     expect(bubbleTypingProgress(bubble, 3_000)).toBe(1);
   });
 
+  it("bounds the native surface to the bubble instead of the monitor", () => {
+    const state = stageState();
+    const bounds = bubbleSurfaceBounds(state.monitors[0].bounds, {
+      side: "above",
+      left: 200,
+      top: 120,
+      width: 260,
+      maxWidth: 260,
+      tailTop: 40,
+      tailLeft: 130,
+      rect: { x: 200, y: 120, width: 260, height: 72 },
+    });
+
+    expect(bounds).toEqual({
+      x: 184,
+      y: 104,
+      width: 292,
+      height: 104,
+    });
+    expect(bounds.width).toBeLessThan(state.monitors[0].bounds.width);
+    expect(bounds.height).toBeLessThan(state.monitors[0].bounds.height);
+  });
+
   it("keeps the full text layout while a pending-speech bubble shows its placeholder and choices", async () => {
     const state = stageState({
       text: "全文を確保",
@@ -74,9 +92,7 @@ describe("StageOverlayApp", () => {
       },
     });
 
-    render(
-      <StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />,
-    );
+    render(<BubbleSurfaceApp client={clientFixture(state)} actorId="yuukei" />);
 
     const placeholder = await screen.findByLabelText("読み上げを待っています");
     const content = placeholder.parentElement;
@@ -93,7 +109,7 @@ describe("StageOverlayApp", () => {
 
   it("renders stage bubbles from desktop stage state", async () => {
     const client = clientFixture(stageState());
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+    render(<BubbleSurfaceApp client={client} actorId="yuukei" />);
 
     const bubble = await findBubbleText("ここに出ます");
 
@@ -110,7 +126,7 @@ describe("StageOverlayApp", () => {
   it("does not render bubbles for hidden actors", async () => {
     const client = clientFixture(stageState({}, { visible: false }));
 
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+    render(<BubbleSurfaceApp client={client} actorId="yuukei" />);
 
     await waitFor(() => {
       expect(client.getDesktopStageState).toHaveBeenCalled();
@@ -120,7 +136,7 @@ describe("StageOverlayApp", () => {
 
   it("marks bubbles placed above the actor with the above side class", async () => {
     render(
-      <StageOverlayApp
+      <BubbleSurfaceApp
         client={clientFixture(
           stageState(
             {},
@@ -139,7 +155,7 @@ describe("StageOverlayApp", () => {
             },
           ),
         )}
-        monitorId="monitor-0"
+        actorId="yuukei"
       />,
     );
 
@@ -156,7 +172,7 @@ describe("StageOverlayApp", () => {
 
   it("marks bubbles placed below the actor with the below side class", async () => {
     render(
-      <StageOverlayApp
+      <BubbleSurfaceApp
         client={clientFixture(
           stageState(
             {},
@@ -175,7 +191,7 @@ describe("StageOverlayApp", () => {
             },
           ),
         )}
-        monitorId="monitor-0"
+        actorId="yuukei"
       />,
     );
 
@@ -192,7 +208,7 @@ describe("StageOverlayApp", () => {
 
   it("keeps the left side actor bubble class for left placements", async () => {
     render(
-      <StageOverlayApp
+      <BubbleSurfaceApp
         client={clientFixture(
           stageState(
             {},
@@ -211,7 +227,7 @@ describe("StageOverlayApp", () => {
             },
           ),
         )}
-        monitorId="monitor-0"
+        actorId="yuukei"
       />,
     );
 
@@ -230,7 +246,7 @@ describe("StageOverlayApp", () => {
     });
     const client = clientFixture(state);
 
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+    render(<BubbleSurfaceApp client={client} actorId="yuukei" />);
 
     await waitFor(() => {
       expect(client.dismissStageBubble).toHaveBeenCalledWith("bubble-1");
@@ -249,7 +265,7 @@ describe("StageOverlayApp", () => {
     );
     const user = userEvent.setup();
 
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
+    render(<BubbleSurfaceApp client={client} actorId="yuukei" />);
 
     const choice = await screen.findByRole("button", { name: "見る" });
     expect(screen.getByRole("button", { name: "あとで" })).toBeInTheDocument();
@@ -268,7 +284,7 @@ describe("StageOverlayApp", () => {
 });
 
 function clientFixture(stage: DesktopStageState): YuukeiClient {
-  // StageOverlayが使わないAPIはstub省略し、型はunknown経由でYuukeiClientへ寄せる。
+  // BubbleSurfaceが使わないAPIはstub省略し、型はunknown経由でYuukeiClientへ寄せる。
   const partial: Partial<YuukeiClient> = {
     attachSurface: vi.fn(),
     getSnapshot: vi.fn(),
@@ -282,7 +298,8 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getCapabilityUsage: vi.fn(),
     getActorSurfaceAssets: vi.fn(),
     setActorWindowClickThrough: vi.fn(async () => undefined),
-    setStageOverlayClickThrough: vi.fn(async () => undefined),
+    setBubbleSurfaceClickThrough: vi.fn(async () => undefined),
+    placeBubbleSurface: vi.fn(async () => undefined),
     surfaceReady: vi.fn(async () => undefined),
     getDesktopStageState: vi.fn(async () => stage),
     reportActorStageAnchor: vi.fn(async () => undefined),
@@ -362,7 +379,6 @@ function stageState(
     monitors: [
       {
         id: "monitor-0",
-        label: "stage-overlay-0",
         bounds: {
           x: 0,
           y: 0,

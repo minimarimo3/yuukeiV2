@@ -30,13 +30,17 @@ use walk::*;
 pub(crate) use windows::enforce_borderless;
 #[allow(unused_imports)]
 pub use windows::{
-    actor_webview_windows, actor_window_label, is_actor_window_label, is_stage_overlay_label,
-    stage_overlay_window_label,
+    actor_webview_windows, actor_window_label, bubble_surface_window_label, is_actor_window_label,
+    is_bubble_surface_window_label,
 };
-use windows::{create_actor_window, create_stage_overlay_window, monitor_snapshots};
+use windows::{
+    create_actor_window, create_bubble_surface_window, is_legacy_stage_overlay_label,
+    monitor_snapshots,
+};
 
 const ACTOR_WINDOW_LABEL_PREFIX: &str = "actor-";
-const STAGE_OVERLAY_LABEL_PREFIX: &str = "stage-overlay-";
+const BUBBLE_SURFACE_LABEL_PREFIX: &str = "bubble-";
+const LEGACY_STAGE_OVERLAY_LABEL_PREFIX: &str = "stage-overlay-";
 const ACTOR_WINDOW_WIDTH: f64 = 420.0;
 const ACTOR_WINDOW_HEIGHT: f64 = 560.0;
 const ACTOR_WINDOW_MARGIN: f64 = 24.0;
@@ -117,7 +121,6 @@ pub struct ActorStageAnchorReport {
 #[serde(rename_all = "camelCase")]
 pub struct StageMonitor {
     pub id: String,
-    pub label: String,
     pub name: Option<String>,
     pub bounds: StageRect,
     pub scale_factor: f64,
@@ -227,7 +230,7 @@ impl DesktopStageManager {
 
     pub fn emit_state(&self, app: &AppHandle) -> Result<(), String> {
         let snapshot = self.snapshot()?;
-        self.raise_overlay_windows(app, &snapshot.monitors)?;
+        self.sync_bubble_surface_windows(app, &snapshot)?;
         app.emit(STAGE_STATE_EVENT, &snapshot).map_err(to_message)
     }
 
@@ -250,7 +253,6 @@ impl DesktopStageManager {
         resident_snapshot: &ResidentSnapshot,
     ) -> Result<(), String> {
         let monitors = monitor_snapshots(app)?;
-        self.sync_overlay_windows(app, &monitors)?;
         let existing_labels = app.webview_windows().into_keys().collect::<Vec<_>>();
         let reconcile = reconcile_actor_windows(existing_labels, catalog);
 
@@ -887,57 +889,106 @@ impl DesktopStageManager {
         Ok(true)
     }
 
-    fn sync_overlay_windows(
+    pub fn place_bubble_surface(
+        &self,
+        window: &WebviewWindow,
+        bubble_id: &str,
+        requested_bounds: StageRect,
+    ) -> Result<(), String> {
+        if !is_bubble_surface_window_label(window.label()) {
+            return Err(format!("window {} is not a bubble surface", window.label()));
+        }
+        if !requested_bounds.x.is_finite()
+            || !requested_bounds.y.is_finite()
+            || !requested_bounds.width.is_finite()
+            || !requested_bounds.height.is_finite()
+            || requested_bounds.width < 1.0
+            || requested_bounds.height < 1.0
+        {
+            return Err("bubble surface bounds must be finite and positive".to_string());
+        }
+
+        let bounds = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            let bubble = state
+                .bubbles
+                .values()
+                .find(|bubble| bubble.bubble_id == bubble_id)
+                .ok_or_else(|| format!("bubble {bubble_id} is no longer visible"))?;
+            let actor = state
+                .actors
+                .get(&bubble.actor_id)
+                .filter(|actor| actor.visible)
+                .ok_or_else(|| format!("actor {} is not visible", bubble.actor_id))?;
+            let expected_label = bubble_surface_window_label(&actor.actor_id);
+            if window.label() != expected_label {
+                return Err(format!(
+                    "bubble {bubble_id} belongs to {expected_label}, not {}",
+                    window.label()
+                ));
+            }
+            let monitor = best_monitor_bounds_for_rect(&actor.bounds, &state.monitors);
+            let requested_bounds = StageRect {
+                width: requested_bounds.width.min(monitor.width.max(1.0)),
+                height: requested_bounds.height.min(monitor.height.max(1.0)),
+                ..requested_bounds
+            };
+            clamp_rect_to_bounds(requested_bounds, &monitor, 0.0)
+        };
+
+        window
+            .set_position(LogicalPosition::new(bounds.x, bounds.y))
+            .map_err(to_message)?;
+        window
+            .set_size(LogicalSize::new(bounds.width, bounds.height))
+            .map_err(to_message)?;
+        window.set_always_on_top(true).map_err(to_message)?;
+        window.show().map_err(to_message)?;
+        enforce_borderless(window);
+        Ok(())
+    }
+
+    fn sync_bubble_surface_windows(
         &self,
         app: &AppHandle,
-        monitors: &[StageMonitor],
+        snapshot: &DesktopStageSnapshot,
     ) -> Result<(), String> {
-        let desired_labels = monitors
+        let actors = snapshot
+            .actors
             .iter()
-            .map(|monitor| monitor.label.clone())
-            .collect::<BTreeSet<_>>();
+            .map(|actor| (actor.actor_id.as_str(), actor))
+            .collect::<BTreeMap<_, _>>();
+        let desired = snapshot
+            .bubbles
+            .iter()
+            .filter_map(|bubble| {
+                let actor = actors
+                    .get(bubble.actor_id.as_str())
+                    .filter(|actor| actor.visible)?;
+                Some((
+                    bubble_surface_window_label(&bubble.actor_id),
+                    (*actor).clone(),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+
         let existing_labels = app.webview_windows().into_keys().collect::<Vec<_>>();
         for label in existing_labels {
-            if is_stage_overlay_label(&label) && !desired_labels.contains(&label) {
+            let stale_bubble =
+                is_bubble_surface_window_label(&label) && !desired.contains_key(&label);
+            if stale_bubble || is_legacy_stage_overlay_label(&label) {
                 if let Some(window) = app.get_webview_window(&label) {
                     window.close().map_err(to_message)?;
                 }
             }
         }
-        for monitor in monitors {
-            match app.get_webview_window(&monitor.label) {
-                Some(window) => {
-                    window
-                        .set_position(LogicalPosition::new(monitor.bounds.x, monitor.bounds.y))
-                        .map_err(to_message)?;
-                    window
-                        .set_size(LogicalSize::new(
-                            monitor.bounds.width,
-                            monitor.bounds.height,
-                        ))
-                        .map_err(to_message)?;
-                    window.set_ignore_cursor_events(true).map_err(to_message)?;
-                    window.show().map_err(to_message)?;
-                    enforce_borderless(&window);
-                }
-                None => {
-                    create_stage_overlay_window(app, monitor)?;
-                }
-            }
-        }
-        Ok(())
-    }
 
-    fn raise_overlay_windows(
-        &self,
-        app: &AppHandle,
-        monitors: &[StageMonitor],
-    ) -> Result<(), String> {
-        for monitor in monitors {
-            if let Some(window) = app.get_webview_window(&monitor.label) {
-                window.set_always_on_top(true).map_err(to_message)?;
-                window.show().map_err(to_message)?;
-                enforce_borderless(&window);
+        for (label, actor) in desired {
+            if app.get_webview_window(&label).is_none() {
+                create_bubble_surface_window(app, &actor.actor_id, &actor.bounds)?;
             }
         }
         Ok(())

@@ -52,8 +52,8 @@ pub(super) fn suppress_activation_flicker(window: &WebviewWindow) {
 ///
 /// A hidden auto-hide taskbar is normally non-topmost. It must not be used as
 /// the insertion target because Windows would demote the Yuukei window from the
-/// topmost band. The monitor-sized stage leaves a physical edge strip free, so
-/// Explorer can reveal the taskbar and promote it to the topmost band first.
+/// topmost band. Yuukei surfaces are content-sized, so the rest of the physical
+/// screen edge remains owned by Explorer for the reveal gesture.
 unsafe fn place_behind_shell_taskbars(hwnd: HWND) {
     let Some(taskbar) = shell_taskbar_insert_after(hwnd) else {
         return;

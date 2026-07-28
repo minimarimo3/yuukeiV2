@@ -3,28 +3,31 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { ActorApp, actorIdFromLocation } from "./ActorApp";
 import { App } from "./App";
-import { StageOverlayApp, stageOverlayIdFromLocation } from "./StageOverlayApp";
+import {
+  BubbleSurfaceApp,
+  bubbleActorIdFromLocation,
+} from "./BubbleSurfaceApp";
 import { StartupErrorApp } from "./StartupErrorApp";
 import "./styles.css";
 
 const windowLabel = currentWindowLabel();
 const actorId = actorIdFromLocation();
-const stageOverlayId = stageOverlayIdFromLocation();
+const bubbleActorId = bubbleActorIdFromLocation();
 const isStartupError = windowLabel === "startup-error";
 const isActorSurface = Boolean(actorId) || windowLabel.startsWith("actor-");
-const isStageOverlay =
-  Boolean(stageOverlayId) || windowLabel.startsWith("stage-overlay-");
+const isBubbleSurface =
+  Boolean(bubbleActorId) || windowLabel.startsWith("bubble-");
 document.body.dataset.surface = isStartupError
   ? "startup-error"
-  : isStageOverlay
-    ? "stage-overlay"
+  : isBubbleSurface
+    ? "bubble"
     : isActorSurface
       ? "actor"
       : windowLabel;
 const root = isStartupError ? (
   <StartupErrorApp />
-) : isStageOverlay ? (
-  <StageOverlayApp monitorId={stageOverlayId} />
+) : isBubbleSurface ? (
+  <BubbleSurfaceApp actorId={bubbleActorId} />
 ) : isActorSurface ? (
   <ActorApp actorId={actorId} />
 ) : (

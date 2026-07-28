@@ -12,6 +12,7 @@ import {
   computeStageBubblePlacement,
   intersectsViewport,
   localRect,
+  rectOverlapArea,
   type StageBubblePlacement,
   type StageBubbleSize,
   type StageRect,
@@ -26,21 +27,27 @@ import {
   type YuukeiClient,
 } from "./yuukeiClient";
 
-type StageOverlayAppProps = {
-  monitorId?: string | null;
+type BubbleSurfaceAppProps = {
+  actorId?: string | null;
   client?: YuukeiClient;
 };
 
-type StageBubbleRenderItem = {
+type BubbleRenderItem = {
   bubble: StageBubble;
   actor: StageActor;
+  monitor: StageMonitor;
   placement: StageBubblePlacement;
+};
+
+type MeasuredBubble = StageBubbleSize & {
+  bubbleId: string;
 };
 
 const DEFAULT_BUBBLE_SIZE: StageBubbleSize = {
   width: 260,
   height: 72,
 };
+const SURFACE_PADDING = 16;
 const SPEECH_FALLBACK_GRACE_MS = 5_000;
 const READING_MS_PER_CODE_POINT = 90;
 
@@ -76,14 +83,14 @@ function clampUnit(value: number): number {
   return Math.min(Math.max(value, 0), 1);
 }
 
-export function StageOverlayApp({
-  monitorId,
+export function BubbleSurfaceApp({
+  actorId,
   client = tauriYuukeiClient,
-}: StageOverlayAppProps) {
+}: BubbleSurfaceAppProps) {
   const [stageState, setStageState] = useState<DesktopStageState | null>(null);
-  const [bubbleSizes, setBubbleSizes] = useState<
-    Record<string, StageBubbleSize>
-  >({});
+  const [measuredBubble, setMeasuredBubble] = useState<MeasuredBubble | null>(
+    null,
+  );
   const [interactingBubbleIds, setInteractingBubbleIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -112,53 +119,65 @@ export function StageOverlayApp({
     }
 
     void connect().catch((error) => {
-      console.warn("Failed to connect stage overlay", error);
+      console.warn("Failed to connect bubble surface", error);
     });
     return () => {
       disposed = true;
-      for (const unlisten of unlisteners) {
-        unlisten();
-      }
-      void client.setStageOverlayClickThrough(true);
+      for (const unlisten of unlisteners) unlisten();
+      void client.setBubbleSurfaceClickThrough(true);
     };
   }, [client]);
 
   useEffect(() => {
     if (!surfaceConnected) return;
     void client.surfaceReady?.().catch((error) => {
-      console.warn("Failed to mark stage overlay ready", error);
+      console.warn("Failed to mark bubble surface ready", error);
     });
   }, [client, surfaceConnected]);
 
-  const activeMonitor = useMemo(
-    () => selectMonitor(stageState, monitorId),
-    [stageState, monitorId],
+  const renderItem = useMemo(
+    () => computeRenderItem(stageState, actorId, measuredBubble),
+    [actorId, measuredBubble, stageState],
   );
-  const renderItems = useMemo(
-    () => computeRenderItems(stageState, activeMonitor, bubbleSizes),
-    [activeMonitor, bubbleSizes, stageState],
-  );
+
+  useEffect(() => {
+    if (
+      !renderItem ||
+      measuredBubble?.bubbleId !== renderItem.bubble.bubbleId
+    ) {
+      return;
+    }
+    const bounds = bubbleSurfaceBounds(
+      renderItem.monitor.bounds,
+      renderItem.placement,
+    );
+    void client
+      .placeBubbleSurface(renderItem.bubble.bubbleId, bounds)
+      .catch((error) => {
+        console.warn("Failed to place bubble surface", error);
+      });
+  }, [client, measuredBubble?.bubbleId, renderItem]);
+
   useBubbleExpiry({
-    bubbles: stageState?.bubbles ?? [],
+    bubbles: renderItem ? [renderItem.bubble] : [],
     client,
     deferUntil,
     interactingBubbleIds,
     onTick: () => setTimerTick((tick) => tick + 1),
   });
-  useStageOverlayHitTesting(client, renderItems.length);
+  useBubbleSurfaceHitTesting(client, renderItem ? 1 : 0);
 
   const updateBubbleSize = useCallback(
     (bubbleId: string, size: StageBubbleSize) => {
-      setBubbleSizes((current) => {
-        const previous = current[bubbleId];
+      setMeasuredBubble((current) => {
         if (
-          previous &&
-          Math.abs(previous.width - size.width) < 0.5 &&
-          Math.abs(previous.height - size.height) < 0.5
+          current?.bubbleId === bubbleId &&
+          Math.abs(current.width - size.width) < 0.5 &&
+          Math.abs(current.height - size.height) < 0.5
         ) {
           return current;
         }
-        return { ...current, [bubbleId]: size };
+        return { bubbleId, ...size };
       });
     },
     [],
@@ -168,11 +187,8 @@ export function StageOverlayApp({
     (bubbleId: string, active: boolean) => {
       setInteractingBubbleIds((current) => {
         const next = new Set(current);
-        if (active) {
-          next.add(bubbleId);
-        } else {
-          next.delete(bubbleId);
-        }
+        if (active) next.add(bubbleId);
+        else next.delete(bubbleId);
         return next;
       });
     },
@@ -187,51 +203,60 @@ export function StageOverlayApp({
   }, []);
 
   return (
-    <main className="stage-overlay-shell" aria-label="Yuukei desktop stage">
-      <div className="stage-overlay-layer" aria-live="polite">
-        {renderItems.map((item) => (
-          <StageBubbleView
-            item={item}
-            key={item.bubble.bubbleId}
-            hiddenChoiceIds={hiddenChoiceIds}
-            onChoiceSelect={(choiceId, choice, index) => {
-              setHiddenChoiceIds((current) => new Set(current).add(choiceId));
-              void client
-                .sendConversationChoice(choiceId, choice, index)
-                .catch((error) => {
-                  console.warn("Failed to send conversation choice", error);
-                });
-            }}
-            onBlur={() => {
-              setBubbleInteracting(item.bubble.bubbleId, false);
-              deferBubble(item.bubble.bubbleId, 1200);
-            }}
-            onFocus={() => setBubbleInteracting(item.bubble.bubbleId, true)}
-            onMouseEnter={() =>
-              setBubbleInteracting(item.bubble.bubbleId, true)
-            }
-            onMouseLeave={() => {
-              setBubbleInteracting(item.bubble.bubbleId, false);
-              deferBubble(item.bubble.bubbleId, 1200);
-            }}
-            onScroll={() => deferBubble(item.bubble.bubbleId)}
-            onSizeChange={updateBubbleSize}
-            onWheel={() => deferBubble(item.bubble.bubbleId)}
-          />
-        ))}
-      </div>
+    <main className="bubble-surface-shell" aria-label="Yuukei speech bubble">
+      {renderItem ? (
+        <BubbleView
+          item={renderItem}
+          hiddenChoiceIds={hiddenChoiceIds}
+          onChoiceSelect={(choiceId, choice, index) => {
+            setHiddenChoiceIds((current) => new Set(current).add(choiceId));
+            void client
+              .sendConversationChoice(choiceId, choice, index)
+              .catch((error) => {
+                console.warn("Failed to send conversation choice", error);
+              });
+          }}
+          onBlur={() => {
+            setBubbleInteracting(renderItem.bubble.bubbleId, false);
+            deferBubble(renderItem.bubble.bubbleId, 1200);
+          }}
+          onFocus={() => setBubbleInteracting(renderItem.bubble.bubbleId, true)}
+          onMouseEnter={() =>
+            setBubbleInteracting(renderItem.bubble.bubbleId, true)
+          }
+          onMouseLeave={() => {
+            setBubbleInteracting(renderItem.bubble.bubbleId, false);
+            deferBubble(renderItem.bubble.bubbleId, 1200);
+          }}
+          onScroll={() => deferBubble(renderItem.bubble.bubbleId)}
+          onSizeChange={updateBubbleSize}
+          onWheel={() => deferBubble(renderItem.bubble.bubbleId)}
+        />
+      ) : null}
     </main>
   );
 }
 
-export function stageOverlayIdFromLocation(
+export function bubbleActorIdFromLocation(
   search = window.location.search,
 ): string | null {
-  const monitorId = new URLSearchParams(search).get("stageOverlayId");
-  return monitorId && monitorId.length > 0 ? monitorId : null;
+  const actorId = new URLSearchParams(search).get("bubbleActorId");
+  return actorId && actorId.length > 0 ? actorId : null;
 }
 
-function StageBubbleView({
+export function bubbleSurfaceBounds(
+  monitorBounds: ClientStageRect,
+  placement: StageBubblePlacement,
+): ClientStageRect {
+  return {
+    x: monitorBounds.x + placement.left - SURFACE_PADDING,
+    y: monitorBounds.y + placement.top - SURFACE_PADDING,
+    width: placement.rect.width + SURFACE_PADDING * 2,
+    height: placement.rect.height + SURFACE_PADDING * 2,
+  };
+}
+
+function BubbleView({
   hiddenChoiceIds,
   item,
   onBlur,
@@ -244,7 +269,7 @@ function StageBubbleView({
   onWheel,
 }: {
   hiddenChoiceIds: Set<string>;
-  item: StageBubbleRenderItem;
+  item: BubbleRenderItem;
   onBlur(): void;
   onChoiceSelect(choiceId: string, choice: string, index: number): void;
   onFocus(): void;
@@ -280,19 +305,19 @@ function StageBubbleView({
     .filter(Boolean)
     .join(" ");
   const style = {
-    left: `${item.placement.left}px`,
-    top: `${item.placement.top}px`,
+    left: `${SURFACE_PADDING}px`,
+    top: `${SURFACE_PADDING}px`,
     "--actor-bubble-max-width": `${item.placement.maxWidth}px`,
     "--actor-bubble-tail-top": `${item.placement.tailTop}px`,
     "--actor-bubble-tail-left": `${item.placement.tailLeft}px`,
   } as CSSProperties;
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: hover/focusで吹き出しの自動消滅を止めるための意図的なフォーカス可能要素(操作要素ではない)
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover/focusで吹き出しの自動消滅を止めるための意図的なフォーカス可能要素
     <div
       className={className}
       data-actor-id={item.actor.actorId}
-      data-stage-solid="true"
+      data-bubble-solid="true"
       onBlur={onBlur}
       onFocus={onFocus}
       onMouseEnter={onMouseEnter}
@@ -301,7 +326,7 @@ function StageBubbleView({
       onWheel={onWheel}
       ref={ref}
       style={style}
-      /* biome-ignore lint/a11y/noNoninteractiveTabindex: hover/focusで吹き出しの自動消滅を止めるための意図的なフォーカス可能要素(操作要素ではない) */
+      /* biome-ignore lint/a11y/noNoninteractiveTabindex: hover/focusで吹き出しの自動消滅を止めるため */
       tabIndex={0}
     >
       <span className="actor-bubble-tail" aria-hidden="true" />
@@ -314,7 +339,7 @@ function StageBubbleView({
             <span
               className="actor-bubble-character"
               data-typing-visible={index < visibleCharacterCount}
-              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えが発生しないリストで、要素値が重複しうるためindexをkeyに含めるのが正しい */
+              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えがなく、文字は重複しうる */
               key={`${index}:${character}`}
               style={{
                 visibility:
@@ -340,7 +365,7 @@ function StageBubbleView({
           {visibleChoices.map((label, index) => (
             <button
               className="actor-bubble-choice"
-              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えが発生しないリストで、要素値が重複しうるためindexをkeyに含めるのが正しい */
+              /* biome-ignore lint/suspicious/noArrayIndexKey: 並び替えがなく、ラベルは重複しうる */
               key={`${choice.choiceId}:${index}`}
               onClick={(event) => {
                 event.stopPropagation();
@@ -414,7 +439,7 @@ function useMeasuredBubbleSize(
 
     const update = () => {
       const rect = element.getBoundingClientRect();
-      if (rect.width <= 0 && rect.height <= 0) return;
+      if (rect.width <= 0 || rect.height <= 0) return;
       onSizeChange(bubbleId, {
         width: Math.max(rect.width, 1),
         height: Math.max(rect.height, 1),
@@ -447,69 +472,60 @@ function useBubbleExpiry({
   useEffect(() => {
     const timers: number[] = [];
     const now = Date.now();
+
     for (const bubble of bubbles) {
-      if (interactingBubbleIds.has(bubble.bubbleId)) {
-        timers.push(window.setTimeout(onTick, 500));
-        continue;
-      }
+      if (interactingBubbleIds.has(bubble.bubbleId)) continue;
       const expiry = Math.max(
         bubble.createdAtMs + bubble.durationMs,
         deferUntil[bubble.bubbleId] ?? 0,
       );
       const delay = expiry - now;
       if (delay <= 0) {
-        void client.dismissStageBubble(bubble.bubbleId).catch((error) => {
-          console.warn("Failed to dismiss stage bubble", error);
-        });
-      } else {
-        timers.push(window.setTimeout(onTick, Math.min(delay, 1000)));
+        void client.dismissStageBubble(bubble.bubbleId);
+        continue;
       }
+      timers.push(
+        window.setTimeout(() => {
+          void client.dismissStageBubble(bubble.bubbleId);
+          onTick();
+        }, delay),
+      );
     }
+
     return () => {
-      for (const timer of timers) {
-        window.clearTimeout(timer);
-      }
+      for (const timer of timers) window.clearTimeout(timer);
     };
   }, [bubbles, client, deferUntil, interactingBubbleIds, onTick]);
 }
 
-function useStageOverlayHitTesting(
+function useBubbleSurfaceHitTesting(
   client: YuukeiClient,
   activeInteractiveCount: number,
 ) {
   useEffect(() => {
+    if (activeInteractiveCount === 0) {
+      void client.setBubbleSurfaceClickThrough(true);
+      return;
+    }
     let disposed = false;
     let lastPassthrough: boolean | null = null;
-
-    async function update() {
-      const solid =
-        activeInteractiveCount > 0 && (await pointerHitsStageSolid());
-      const passthrough = stageOverlayPassthrough(solid);
-      if (!disposed && lastPassthrough !== passthrough) {
-        lastPassthrough = passthrough;
-        await client.setStageOverlayClickThrough(passthrough);
-      }
-    }
-
-    void update().catch(() => undefined);
-    const interval = window.setInterval(() => {
-      void update().catch(() => undefined);
-    }, 80);
+    const update = async () => {
+      const passthrough = !(await pointerHitsBubbleSolid());
+      if (disposed || passthrough === lastPassthrough) return;
+      lastPassthrough = passthrough;
+      await client.setBubbleSurfaceClickThrough(passthrough);
+    };
+    void update();
+    const interval = window.setInterval(() => void update(), 50);
     return () => {
       disposed = true;
       window.clearInterval(interval);
-      void client.setStageOverlayClickThrough(true);
+      void client.setBubbleSurfaceClickThrough(true);
     };
   }, [activeInteractiveCount, client]);
 }
 
-export function stageOverlayPassthrough(
-  pointerHitsInteractiveContent: boolean,
-): boolean {
-  return !pointerHitsInteractiveContent;
-}
-
-async function pointerHitsStageSolid(): Promise<boolean> {
+async function pointerHitsBubbleSolid(): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   const windowHandle = getCurrentWindow();
   const [cursor, outerPosition, innerSize] = await Promise.all([
@@ -529,60 +545,68 @@ async function pointerHitsStageSolid(): Promise<boolean> {
   ) {
     return false;
   }
-
   return Boolean(
     document
       .elementFromPoint(clientX, clientY)
-      ?.closest("[data-stage-solid='true']"),
+      ?.closest("[data-bubble-solid='true']"),
   );
 }
 
-function computeRenderItems(
+function computeRenderItem(
   stageState: DesktopStageState | null,
-  monitor: StageMonitor | null,
-  bubbleSizes: Record<string, StageBubbleSize>,
-): StageBubbleRenderItem[] {
-  if (!stageState || !monitor) return [];
-  const viewport = {
-    width: Math.max(monitor.bounds.width, 1),
-    height: Math.max(monitor.bounds.height, 1),
-  };
-  const actorsById = new Map(
-    stageState.actors.map((actor) => [actor.actorId, actor]),
+  actorId: string | null | undefined,
+  measuredBubble: MeasuredBubble | null,
+): BubbleRenderItem | null {
+  if (!stageState || !actorId) return null;
+  const actor = stageState.actors.find(
+    (candidate) => candidate.actorId === actorId && candidate.visible,
   );
+  const bubble = stageState.bubbles.find(
+    (candidate) => candidate.actorId === actorId,
+  );
+  if (!actor || !bubble) return null;
+  const monitor = selectMonitor(stageState.monitors, actor.bounds);
+  if (!monitor) return null;
+
   const monitorBounds = toLayoutRect(monitor.bounds);
+  const anchor = localAnchorForActor(actor, monitor.bounds);
   const actorObstacles = stageState.actors
     .filter(
-      (actor) =>
-        actor.visible &&
-        intersectsViewport(toLayoutRect(actor.bounds), monitorBounds),
+      (candidate) =>
+        candidate.visible &&
+        intersectsViewport(toLayoutRect(candidate.bounds), monitorBounds),
     )
-    .map((actor) => localRect(toLayoutRect(actor.bounds), monitorBounds));
-  const occupied: StageRect[] = [...actorObstacles];
-  const items: StageBubbleRenderItem[] = [];
-
-  for (const bubble of [...stageState.bubbles].sort(
-    (a, b) => a.createdAtMs - b.createdAtMs,
-  )) {
-    const actor = actorsById.get(bubble.actorId);
-    if (
-      !actor?.visible ||
-      !intersectsViewport(toLayoutRect(actor.bounds), monitorBounds)
-    ) {
-      continue;
-    }
-    const anchor = localAnchorForActor(actor, monitor.bounds);
-    const placement = computeStageBubblePlacement(
-      anchor,
-      viewport,
-      bubbleSizes[bubble.bubbleId] ?? DEFAULT_BUBBLE_SIZE,
-      occupied,
+    .map((candidate) =>
+      localRect(toLayoutRect(candidate.bounds), monitorBounds),
     );
-    occupied.push(placement.rect);
-    items.push({ actor, bubble, placement });
-  }
+  const size =
+    measuredBubble?.bubbleId === bubble.bubbleId
+      ? measuredBubble
+      : DEFAULT_BUBBLE_SIZE;
+  const placement = computeStageBubblePlacement(
+    anchor,
+    {
+      width: Math.max(monitor.bounds.width, 1),
+      height: Math.max(monitor.bounds.height, 1),
+    },
+    size,
+    actorObstacles,
+  );
+  return { actor, bubble, monitor, placement };
+}
 
-  return items;
+function selectMonitor(
+  monitors: StageMonitor[],
+  actorBounds: ClientStageRect,
+): StageMonitor | null {
+  const actorRect = toLayoutRect(actorBounds);
+  return (
+    [...monitors].sort(
+      (a, b) =>
+        rectOverlapArea(actorRect, toLayoutRect(b.bounds)) -
+        rectOverlapArea(actorRect, toLayoutRect(a.bounds)),
+    )[0] ?? null
+  );
 }
 
 function localAnchorForActor(actor: StageActor, origin: ClientStageRect) {
@@ -598,18 +622,6 @@ function localAnchorForActor(actor: StageActor, origin: ClientStageRect) {
     y: actor.bounds.y - origin.y + actor.bounds.height * 0.28,
     visible: true,
   };
-}
-
-function selectMonitor(
-  stageState: DesktopStageState | null,
-  monitorId: string | null | undefined,
-): StageMonitor | null {
-  if (!stageState) return null;
-  return (
-    stageState.monitors.find((monitor) => monitor.id === monitorId) ??
-    stageState.monitors[0] ??
-    null
-  );
 }
 
 function toLayoutRect(rect: ClientStageRect): StageRect {

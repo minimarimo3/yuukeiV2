@@ -12,6 +12,15 @@ fn actor_window_labels_hex_encode_actor_ids() {
 }
 
 #[test]
+fn bubble_surface_window_labels_hex_encode_actor_ids() {
+    assert_eq!(bubble_surface_window_label("yuukei"), "bubble-7975756b6569");
+    assert_eq!(
+        bubble_surface_window_label("actor/with/slash"),
+        "bubble-6163746f722f776974682f736c617368"
+    );
+}
+
+#[test]
 fn actor_window_specs_include_only_renderable_actors() {
     let catalog = test_catalog(vec![
         test_actor("yuukei", true),
@@ -61,7 +70,6 @@ fn actor_window_reconcile_closes_stale_and_creates_missing_windows() {
 fn actor_placement_avoids_existing_bounds_when_space_allows() {
     let monitors = vec![StageMonitor {
         id: "monitor-0".to_string(),
-        label: stage_overlay_window_label(0),
         name: None,
         bounds: StageRect {
             x: 0.0,
@@ -404,7 +412,6 @@ fn beginning_user_drag_releases_perch_with_user_drag_reason() {
 fn stage_walk_targets_current_monitor_edge_without_changing_vertical_position() {
     let monitors = vec![StageMonitor {
         id: "secondary".to_string(),
-        label: "stage-overlay-secondary".to_string(),
         name: None,
         bounds: StageRect {
             x: 1_000.0,
@@ -1240,7 +1247,6 @@ fn test_actor(actor_id: &str, renderable: bool) -> crate::DesktopActorSurfaceAss
 fn test_monitor(width: f64, height: f64) -> StageMonitor {
     StageMonitor {
         id: "monitor-0".to_string(),
-        label: stage_overlay_window_label(0),
         name: None,
         bounds: StageRect {
             x: 0.0,
