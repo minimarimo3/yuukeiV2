@@ -2,10 +2,7 @@ use tauri::WebviewWindow;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Shell::{
-    DefSubclassProc, RemoveWindowSubclass, SHAppBarMessage, SetWindowSubclass, ABE_BOTTOM,
-    ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX, APPBARDATA,
-};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
     GWL_STYLE, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
@@ -22,34 +19,6 @@ const CAPTION_STYLE_MASK: u32 =
     WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
 
 const TASKBAR_WINDOW_CLASSES: [&str; 2] = ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
-
-pub(super) fn auto_hide_taskbar_edges(
-    monitor: super::windows::PhysicalStageBounds,
-) -> super::windows::AutoHideTaskbarEdges {
-    unsafe {
-        super::windows::AutoHideTaskbarEdges {
-            left: has_auto_hide_appbar(monitor, ABE_LEFT),
-            top: has_auto_hide_appbar(monitor, ABE_TOP),
-            right: has_auto_hide_appbar(monitor, ABE_RIGHT),
-            bottom: has_auto_hide_appbar(monitor, ABE_BOTTOM),
-        }
-    }
-}
-
-unsafe fn has_auto_hide_appbar(monitor: super::windows::PhysicalStageBounds, edge: u32) -> bool {
-    let mut data = APPBARDATA {
-        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-        uEdge: edge,
-        rc: windows::Win32::Foundation::RECT {
-            left: monitor.x,
-            top: monitor.y,
-            right: monitor.right(),
-            bottom: monitor.bottom(),
-        },
-        ..APPBARDATA::default()
-    };
-    SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut data) != 0
-}
 
 /// Install a subclass that stops the native caption from flashing on activation
 /// and style changes. See [`super::enforce_borderless`] for the full rationale.
@@ -80,6 +49,11 @@ pub(super) fn suppress_activation_flicker(window: &WebviewWindow) {
 /// insertion target: doing so can demote the taskbar on this window's monitor
 /// and prevent its auto-hide reveal gesture. The caller already owns the window
 /// thread.
+///
+/// A hidden auto-hide taskbar is normally non-topmost. It must not be used as
+/// the insertion target because Windows would demote the Yuukei window from the
+/// topmost band. The monitor-sized stage leaves a physical edge strip free, so
+/// Explorer can reveal the taskbar and promote it to the topmost band first.
 unsafe fn place_behind_shell_taskbars(hwnd: HWND) {
     let Some(taskbar) = shell_taskbar_insert_after(hwnd) else {
         return;

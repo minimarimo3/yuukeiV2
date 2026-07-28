@@ -34,17 +34,16 @@ pub fn stage_overlay_window_label(index: usize) -> String {
     format!("{STAGE_OVERLAY_LABEL_PREFIX}{index}")
 }
 
-// Auto-hidden Windows taskbars keep a two-physical-pixel reveal strip inside
-// the monitor even though the reported work area spans the whole monitor.
-const AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX: u32 = 2;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct AutoHideTaskbarEdges {
-    pub(super) left: bool,
-    pub(super) top: bool,
-    pub(super) right: bool,
-    pub(super) bottom: bool,
-}
+// Keep the physical screen edge free for Explorer's auto-hide reveal gesture.
+//
+// `ABM_GETAUTOHIDEBAREX` is not a reliable detector for the Windows 11
+// taskbar: some Explorer builds report `ABS_AUTOHIDE` through `ABM_GETSTATE`
+// while returning no registered auto-hide AppBar for every monitor edge. A
+// topmost stage HWND that reaches the physical edge then prevents Explorer
+// from seeing the reveal gesture. Reserving every exposed monitor edge is
+// deterministic, independent of taskbar registration state, and costs only an
+// invisible two-pixel strip around the transparent stage.
+const SHELL_REVEAL_EDGE_RESERVE_PX: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PhysicalStageBounds {
@@ -75,48 +74,58 @@ impl PhysicalStageBounds {
     }
 }
 
-fn reserve_auto_hide_taskbar_edges(
+fn reserve_shell_reveal_edges(
     mut work_area: PhysicalStageBounds,
     monitor: PhysicalStageBounds,
-    edges: AutoHideTaskbarEdges,
 ) -> PhysicalStageBounds {
-    let touches_left = work_area.x == monitor.x;
-    let touches_top = work_area.y == monitor.y;
-    let touches_right = work_area.right() == monitor.right();
-    let touches_bottom = work_area.bottom() == monitor.bottom();
+    let reserve_px = SHELL_REVEAL_EDGE_RESERVE_PX as i32;
+    let min_left = monitor.x.saturating_add(reserve_px);
+    let min_top = monitor.y.saturating_add(reserve_px);
+    let max_right = monitor.right().saturating_sub(reserve_px);
+    let max_bottom = monitor.bottom().saturating_sub(reserve_px);
 
-    if edges.left && touches_left {
-        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.width.saturating_sub(1));
+    let reserve = min_left
+        .saturating_sub(work_area.x)
+        .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .min(work_area.width.saturating_sub(1));
+    if reserve > 0 {
         work_area.x = work_area.x.saturating_add(reserve as i32);
         work_area.width -= reserve;
     }
-    if edges.top && touches_top {
-        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.height.saturating_sub(1));
+    let reserve = min_top
+        .saturating_sub(work_area.y)
+        .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .min(work_area.height.saturating_sub(1));
+    if reserve > 0 {
         work_area.y = work_area.y.saturating_add(reserve as i32);
         work_area.height -= reserve;
     }
-    if edges.right && touches_right {
-        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.width.saturating_sub(1));
+    let reserve = work_area
+        .right()
+        .saturating_sub(max_right)
+        .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .min(work_area.width.saturating_sub(1));
+    if reserve > 0 {
         work_area.width -= reserve;
     }
-    if edges.bottom && touches_bottom {
-        let reserve = AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX.min(work_area.height.saturating_sub(1));
+    let reserve = work_area
+        .bottom()
+        .saturating_sub(max_bottom)
+        .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+        .min(work_area.height.saturating_sub(1));
+    if reserve > 0 {
         work_area.height -= reserve;
     }
 
     work_area
-}
-
-fn auto_hide_taskbar_edges(monitor: PhysicalStageBounds) -> AutoHideTaskbarEdges {
-    #[cfg(windows)]
-    {
-        windows_caption::auto_hide_taskbar_edges(monitor)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = monitor;
-        AutoHideTaskbarEdges::default()
-    }
 }
 
 pub(super) fn monitor_snapshots(app: &AppHandle) -> Result<Vec<StageMonitor>, String> {
@@ -141,27 +150,29 @@ pub(super) fn monitor_snapshots(app: &AppHandle) -> Result<Vec<StageMonitor>, St
         .map(|(index, monitor)| {
             let scale_factor = usable_scale_factor(monitor.scale_factor());
             let work_area = monitor.work_area();
+            #[cfg(windows)]
             let monitor_position = monitor.position();
+            #[cfg(windows)]
             let monitor_size = monitor.size();
+            #[cfg(windows)]
             let physical_monitor = PhysicalStageBounds::new(
                 monitor_position.x,
                 monitor_position.y,
                 monitor_size.width,
                 monitor_size.height,
             );
-            // Leave the Shell-owned reveal strip outside every topmost stage
-            // window. Click-through alone does not remove an HWND from AppBar
-            // edge handling while another application is fullscreen.
-            let physical_work_area = reserve_auto_hide_taskbar_edges(
-                PhysicalStageBounds::new(
-                    work_area.position.x,
-                    work_area.position.y,
-                    work_area.size.width,
-                    work_area.size.height,
-                ),
-                physical_monitor,
-                auto_hide_taskbar_edges(physical_monitor),
+            let physical_work_area = PhysicalStageBounds::new(
+                work_area.position.x,
+                work_area.position.y,
+                work_area.size.width,
+                work_area.size.height,
             );
+            // Leave the Shell-owned reveal strip outside every topmost stage
+            // window on Windows. Click-through alone does not remove an HWND
+            // from Explorer's AppBar edge handling.
+            #[cfg(windows)]
+            let physical_work_area =
+                reserve_shell_reveal_edges(physical_work_area, physical_monitor);
             StageMonitor {
                 id: format!("monitor-{index}"),
                 label: stage_overlay_window_label(index),
@@ -264,70 +275,54 @@ pub(crate) fn enforce_borderless(window: &WebviewWindow) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        reserve_auto_hide_taskbar_edges, AutoHideTaskbarEdges, PhysicalStageBounds,
-        AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX,
-    };
+    use super::{reserve_shell_reveal_edges, PhysicalStageBounds, SHELL_REVEAL_EDGE_RESERVE_PX};
 
     #[test]
-    fn reserves_bottom_edge_when_auto_hide_taskbar_uses_full_work_area() {
+    fn reserves_every_edge_when_work_area_fills_the_monitor() {
         let monitor = PhysicalStageBounds::new(0, 0, 1920, 1080);
         let work_area = monitor;
 
-        let reserved = reserve_auto_hide_taskbar_edges(
-            work_area,
-            monitor,
-            AutoHideTaskbarEdges {
-                bottom: true,
-                ..AutoHideTaskbarEdges::default()
-            },
-        );
+        let reserved = reserve_shell_reveal_edges(work_area, monitor);
 
-        assert_eq!(reserved.x, 0);
-        assert_eq!(reserved.y, 0);
-        assert_eq!(reserved.width, 1920);
-        assert_eq!(reserved.height, 1080 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX);
+        assert_eq!(reserved.x, SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.y, SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.width, 1920 - SHELL_REVEAL_EDGE_RESERVE_PX * 2);
+        assert_eq!(reserved.height, 1080 - SHELL_REVEAL_EDGE_RESERVE_PX * 2);
     }
 
     #[test]
-    fn does_not_double_reserve_an_edge_already_excluded_from_work_area() {
+    fn does_not_reserve_an_edge_already_excluded_from_work_area() {
         let monitor = PhysicalStageBounds::new(0, 0, 1920, 1080);
         let work_area = PhysicalStageBounds::new(0, 0, 1920, 1078);
 
-        let reserved = reserve_auto_hide_taskbar_edges(
-            work_area,
-            monitor,
-            AutoHideTaskbarEdges {
-                bottom: true,
-                ..AutoHideTaskbarEdges::default()
-            },
-        );
+        let reserved = reserve_shell_reveal_edges(work_area, monitor);
 
-        assert_eq!(reserved, work_area);
+        assert_eq!(reserved.x, SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.y, SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.width, 1920 - SHELL_REVEAL_EDGE_RESERVE_PX * 2);
+        assert_eq!(reserved.height, 1078 - SHELL_REVEAL_EDGE_RESERVE_PX);
     }
 
     #[test]
-    fn reserves_each_reported_edge_without_moving_unrelated_edges() {
+    fn extends_partial_edge_clearance_to_the_required_reserve() {
+        let monitor = PhysicalStageBounds::new(0, 0, 1920, 1080);
+        let work_area = PhysicalStageBounds::new(1, 1, 1918, 1078);
+
+        let reserved = reserve_shell_reveal_edges(work_area, monitor);
+
+        assert_eq!(reserved, PhysicalStageBounds::new(2, 2, 1916, 1076));
+    }
+
+    #[test]
+    fn reserves_negative_origin_monitor_edges() {
         let monitor = PhysicalStageBounds::new(-1920, 6, 1920, 1080);
         let work_area = monitor;
 
-        let reserved = reserve_auto_hide_taskbar_edges(
-            work_area,
-            monitor,
-            AutoHideTaskbarEdges {
-                left: true,
-                top: true,
-                right: true,
-                bottom: true,
-            },
-        );
+        let reserved = reserve_shell_reveal_edges(work_area, monitor);
 
-        assert_eq!(reserved.x, -1920 + AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX as i32);
-        assert_eq!(reserved.y, 6 + AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX as i32);
-        assert_eq!(reserved.width, 1920 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX * 2);
-        assert_eq!(
-            reserved.height,
-            1080 - AUTO_HIDE_TASKBAR_EDGE_RESERVE_PX * 2
-        );
+        assert_eq!(reserved.x, -1920 + SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.y, 6 + SHELL_REVEAL_EDGE_RESERVE_PX as i32);
+        assert_eq!(reserved.width, 1920 - SHELL_REVEAL_EDGE_RESERVE_PX * 2);
+        assert_eq!(reserved.height, 1080 - SHELL_REVEAL_EDGE_RESERVE_PX * 2);
     }
 }
