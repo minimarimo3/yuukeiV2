@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -265,82 +265,6 @@ describe("StageOverlayApp", () => {
       screen.queryByRole("button", { name: "見る" }),
     ).not.toBeInTheDocument();
   });
-
-  it("renders the conversation composer and sends text through the existing client path", async () => {
-    const state = stageState();
-    state.conversationComposer = {
-      actorId: "yuukei",
-      monitorId: "monitor-0",
-      anchor: { x: 450, y: 190, visible: true },
-    };
-    const client = clientFixture(state);
-    const user = userEvent.setup();
-
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
-
-    const input = await screen.findByRole("textbox", {
-      name: "住人に話しかける",
-    });
-    await user.type(input, "こんにちは{Control>}{Enter}{/Control}");
-
-    await waitFor(() => {
-      expect(client.sendConversationText).toHaveBeenCalledWith("こんにちは");
-      expect(client.closeConversationComposer).toHaveBeenCalled();
-    });
-    expect(client.setStageOverlayClickThrough).toHaveBeenCalled();
-  });
-
-  it("does not render a composer belonging to another monitor", async () => {
-    const state = stageState();
-    state.conversationComposer = {
-      actorId: "yuukei",
-      monitorId: "monitor-other",
-      anchor: { x: 2450, y: 190, visible: true },
-    };
-
-    render(
-      <StageOverlayApp client={clientFixture(state)} monitorId="monitor-0" />,
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("textbox", { name: "住人に話しかける" }),
-      ).not.toBeInTheDocument();
-    });
-  });
-
-  it("refreshes the send shortcut when a composer opens", async () => {
-    const state = stageState();
-    state.conversationComposer = {
-      actorId: "yuukei",
-      monitorId: "monitor-0",
-      anchor: { x: 450, y: 190, visible: true },
-    };
-    const client = clientFixture(state);
-    let publishSettings:
-      | ((
-          settings: Awaited<ReturnType<YuukeiClient["getAppSettings"]>>,
-        ) => void)
-      | undefined;
-    client.onAppSettings = vi.fn(async (callback) => {
-      publishSettings = callback;
-      return () => undefined;
-    });
-
-    render(<StageOverlayApp client={client} monitorId="monitor-0" />);
-
-    expect(await screen.findByText("Ctrl+Enterで送信")).toBeInTheDocument();
-    act(() => {
-      publishSettings?.({
-        talkIntervalMinutes: 5,
-        actorScalePercent: 100,
-        conversationSendShortcut: "shiftEnter",
-        settingsPath: "/tmp/yuukei-v2/settings/app.json",
-      });
-    });
-
-    expect(await screen.findByText("Shift+Enterで送信")).toBeInTheDocument();
-  });
 });
 
 function clientFixture(stage: DesktopStageState): YuukeiClient {
@@ -352,7 +276,6 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     getAppSettings: vi.fn(async () => ({
       talkIntervalMinutes: 5,
       actorScalePercent: 100,
-      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
     getExtensionSettings: vi.fn(),
@@ -365,9 +288,6 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(),
-    openConversationComposer: vi.fn(),
-    closeConversationComposer: vi.fn(async () => undefined),
-    sendConversationText: vi.fn(),
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(),
     beginActorWindowDrag: vi.fn(),
@@ -386,16 +306,13 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     setAppTalkIntervalMinutes: vi.fn(async (minutes: number) => ({
       talkIntervalMinutes: minutes,
       actorScalePercent: 100,
-      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
     setAppActorScalePercent: vi.fn(async (percent: number) => ({
       talkIntervalMinutes: 5,
       actorScalePercent: percent,
-      conversationSendShortcut: "ctrlEnter" as const,
       settingsPath: "/tmp/yuukei-v2/settings/app.json",
     })),
-    setAppConversationSendShortcut: vi.fn(),
     setExtensionHookOrder: vi.fn(),
     setExtensionSettingValues: vi.fn(),
     setExtensionSecret: vi.fn(),

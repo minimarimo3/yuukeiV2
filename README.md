@@ -57,11 +57,10 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 
 CLI Surfaceは番号入力の状態機械REPLであり、手動確認にもパイプ入力による機械的テストにも同じ経路で使える(仕様は [03-protocols.md](03-protocols.md) の「CLI Surfaceの番号入力状態機械」)。メニューとプロンプトはstderr、実行結果はstdoutに出る。GUIと同じcanonical signalを同じCore入口へ送るため、GUIで起きた不具合がCLIでも再現すればCore側、しなければSurface側と切り分けられる。
 
-- `printf '4\nこんにちは\n0\n' | cargo run -p yuukei-cli-surface`: `conversation.text` を送り、発行された `RuntimeCommand` を出力する。
 - `printf '1\n2\n1\n0\n' | cargo run -p yuukei-cli-surface`: yuukeiの頭を撫でる(`avatar.gesture.poke`。アクターとヒットゾーンの番号はID辞書順)。
 - `printf '5\n0\n' | cargo run -p yuukei-cli-surface`: `ResidentSnapshot` を出力する。
 - `printf '9\n1\ntarget/events.jsonl\n0\n' | cargo run -p yuukei-cli-surface`: canonical event logをJSONLで書き出す。
-- `printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface`: ローカルExtensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
+- `printf '8\n1\npackages/yuukei-intelligence/dist/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface`: 配布用に生成済みのローカルIntelligence Extensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
 - `YUUKEI_CLI_OUTPUT=jsonl` を付けるとRuntimeCommandを1行1JSONで出力する。presence loop(生活時計)は既定で起動せず、`YUUKEI_CLI_PRESENCE=1` で有効化する。
 
 アプリ動作ログは `YUUKEI_DATA_DIR` が指定されていればその中、未指定ならOSの一時ディレクトリ配下の `yuukei-v2/app-activity.jsonl` に保存する。canonical event logは同じデータディレクトリの `events.sqlite3` に保存する。
@@ -123,30 +122,12 @@ Extensionは信頼したローカルコードとして実行する。YuukeiはCo
 
 ### Official Default Extension: yuukei-intelligence
 
-`packages/yuukei-intelligence` は `dialogue.generate` と `dialogue.interpret` を提供する公式Default Extensionで、Daihonが一致しなかった余白イベントに対する発話案の生成と、Daihon scene内の曖昧な入力の選択肢判定を行う。`printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface` でこのフォルダをインストールすると、`YUUKEI_DATA_DIR/extensions/yuukei-intelligence/` へコピーされ、Device Host起動時にmanifestのcapability提供がResident Homeへ登録される。
+`packages/yuukei-intelligence` はRust製の公式Default Extensionで、`dialogue.generate`、`dialogue.interpret`、`dialogue.extract` などを提供する。Daihonが明示した生成指示によるセリフ補完と、Daihon場面内で受け取った曖昧な入力の分類・抽出が役割であり、常設チャットや汎用アシスタントには使わない。
 
-LM StudioなどのOpenAI互換APIを使う場合は、ローカルサーバーを `http://127.0.0.1:1234/v1` で起動し、必要に応じて `OPENAI_COMPATIBLE_MODEL` またはmanifest内の `config.openaiCompatible.model` を設定する。ChatGPT互換の別endpointを使う場合も `openai-compatible` providerの `baseUrl`、`apiKey`、`model` を差し替えるだけでよい。
+実行時にNode.js、Python、外部AI API、モデル設定画面は必要ない。配布パッケージにはLiteRT-LMのWindowsランタイムと `gemma-4-E4B-it.litertlm` を同梱し、Extensionプロセスを常駐させてモデルを一度だけロードする。
 
-Geminiを使う場合は、`YUUKEI_INTELLIGENCE_PROVIDER=gemini` と `GEMINI_API_KEY` を設定する。モデルは既定で `gemini-2.5-flash`、必要なら `GEMINI_MODEL` またはmanifest内の `config.gemini.model` で変更できる。
-
-Extensionをインストールした同じ `YUUKEI_DATA_DIR` で、以下のようにCLIから `conversation.text` を送ると、World Packの `llmDelegation` とDaihon不一致条件を満たした場合だけ `dialogue.generate` が呼ばれる。
-
-```sh
-printf '4\nこんにちは\n0\n' | \
-  YUUKEI_DATA_DIR=/path/to/yuukei-data \
-  OPENAI_COMPATIBLE_MODEL=local-model \
-  cargo run -p yuukei-cli-surface
+```powershell
+pnpm --dir packages/yuukei-intelligence package:windows
 ```
 
-`dialogue.interpret` の手動確認には `packs/demo-interpret` を使える。このPackはCLI起動時に「今日はお出かけの日だよね！」と聞き、同じREPLセッション内の会話入力を `はい/いいえ/不明` に解釈してDaihonへ戻す。
-
-```sh
-export YUUKEI_DATA_DIR=/tmp/yuukei-interpret-demo
-printf '8\n1\npackages/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface
-printf '7\n1\npacks/demo-interpret\n0\n' | cargo run -p yuukei-cli-surface
-printf '4\nあ〜うん。いやちょっと忙しくて...\n0\n' | \
-  OPENAI_COMPATIBLE_BASE_URL=http://127.0.0.1:1234/v1 \
-  OPENAI_COMPATIBLE_MODEL=local-model \
-  cargo run -p yuukei-cli-surface
-printf '7\n2\n0\n0\n' | cargo run -p yuukei-cli-surface
-```
+生成物は `packages/yuukei-intelligence/dist/yuukei-intelligence/` に置かれる。開発時だけ、パッケージスクリプトの `-ModelPath` または `YUUKEI_INTELLIGENCE_MODEL_SOURCE` で入力モデルを変更できる。インストール後の利用者向けモデル選択設定は設けない。

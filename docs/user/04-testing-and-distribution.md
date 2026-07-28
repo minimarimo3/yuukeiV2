@@ -61,7 +61,7 @@ pnpm dev:cli
 | `1` | 撫でる・つつく | `avatar.gesture.poke` |
 | `2` | つまむ | `avatar.gesture.grab` |
 | `3` | おろす | `avatar.gesture.drop` |
-| `4` | 話しかける | `conversation.text` |
+| `4` | 予約済み | 常設チャット廃止後の欠番 |
 | `5` | 状態を見る | `ResidentSnapshot`を表示 |
 | `6` | command履歴 | 発行済みcommandを表示 |
 | `7` | World Pack | 選択、リセット、状態表示 |
@@ -578,4 +578,3 @@ World PackとExtensionを同梱配布する場合も、別フォルダ・別導�
 - [ ] ソースまたは信頼検証手段を提供した。
 
 設計上の判断に迷った場合は、[ユーザー・作者ガイドの入口](README.md)の選び分け表と、[Architecture](../../02-architecture.md)を確認してください。
-

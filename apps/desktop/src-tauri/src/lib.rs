@@ -21,13 +21,13 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tokio::sync::Mutex;
 use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
-    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, ConversationSendShortcut,
-    DesktopFolderObservationState, DesktopWindowObservationState, EventLogDeleteResult,
-    EventLogPrivacyCategoryFilter, ExtensionSettingsChangeResult, ExtensionSettingsState,
-    LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
-    ObservationSettingsUpdate, OnboardingState, ResidentEventLogPage, RuntimeSettingsState,
-    RuntimeSettingsUpdate, SceneHistoryState, StageSettingsRegistry, WorldPackSelectionState,
-    WorldPackSwitchResult, WorldPackZipInspection, TAURI_SURFACE_ID,
+    AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
+    DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
+    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
+    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
+    ResidentEventLogPage, RuntimeSettingsState, RuntimeSettingsUpdate, SceneHistoryState,
+    StageSettingsRegistry, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
+    TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -531,42 +531,6 @@ fn open_settings_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_conversation_composer(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    actor_id: String,
-) -> Result<(), String> {
-    state.stage.open_conversation_composer(&app, &actor_id)
-}
-
-#[tauri::command]
-fn close_conversation_composer(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.stage.close_conversation_composer(&app)
-}
-
-#[tauri::command]
-async fn send_conversation_text(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    text: String,
-) -> Result<Vec<RuntimeCommand>, String> {
-    let runtime = state.runtime.lock().await.clone();
-    let commands = match runtime
-        .send_conversation_text(TAURI_SURFACE_ID, &text)
-        .await
-    {
-        Ok(commands) => commands,
-        Err(error) => {
-            emit_world_pack_status(&app, &runtime.world_pack_status())?;
-            return Err(to_message(error));
-        }
-    };
-    let snapshot = runtime.snapshot().map_err(to_message)?;
-    app.emit("yuukei-snapshot", &snapshot).map_err(to_message)?;
-    Ok(commands)
-}
-
-#[tauri::command]
 async fn send_conversation_choice(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -894,20 +858,6 @@ async fn set_app_actor_scale_percent(
 }
 
 #[tauri::command]
-async fn set_app_conversation_send_shortcut(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    shortcut: ConversationSendShortcut,
-) -> Result<AppSettingsState, String> {
-    let settings =
-        LocalYuukeiRuntime::set_app_conversation_send_shortcut_in(state.env.clone(), shortcut)
-            .map_err(to_message)?;
-    app.emit("yuukei-app-settings", &settings)
-        .map_err(to_message)?;
-    Ok(settings)
-}
-
-#[tauri::command]
 async fn set_runtime_settings(
     state: State<'_, AppState>,
     settings: RuntimeSettingsUpdate,
@@ -1034,18 +984,6 @@ pub fn run() {
                 }
                 return;
             }
-            if desktop_stage::is_stage_overlay_label(window.label())
-                && matches!(event, WindowEvent::Focused(false))
-            {
-                let app_handle = window.app_handle().clone();
-                let state = app_handle.state::<AppState>();
-                if let Err(error) = state
-                    .stage
-                    .close_conversation_composer_for_overlay(&app_handle, window.label())
-                {
-                    eprintln!("Yuukei conversation composer blur error: {error}");
-                }
-            }
             if desktop_stage::is_actor_window_label(window.label())
                 && matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
             {
@@ -1105,9 +1043,6 @@ pub fn run() {
             report_actor_stage_anchor,
             dismiss_stage_bubble,
             open_settings_window,
-            open_conversation_composer,
-            close_conversation_composer,
-            send_conversation_text,
             send_conversation_choice,
             send_avatar_gesture_poke,
             begin_actor_window_drag,
@@ -1129,7 +1064,6 @@ pub fn run() {
             restart_extension_process,
             set_app_talk_interval_minutes,
             set_app_actor_scale_percent,
-            set_app_conversation_send_shortcut,
             set_runtime_settings,
             reset_scene_history,
             get_startup_error

@@ -11,8 +11,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::{
-    io::AsyncWriteExt,
-    process::Command,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::Mutex as AsyncMutex,
     time::{timeout, Duration},
 };
 use yuukei_capability::{CapabilityProvider, CapabilityResult, ProviderRegistration};
@@ -765,8 +766,37 @@ pub struct ProcessCommandSpec {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub mode: ProcessCommunicationMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessCommunicationMode {
+    #[default]
+    OneShot,
+    PersistentJsonl,
+}
+
+#[derive(Clone, Default)]
+struct PersistentProcessHandle {
+    process: Arc<AsyncMutex<Option<PersistentProcess>>>,
+}
+
+struct PersistentProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for PersistentProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
 }
 
 #[derive(Clone)]
@@ -777,6 +807,7 @@ pub struct ProcessHookExtension {
     settings_json: Option<String>,
     enabled: bool,
     runtime_supervisor: ProcessRuntimeSupervisor,
+    persistent_process: PersistentProcessHandle,
 }
 
 impl ProcessHookExtension {
@@ -788,6 +819,7 @@ impl ProcessHookExtension {
             settings_json: None,
             enabled: true,
             runtime_supervisor: ProcessRuntimeSupervisor::new(),
+            persistent_process: PersistentProcessHandle::default(),
         }
     }
 
@@ -803,6 +835,7 @@ impl ProcessHookExtension {
             settings_json: None,
             enabled,
             runtime_supervisor: ProcessRuntimeSupervisor::new(),
+            persistent_process: PersistentProcessHandle::default(),
         }
     }
 
@@ -929,6 +962,7 @@ impl ProcessHookExtension {
                     Ok(result)
                 }
                 Err(error) => {
+                    self.terminate_persistent_process().await;
                     Err(self
                         .record_process_failure(ProcessFailureKind::InvalidJson, error.to_string()))
                 }
@@ -941,24 +975,21 @@ impl ProcessHookExtension {
     where
         T: Serialize + ?Sized,
     {
-        let command_path = self.resolved_command_path();
-        let mut command = Command::new(command_path);
-        command.args(&self.manifest.process.args);
-        command.kill_on_drop(true);
-        if let Some(data_dir) = &self.data_dir {
-            command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        match self.manifest.process.mode {
+            ProcessCommunicationMode::OneShot => self.execute_one_shot_process(invocation).await,
+            ProcessCommunicationMode::PersistentJsonl => {
+                self.execute_persistent_process(invocation).await
+            }
         }
-        if let Some(settings_json) = &self.settings_json {
-            command.env("YUUKEI_EXTENSION_SETTINGS_JSON", settings_json);
-        }
-        if let Some(cwd) = self.resolved_cwd() {
-            command.current_dir(cwd);
-        }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+    }
+
+    async fn execute_one_shot_process<T>(&self, invocation: &T) -> Result<Vec<u8>>
+    where
+        T: Serialize + ?Sized,
+    {
+        let mut command = self.process_command();
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn()?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&serde_json::to_vec(invocation)?).await?;
@@ -976,6 +1007,123 @@ impl ProcessHookExtension {
             });
         }
         Ok(output.stdout)
+    }
+
+    async fn execute_persistent_process<T>(&self, invocation: &T) -> Result<Vec<u8>>
+    where
+        T: Serialize + ?Sized,
+    {
+        let mut process_slot = self.persistent_process.process.lock().await;
+        let starting = process_slot.is_none();
+        if starting {
+            *process_slot = Some(self.spawn_persistent_process()?);
+        }
+
+        let timeout_ms = if starting {
+            self.manifest
+                .process
+                .startup_timeout_ms
+                .or(self.manifest.process.timeout_ms)
+                .unwrap_or(30_000)
+        } else {
+            self.manifest.process.timeout_ms.unwrap_or(5_000)
+        };
+        let invocation_json = serde_json::to_vec(invocation)?;
+        let response = {
+            let process = process_slot
+                .as_mut()
+                .expect("persistent process was initialized");
+            timeout(Duration::from_millis(timeout_ms), async {
+                process.stdin.write_all(&invocation_json).await?;
+                process.stdin.write_all(b"\n").await?;
+                process.stdin.flush().await?;
+                let mut line = Vec::new();
+                let bytes_read = process.stdout.read_until(b'\n', &mut line).await?;
+                Ok::<_, std::io::Error>((bytes_read, line))
+            })
+            .await
+        };
+
+        match response {
+            Err(_) => {
+                process_slot.take();
+                Err(ExtensionError::ProcessTimeout { timeout_ms })
+            }
+            Ok(Err(error)) => {
+                process_slot.take();
+                Err(ExtensionError::ProcessIo(error))
+            }
+            Ok(Ok((0, _))) => {
+                let status = if let Some(process) = process_slot.as_mut() {
+                    process
+                        .child
+                        .try_wait()?
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "stdout closed".to_string())
+                } else {
+                    "stdout closed".to_string()
+                };
+                process_slot.take();
+                Err(ExtensionError::ProcessExit {
+                    status,
+                    stderr: String::new(),
+                })
+            }
+            Ok(Ok((_, mut line))) => {
+                while matches!(line.last(), Some(b'\r' | b'\n')) {
+                    line.pop();
+                }
+                Ok(line)
+            }
+        }
+    }
+
+    fn process_command(&self) -> Command {
+        let command_path = self.resolved_command_path();
+        let mut command = Command::new(command_path);
+        command.args(&self.manifest.process.args);
+        command.kill_on_drop(true);
+        if let Some(data_dir) = &self.data_dir {
+            command.env("YUUKEI_EXTENSION_DATA_DIR", data_dir);
+        }
+        if let Some(settings_json) = &self.settings_json {
+            command.env("YUUKEI_EXTENSION_SETTINGS_JSON", settings_json);
+        }
+        if let Some(cwd) = self.resolved_cwd() {
+            command.current_dir(cwd);
+        }
+        command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        command
+    }
+
+    fn spawn_persistent_process(&self) -> Result<PersistentProcess> {
+        let mut command = self.process_command();
+        command.stderr(Stdio::inherit());
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ExtensionError::ProcessIo(std::io::Error::other(
+                "persistent extension stdin was not piped",
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ExtensionError::ProcessIo(std::io::Error::other(
+                "persistent extension stdout was not piped",
+            ))
+        })?;
+        Ok(PersistentProcess {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    async fn terminate_persistent_process(&self) {
+        if matches!(
+            self.manifest.process.mode,
+            ProcessCommunicationMode::PersistentJsonl
+        ) {
+            self.persistent_process.process.lock().await.take();
+        }
     }
 
     fn ensure_not_suspended(&self) -> Result<()> {
@@ -1130,7 +1278,9 @@ mod tests {
                 command: "node".to_string(),
                 args: vec![script.to_string()],
                 cwd: None,
+                mode: ProcessCommunicationMode::OneShot,
                 timeout_ms: Some(1_000),
+                startup_timeout_ms: None,
             },
         }
     }
@@ -1258,7 +1408,9 @@ mod tests {
                 command: "missing-extension-command".to_string(),
                 args: Vec::new(),
                 cwd: None,
+                mode: ProcessCommunicationMode::OneShot,
                 timeout_ms: None,
+                startup_timeout_ms: None,
             },
         };
 
@@ -1394,6 +1546,58 @@ process.stdout.write(JSON.stringify({ action: "replaceCommand", command }));
             .await?;
         assert_eq!(second.command.payload["text"], "hello ok");
         assert!(second.reports[0].process_failure.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persistent_jsonl_extension_reuses_one_process() -> Result<()> {
+        let dir = process_test_dir("persistent-jsonl");
+        fs::write(
+            dir.join("persistent.js"),
+            r#"
+const readline = require("node:readline");
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const input = JSON.parse(line);
+  const command = input.command;
+  command.payload.text = `${command.payload.text} ${process.pid}`;
+  process.stdout.write(`${JSON.stringify({ action: "replaceCommand", command })}\n`);
+});
+"#,
+        )?;
+        let mut manifest = process_manifest("persistent-jsonl", "persistent.js");
+        manifest.process.mode = ProcessCommunicationMode::PersistentJsonl;
+        manifest.process.startup_timeout_ms = Some(2_000);
+        let extension = ProcessHookExtension::from_installed_manifest(manifest, &dir, true);
+        let mut registry = ExtensionRegistry::new();
+        registry.register(extension)?;
+        registry.set_hook_order(
+            ExtensionHookPoint::BeforeCommandEmit,
+            vec!["persistent-jsonl".to_string()],
+        );
+
+        let first = registry
+            .apply_before_command_emit(
+                dialogue_command("hello"),
+                ExtensionCommandContext {
+                    world_pack_id: "default-yuukei".to_string(),
+                },
+            )
+            .await?;
+        let second = registry
+            .apply_before_command_emit(
+                dialogue_command("hello"),
+                ExtensionCommandContext {
+                    world_pack_id: "default-yuukei".to_string(),
+                },
+            )
+            .await?;
+
+        assert_eq!(
+            first.command.payload["text"],
+            second.command.payload["text"]
+        );
+        assert_ne!(first.command.payload["text"], "hello");
         Ok(())
     }
 

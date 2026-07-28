@@ -2276,7 +2276,9 @@ async fn process_extension_suspension_records_events_and_notifies_once() -> Resu
             command: "node".to_string(),
             args: vec!["invalid.js".to_string()],
             cwd: None,
+            mode: Default::default(),
             timeout_ms: Some(1_000),
+            startup_timeout_ms: None,
         },
     };
     let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
@@ -3328,7 +3330,9 @@ process.stdout.write(JSON.stringify({
             command: "node".to_string(),
             args: vec!["emit.js".to_string()],
             cwd: None,
+            mode: Default::default(),
             timeout_ms: Some(5_000),
+            startup_timeout_ms: None,
         },
     };
     let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;

@@ -111,7 +111,6 @@
   ],
   "signals": {
     "allow": [
-      "conversation.text",
       "app.startup",
       "presence.life_tick",
       "presence.talk_impulse",
@@ -143,17 +142,9 @@
       "mood.evaluate"
     ]
   },
-  "llmDelegation": {
-    "signals": [
-      {
-        "signal": "conversation.text"
-      }
-    ]
-  },
   "daihon": {
     "scripts": [
       "scripts/desktop_reactions.daihon",
-      "scripts/conversation_fallback.daihon",
       "scripts/daily_life.daihon",
       "scripts/random_talk.daihon",
       "scripts/presence_away.daihon",
@@ -172,8 +163,6 @@
     "全体#届きものを見た": false,
     "全体#留守番回数": 0,
     "全体#留守番あと話": false,
-    "全体#ユーザー呼び名": "",
-    "全体#最近の調子": "",
     "全体#AI雑談回数": 0
   },
   "uiSpace": {

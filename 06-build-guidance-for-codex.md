@@ -47,7 +47,7 @@ Resident HomeをTauri非依存で作る。
 - snapshotを取得する。
 - command streamを購読する。
 - `dialogue.say`、`avatar.expression`、`avatar.motion` のような最小commandを表示する。
-- ユーザー入力を `conversation.text` として送る。
+- Daihonが開始した場面で必要な場合だけ、文脈付きユーザー入力をprotocol eventとして送る。常設チャット欄は作らない。
 
 VRMやLive2Dは後でよい。最初はHTMLや簡単なcanvasで、Surfaceが人格を持たずcommandを描画するだけであることを確認する。
 
@@ -93,7 +93,7 @@ OSのsleep/wake、生活時計tick、時間帯変化、実idleなどの観測は
 
 最後に公式同梱のDefault Extensionを足す。
 
-- `yuukei-intelligence`: `dialogue.generate`, `memory.index`, `memory.retrieve`。
+- `yuukei-intelligence`: Rust常駐プロセスとして配布し、同梱LiteRT-LMモデルで `dialogue.generate`, `dialogue.interpret`, `dialogue.extract`, `memory.index`, `memory.retrieve` を提供する。Node.js、Python、外部AI APIを実行時依存にしない。
 - `yuukei-tts`: `speech.synthesis`。
 - `yuukei-stt`: `speech.recognition`。
 

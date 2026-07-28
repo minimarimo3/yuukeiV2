@@ -358,7 +358,7 @@ Surfaceは `surface.attach` で接続し、`snapshot.subscribe` と `command.sub
 
 Surfaceが離脱するときは `surface.release` を送る。Resident Homeは必要なら別Surfaceをactiveにするか、次のattachまで住人をheadless状態として扱う。
 
-CLI Surfaceは開発・検証用の正式なSurfaceである。`terminal` rendererは、`dialogue.say` などの描画命令を端末表示へ変換し、ユーザー入力を `conversation.text` として返す。Surfaceが人格や長期状態を持たないという制約はTauri版と同じである。
+CLI Surfaceは開発・検証用の正式なSurfaceである。`terminal` rendererは、`dialogue.say` などの描画命令を端末表示へ変換する。v1には常設テキストチャット入口を設けず、`conversation.text` はDaihonが開始した場面内入力など、文脈と終了条件を持つ対話のためのprotocol語彙として残す。Surfaceが人格や長期状態を持たないという制約はTauri版と同じである。
 
 ### CLI Surfaceの番号入力状態機械
 
@@ -366,7 +366,7 @@ CLI Surfaceの目的は、GUI(desktop Surface)と同じcanonical signalを同じ
 
 #### 入力規約
 
-- 1行が1入力。メニュー状態では番号のみを受理し、値入力状態(セリフ・パス・移動距離)では行全体を値として受理する。
+- 1行が1入力。メニュー状態では番号のみを受理し、値入力状態(パス・移動距離)では行全体を値として受理する。
 - `0` は常に「戻る」。トップメニューでは「終了」を意味する。
 - EOF(パイプ終端)は終了と同義。
 - 不正入力はエラーを出力して**同じ状態に留まる**(遷移しない)。番号がずれたスクリプトを早期に検出するため。
@@ -386,7 +386,7 @@ CLI Surfaceの目的は、GUI(desktop Surface)と同じcanonical signalを同じ
 | 1 | 撫でる/つつく | アクター選択 → ヒットゾーン選択 → 実行 | `avatar.gesture.poke` |
 | 2 | つまむ | アクター選択 → 実行 | `avatar.gesture.grab` |
 | 3 | おろす | アクター選択 → 移動距離入力 → 実行 | `avatar.gesture.drop` |
-| 4 | 話しかける | セリフ入力 → 実行 | `conversation.text` |
+| 4 | （予約済み） | 常設チャット廃止後の番号を欠番として保持 | — |
 | 5 | 状態を見る | snapshotをstdoutへ出力 | — |
 | 6 | コマンド履歴 | 履歴一覧をstdoutへ出力 | — |
 | 7 | World Pack | サブメニュー: 1 選択(パス入力) / 2 リセット / 3 状態表示 | — |

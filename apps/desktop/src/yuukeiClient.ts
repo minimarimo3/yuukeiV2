@@ -122,11 +122,8 @@ export type ExtensionSettingsChangeResult = {
 export type AppSettingsState = {
   talkIntervalMinutes: number;
   actorScalePercent: number;
-  conversationSendShortcut: ConversationSendShortcut;
   settingsPath: string;
 };
-
-export type ConversationSendShortcut = "ctrlEnter" | "enter" | "shiftEnter";
 
 export type RuntimeSettingsState = {
   llmTimeoutMs: number;
@@ -366,13 +363,6 @@ export type DesktopStageState = {
   monitors: StageMonitor[];
   actors: StageActor[];
   bubbles: StageBubble[];
-  conversationComposer?: DesktopConversationComposer;
-};
-
-export type DesktopConversationComposer = {
-  actorId: string;
-  monitorId: string;
-  anchor: StageAnchor;
 };
 
 export type ActorWindowDragStarted = { sessionId: string };
@@ -433,9 +423,6 @@ export type YuukeiClient = {
   reportActorStageAnchor(actorId: string, anchor: StageAnchor): Promise<void>;
   dismissStageBubble(bubbleId: string): Promise<void>;
   openSettingsWindow(): Promise<void>;
-  openConversationComposer(actorId: string): Promise<void>;
-  closeConversationComposer(): Promise<void>;
-  sendConversationText(text: string): Promise<RuntimeCommand[]>;
   sendConversationChoice(
     choiceId: string,
     choice: string,
@@ -494,9 +481,6 @@ export type YuukeiClient = {
   restartExtensionProcess(extensionId: string): Promise<ExtensionSettingsState>;
   setAppTalkIntervalMinutes(minutes: number): Promise<AppSettingsState>;
   setAppActorScalePercent(percent: number): Promise<AppSettingsState>;
-  setAppConversationSendShortcut(
-    shortcut: ConversationSendShortcut,
-  ): Promise<AppSettingsState>;
   setRuntimeSettings(
     settings: RuntimeSettingsUpdate,
   ): Promise<RuntimeSettingsState>;
@@ -592,11 +576,6 @@ export const tauriYuukeiClient: YuukeiClient = {
   dismissStageBubble: (bubbleId: string) =>
     invoke<void>("dismiss_stage_bubble", { bubbleId }),
   openSettingsWindow: () => invoke<void>("open_settings_window"),
-  openConversationComposer: (actorId: string) =>
-    invoke<void>("open_conversation_composer", { actorId }),
-  closeConversationComposer: () => invoke<void>("close_conversation_composer"),
-  sendConversationText: (text: string) =>
-    invoke<RuntimeCommand[]>("send_conversation_text", { text }),
   sendConversationChoice: (choiceId: string, choice: string, index: number) =>
     invoke<RuntimeCommand[]>("send_conversation_choice", {
       choiceId,
@@ -698,10 +677,6 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<AppSettingsState>("set_app_talk_interval_minutes", { minutes }),
   setAppActorScalePercent: (percent: number) =>
     invoke<AppSettingsState>("set_app_actor_scale_percent", { percent }),
-  setAppConversationSendShortcut: (shortcut: ConversationSendShortcut) =>
-    invoke<AppSettingsState>("set_app_conversation_send_shortcut", {
-      shortcut,
-    }),
   setRuntimeSettings: (settings: RuntimeSettingsUpdate) =>
     invoke<RuntimeSettingsState>("set_runtime_settings", { settings }),
   resetSceneHistory: () => invoke<SceneHistoryState>("reset_scene_history"),

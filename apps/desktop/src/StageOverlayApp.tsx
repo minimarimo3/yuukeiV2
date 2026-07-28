@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { ConversationComposer } from "./ConversationComposer";
 import {
   computeStageBubblePlacement,
   intersectsViewport,
@@ -18,7 +17,6 @@ import {
   type StageRect,
 } from "./stageBubbleLayout";
 import {
-  type AppSettingsState,
   type StageRect as ClientStageRect,
   type DesktopStageState,
   type StageActor,
@@ -83,7 +81,6 @@ export function StageOverlayApp({
   client = tauriYuukeiClient,
 }: StageOverlayAppProps) {
   const [stageState, setStageState] = useState<DesktopStageState | null>(null);
-  const [appSettings, setAppSettings] = useState<AppSettingsState | null>(null);
   const [bubbleSizes, setBubbleSizes] = useState<
     Record<string, StageBubbleSize>
   >({});
@@ -107,18 +104,9 @@ export function StageOverlayApp({
           setStageState(nextState);
         }),
       );
-      unlisteners.push(
-        await client.onAppSettings((nextSettings) => {
-          setAppSettings(nextSettings);
-        }),
-      );
-      const [initialState, initialSettings] = await Promise.all([
-        client.getDesktopStageState(),
-        client.getAppSettings(),
-      ]);
+      const initialState = await client.getDesktopStageState();
       if (!disposed) {
         setStageState(initialState);
-        setAppSettings(initialSettings);
         setSurfaceConnected(true);
       }
     }
@@ -150,11 +138,6 @@ export function StageOverlayApp({
     () => computeRenderItems(stageState, activeMonitor, bubbleSizes),
     [activeMonitor, bubbleSizes, stageState],
   );
-  const composer = useMemo(
-    () => composerForMonitor(stageState, activeMonitor),
-    [activeMonitor, stageState],
-  );
-
   useBubbleExpiry({
     bubbles: stageState?.bubbles ?? [],
     client,
@@ -162,7 +145,7 @@ export function StageOverlayApp({
     interactingBubbleIds,
     onTick: () => setTimerTick((tick) => tick + 1),
   });
-  useStageOverlayHitTesting(client, renderItems.length + (composer ? 1 : 0));
+  useStageOverlayHitTesting(client, renderItems.length);
 
   const updateBubbleSize = useCallback(
     (bubbleId: string, size: StageBubbleSize) => {
@@ -204,20 +187,7 @@ export function StageOverlayApp({
   }, []);
 
   return (
-    <main
-      className="stage-overlay-shell"
-      aria-label="Yuukei desktop stage"
-      onPointerDownCapture={(event) => {
-        const target = event.target;
-        if (
-          composer &&
-          target instanceof Element &&
-          !target.closest(".conversation-composer-position")
-        ) {
-          void client.closeConversationComposer();
-        }
-      }}
-    >
+    <main className="stage-overlay-shell" aria-label="Yuukei desktop stage">
       <div className="stage-overlay-layer" aria-live="polite">
         {renderItems.map((item) => (
           <StageBubbleView
@@ -249,24 +219,6 @@ export function StageOverlayApp({
             onWheel={() => deferBubble(item.bubble.bubbleId)}
           />
         ))}
-        {composer ? (
-          <div
-            className="conversation-composer-position"
-            data-stage-solid="true"
-            style={{ left: composer.left, top: composer.top }}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <ConversationComposer
-              shortcut={appSettings?.conversationSendShortcut ?? "ctrlEnter"}
-              onSubmit={async (text) => {
-                await client.sendConversationText(text);
-              }}
-              onDismiss={() => {
-                void client.closeConversationComposer();
-              }}
-            />
-          </div>
-        ) : null}
       </div>
     </main>
   );
@@ -555,43 +507,6 @@ export function stageOverlayPassthrough(
   pointerHitsInteractiveContent: boolean,
 ): boolean {
   return !pointerHitsInteractiveContent;
-}
-
-function composerForMonitor(
-  stageState: DesktopStageState | null,
-  monitor: StageMonitor | null,
-): { left: number; top: number } | null {
-  const composer = stageState?.conversationComposer;
-  if (
-    !composer?.anchor.visible ||
-    !monitor ||
-    (composer.monitorId && composer.monitorId !== monitor.id)
-  ) {
-    return null;
-  }
-  const { bounds } = monitor;
-  if (
-    composer.anchor.x < bounds.x ||
-    composer.anchor.x > bounds.x + bounds.width ||
-    composer.anchor.y < bounds.y ||
-    composer.anchor.y > bounds.y + bounds.height
-  ) {
-    return null;
-  }
-  const width = Math.min(340, Math.max(bounds.width - 24, 1));
-  return {
-    left: Math.max(
-      12,
-      Math.min(
-        composer.anchor.x - bounds.x - width / 2,
-        bounds.width - width - 12,
-      ),
-    ),
-    top: Math.max(
-      12,
-      Math.min(composer.anchor.y - bounds.y + 28, bounds.height - 180),
-    ),
-  };
 }
 
 async function pointerHitsStageSolid(): Promise<boolean> {

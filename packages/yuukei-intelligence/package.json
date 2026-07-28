@@ -2,13 +2,10 @@
   "name": "@yuukei/intelligence",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/main.mjs"
-  },
   "scripts": {
-    "build": "node --check src/main.mjs",
-    "test": "node --test",
-    "typecheck": "node --check src/main.mjs"
+    "build": "cargo build -p yuukei-intelligence",
+    "package:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1",
+    "test": "cargo test -p yuukei-intelligence",
+    "typecheck": "cargo check -p yuukei-intelligence"
   }
 }

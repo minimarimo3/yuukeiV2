@@ -32,7 +32,6 @@ pub enum MenuState {
     GrabActor,
     DropActor,
     DropDistance { actor_id: String },
-    ConversationText,
     WorldPack,
     WorldPackPath,
     Extensions,
@@ -56,7 +55,6 @@ pub enum MenuAction {
         actor_id: String,
         moved_distance: u64,
     },
-    SendConversation(String),
     ShowSnapshot,
     ShowHistory,
     SelectWorldPack(String),
@@ -119,9 +117,6 @@ pub fn transition(state: MenuState, line: &str, data: &MenuData) -> Transition {
             MenuState::DropDistance { actor_id }
         }),
         MenuState::DropDistance { actor_id } => select_distance(line, actor_id),
-        MenuState::ConversationText => {
-            select_text(line, MenuState::Top, MenuAction::SendConversation)
-        }
         MenuState::WorldPack => select_world_pack(line),
         MenuState::WorldPackPath => {
             select_text(line, MenuState::WorldPack, MenuAction::SelectWorldPack)
@@ -143,7 +138,7 @@ pub fn menu_lines(state: &MenuState, data: &MenuData) -> Vec<String> {
             "1 撫でる/つつく".to_string(),
             "2 つまむ".to_string(),
             "3 おろす".to_string(),
-            "4 話しかける".to_string(),
+            "4 （予約済み）".to_string(),
             "5 状態を見る".to_string(),
             "6 コマンド履歴".to_string(),
             "7 World Pack".to_string(),
@@ -158,10 +153,6 @@ pub fn menu_lines(state: &MenuState, data: &MenuData) -> Vec<String> {
         MenuState::DropActor => actor_lines("おろす: アクターを選択", data),
         MenuState::DropDistance { actor_id } => vec![
             format!("おろす: {actor_id} の移動距離を入力 (空行で戻る)"),
-            "0 戻る".to_string(),
-        ],
-        MenuState::ConversationText => vec![
-            "セリフを入力 (空行で戻る)".to_string(),
             "0 戻る".to_string(),
         ],
         MenuState::WorldPack => vec![
@@ -202,7 +193,10 @@ fn select_top(line: &str) -> Transition {
         "1" => Transition::stay(MenuState::PokeActor),
         "2" => Transition::stay(MenuState::GrabActor),
         "3" => Transition::stay(MenuState::DropActor),
-        "4" => Transition::stay(MenuState::ConversationText),
+        "4" => Transition::error(
+            MenuState::Top,
+            "常設チャットは廃止されました。Daihonの場面内入力を使用してください。",
+        ),
         "5" => Transition::action(MenuState::Top, MenuAction::ShowSnapshot),
         "6" => Transition::action(MenuState::Top, MenuAction::ShowHistory),
         "7" => Transition::stay(MenuState::WorldPack),
@@ -563,10 +557,10 @@ mod tests {
         assert_eq!(empty_menu.action, None);
         assert_eq!(empty_menu.error, None);
 
-        let cancelled = transition(MenuState::ConversationText, "", &data);
-        assert_eq!(cancelled.next_state, MenuState::Top);
-        assert_eq!(cancelled.action, None);
-        assert_eq!(cancelled.error, None);
+        let reserved = transition(MenuState::Top, "4", &data);
+        assert_eq!(reserved.next_state, MenuState::Top);
+        assert_eq!(reserved.action, None);
+        assert!(reserved.error.is_some());
     }
 
     #[test]

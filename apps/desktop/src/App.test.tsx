@@ -135,7 +135,6 @@ function appSettings(talkIntervalMinutes = 5): AppSettingsState {
   return {
     talkIntervalMinutes,
     actorScalePercent: 100,
-    conversationSendShortcut: "ctrlEnter",
     settingsPath: "/tmp/yuukei-v2/settings/app.json",
   };
 }
@@ -344,9 +343,6 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
-    openConversationComposer: vi.fn(async () => undefined),
-    closeConversationComposer: vi.fn(async () => undefined),
-    sendConversationText: vi.fn(async () => [command("返事しました", "cmd_3")]),
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(async () => [
       command("つつかれました", "cmd_4"),
@@ -394,10 +390,6 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       ...appSettings(),
       actorScalePercent: percent,
     })),
-    setAppConversationSendShortcut: vi.fn(async (shortcut) => ({
-      ...appSettings(),
-      conversationSendShortcut: shortcut,
-    })),
     setRuntimeSettings: vi.fn(async (settings) => runtimeSettings(settings)),
     resetSceneHistory: vi.fn(async () => sceneHistory([])),
     onCommand: vi.fn(async () => () => undefined),
@@ -427,7 +419,6 @@ describe("App", () => {
       "true",
     );
     expect(client.attachSurface).not.toHaveBeenCalled();
-    expect(client.sendConversationText).not.toHaveBeenCalled();
   });
 
   it("shows onboarding for an initial launch", async () => {
@@ -451,7 +442,7 @@ describe("App", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("skips the AI step when starting without AI", async () => {
+  it("explains the bundled local AI without showing model settings", async () => {
     const client = clientFixture({
       getOnboardingState: vi.fn(async () =>
         onboardingState({ completed: false, completedAt: null }),
@@ -462,11 +453,17 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
     expect(
-      await screen.findByRole("heading", { name: "AI(ことば)の設定" }),
+      await screen.findByRole("heading", { name: "ローカルAI" }),
     ).toBeInTheDocument();
-    await userEvent.click(
-      screen.getByRole("button", { name: "AIなしで始める" }),
-    );
+    expect(
+      screen.getByText(
+        "モデルはyuukei-intelligenceに同梱されます。接続先やモデルの設定は不要で、常設チャットとしては動作しません。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "AIなしで始める" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "次へ" }));
 
     expect(
       await screen.findByRole("heading", { name: "観測とプライバシー" }),
@@ -489,9 +486,7 @@ describe("App", () => {
     render(<App client={client} />);
 
     await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
-    await userEvent.click(
-      screen.getByRole("button", { name: "AIなしで始める" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "次へ" }));
     await userEvent.click(screen.getByRole("button", { name: "次へ" }));
     await userEvent.click(
       screen.getByRole("button", { name: "完了して始める" }),
@@ -665,24 +660,6 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(client.setAppActorScalePercent).toHaveBeenLastCalledWith(150);
-    });
-  });
-
-  it("changes the conversation send shortcut from the key settings category", async () => {
-    const client = clientFixture();
-
-    render(<App client={client} />);
-
-    await userEvent.click(await screen.findByRole("tab", { name: "キー設定" }));
-    const select = screen.getByRole("combobox", { name: "会話を送信" });
-    expect(select).toHaveValue("ctrlEnter");
-
-    await userEvent.selectOptions(select, "shiftEnter");
-
-    await waitFor(() => {
-      expect(client.setAppConversationSendShortcut).toHaveBeenCalledWith(
-        "shiftEnter",
-      );
     });
   });
 

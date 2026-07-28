@@ -80,7 +80,7 @@ CLIは開発用の正式なSurfaceです。トップメニューでは、たと�
 | 番号 | 操作 |
 | --- | --- |
 | `1` | 住人を撫でる・つつく |
-| `4` | 話しかける |
+| `4` | 予約済み(常設チャットはv1対象外) |
 | `5` | 現在のsnapshotを見る |
 | `7` | World Packを選ぶ・戻す・状態を見る |
 | `8` | Extensionをインストール・有効化・無効化する |
@@ -128,4 +128,3 @@ World Packは、原則としてJSON、Daihon、モデル、モーションなど
 - [RuntimeEvent、RuntimeCommand、Extension RPC](../../03-protocols.md)
 - [イベントログと記憶の違い](../../04-event-log-and-memory.md)
 - [World PackとDaihonの設計](../../05-world-pack-and-daihon.md)
-

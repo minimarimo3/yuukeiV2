@@ -191,19 +191,18 @@ World Packは「この場面でこの能力が必要」という宣言だけを�
 
 例:
 
-- 自由会話には `dialogue.generate` が必要。
+- Daihonが指示したセリフ補完には `dialogue.generate` が使える。
 - 発話音声には `speech.synthesis` が使える。
 - 過去の生活史を参照したい場面では `memory.retrieve` が使える。
 
 Extensionの選択、権限、実行場所、timeout、fallbackはResident Homeが管理する。World Packは特定Extension名に強く依存しない。
 
-World Pack作者が、Daihon不一致時だけAIへ余白を委任したい場合は `llmDelegation` でcanonical signalを明示する。未宣言のsignalは委任されず、`llmDelegation` のないPackは従来通り沈黙する。
+World Pack作者が、Daihon不一致時だけAIへ環境起点の余白を委任したい場合は `llmDelegation` でcanonical signalを明示する。未宣言のsignalは委任されず、`llmDelegation` のないPackは従来通り沈黙する。v1ではユーザー発話を汎用会話へフォールバックさせない。`dialogue.generate` はDaihonが生成指示を所有する場合に限り使い、常設チャットの代替にしない。
 
 ```json
 {
   "llmDelegation": {
     "signals": [
-      { "signal": "conversation.text" },
       { "signal": "presence.talk_impulse", "cooldownSeconds": 300 }
     ],
     "dailyBudget": 50
@@ -213,9 +212,9 @@ World Pack作者が、Daihon不一致時だけAIへ余白を委任したい場�
 
 `cooldownSeconds` と `dailyBudget` は省略でき、省略時はそれぞれクールダウンなし・無制限である。cooldownと日次予算の実施はResident Homeが行い、カウンタは現在のプロセス内状態として扱う。
 
-cooldown中に届いたeventの委任は、エラーやフィードバックなしに沈黙で見送られる。そのため `conversation.text` のようなユーザーが明示的に話しかけるsignalにはcooldownを設定しない(設定するとcooldown期間内の入力が無反応になり、故障と区別がつかない)。cooldownは `presence.talk_impulse` のような環境起点のsignalの頻度制御に使う。default packもこの方針に従い、`conversation.text` にcooldownを設定しない。
+cooldown中に届いたeventの委任は、エラーやフィードバックなしに沈黙で見送られる。cooldownは `presence.talk_impulse` のような環境起点のsignalの頻度制御に使う。ユーザー入力はDaihonが開始した場面の待受として処理し、汎用的な不一致委任の対象にはしない。
 
-すべてのDaihon dispatchには `入力#AI接続`(真偽値)が渡される。`dialogue.generate` のcapability routeが登録されていれば「はい」、いなければ「いいえ」になる。Pack作者は `条件:（入力#AI接続 = いいえ）` の相槌sceneを書くことで、AIなし環境でも会話が完全な沈黙にならないようにできる。AIありのときにこのsceneは候補にならないため、LLM委任を妨げない。
+すべてのDaihon dispatchには `入力#AI接続`(真偽値)が渡される。`dialogue.generate` のcapability routeが登録されていれば「はい」、いなければ「いいえ」になる。Pack作者はAIを使う場面にも固定のフォールバックセリフを用意し、AIなし・失敗時にもDaihonが場面を完結できるようにする。
 
 Daihon scene内でユーザー入力などの曖昧な値を分岐用の構造化値にしたい場合は、式関数 `解釈` を使える。構文は `判定=＜解釈 (入力#ユーザー発言) 「何を判定するか」 「はい/いいえ」＞` のように、解釈対象、質問、区切り文字つき選択肢を3引数で渡す。選択肢は `/`、`／`、`|`、`、`、`,` で区切れる。結果は選択肢の文字列または `不明` であり、AIは文章を生成しない。
 

@@ -1,12 +1,8 @@
-import { ExtensionSettingsForm } from "./ExtensionSettingsPanel";
 import { ObservationToggle } from "./ObservationToggle";
 import type {
-  ExtensionSettingsChangeResult,
-  InstalledExtension,
   ObservationSettingsState,
   ObservationSettingsUpdate,
   WorldPackSelectionState,
-  YuukeiClient,
 } from "./yuukeiClient";
 
 export type OnboardingFlowProps = {
@@ -15,10 +11,6 @@ export type OnboardingFlowProps = {
   worldPackError: string | null;
   switchingPack: boolean;
   onChooseWorldPack: () => void;
-  extension?: InstalledExtension;
-  client: YuukeiClient;
-  changingExtensions: boolean;
-  onExtensionResult: (result: ExtensionSettingsChangeResult) => void;
   observationSettings: ObservationSettingsState | null;
   observationSettingsError: string | null;
   changingObservationSettings: boolean;
@@ -37,10 +29,6 @@ export function OnboardingFlow({
   worldPackError,
   switchingPack,
   onChooseWorldPack,
-  extension,
-  client,
-  changingExtensions,
-  onExtensionResult,
   observationSettings,
   observationSettingsError,
   changingObservationSettings,
@@ -119,22 +107,13 @@ export function OnboardingFlow({
         {clampedStep === 1 ? (
           <>
             <div className="settings-copy onboarding-ai-step">
-              <h2>AI(ことば)の設定</h2>
+              <h2>ローカルAI</h2>
               <p className="settings-title">
-                AIがなくても、台本で毎日の生活は動きます。あとから設定画面で変えられます。
+                Daihonが指示した短いセリフの補完と、場面内入力の解釈に使います。
               </p>
-              {extension?.settingsSchema ? (
-                <ExtensionSettingsForm
-                  extension={extension}
-                  client={client}
-                  disabled={changingExtensions}
-                  onResult={onExtensionResult}
-                />
-              ) : (
-                <p className="settings-note">
-                  yuukei-intelligence拡張が見つからないため、このまま進めます。
-                </p>
-              )}
+              <p className="settings-note">
+                モデルはyuukei-intelligenceに同梱されます。接続先やモデルの設定は不要で、常設チャットとしては動作しません。
+              </p>
             </div>
             <div className="settings-actions">
               <button
@@ -143,13 +122,6 @@ export function OnboardingFlow({
                 onClick={() => onStepChange(0)}
               >
                 戻る
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => onStepChange(2)}
-              >
-                AIなしで始める
               </button>
               <button type="button" onClick={() => onStepChange(2)}>
                 次へ

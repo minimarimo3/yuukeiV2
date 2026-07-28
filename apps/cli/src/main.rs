@@ -162,13 +162,6 @@ async fn execute_action(
 ) -> Result<bool> {
     match action {
         MenuAction::Quit => return Ok(true),
-        MenuAction::SendConversation(text) => {
-            let commands = runtime
-                .send_conversation_text(CLI_SURFACE_ID, &text)
-                .await
-                .context("failed to send conversation text")?;
-            record_commands(command_history, &commands, *output_mode)?;
-        }
         MenuAction::SendPoke {
             actor_id,
             hit_zone_id,

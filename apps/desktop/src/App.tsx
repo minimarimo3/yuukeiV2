@@ -20,7 +20,6 @@ import { OnboardingFlow } from "./OnboardingFlow";
 import {
   type AppSettingsState,
   type CapabilityUsageState,
-  type ConversationSendShortcut,
   type EventLogPage,
   type EventLogPrivacyCategoryFilter,
   type ExtensionSettingsChangeResult,
@@ -460,19 +459,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
-  async function saveConversationSendShortcut(
-    shortcut: ConversationSendShortcut,
-  ) {
-    setAppSettingsError(null);
-    try {
-      setAppSettings(await client.setAppConversationSendShortcut(shortcut));
-    } catch (error) {
-      setAppSettingsError(
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  }
-
   async function toggleAutostart(enabled: boolean) {
     setAppSettingsError(null);
     try {
@@ -893,46 +879,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       ),
     },
     {
-      id: "keys",
-      label: "キー設定",
-      ariaLabel: "キー設定",
-      panelId: "settings-keys-panel",
-      content: (
-        <div className="settings-copy app-settings-copy">
-          <h2>キー設定</h2>
-          <p className="settings-note">
-            日本語入力の変換確定で誤送信しないよう、既定ではCtrl+Enterを使います。
-          </p>
-          <label
-            className="app-setting-field"
-            htmlFor="conversation-send-shortcut"
-          >
-            <span>
-              <strong>会話を送信</strong>
-              <small>入力欄で会話を送るキーを選びます。</small>
-            </span>
-            <select
-              aria-label="会話を送信"
-              id="conversation-send-shortcut"
-              value={appSettings?.conversationSendShortcut ?? "ctrlEnter"}
-              onChange={(event) => {
-                void saveConversationSendShortcut(
-                  event.currentTarget.value as ConversationSendShortcut,
-                );
-              }}
-            >
-              <option value="ctrlEnter">Ctrl+Enter</option>
-              <option value="enter">Enter</option>
-              <option value="shiftEnter">Shift+Enter</option>
-            </select>
-          </label>
-          {appSettingsError ? (
-            <p className="settings-error">{appSettingsError}</p>
-          ) : null}
-        </div>
-      ),
-    },
-    {
       id: "worldPack",
       label: "World Pack",
       ariaLabel: "World Pack settings",
@@ -1331,9 +1277,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     settingsCategories.find(
       (category) => category.id === activeSettingsCategoryId,
     ) ?? settingsCategories[0];
-  const intelligenceExtension = orderedExtensions.find(
-    (extension) => extension.extensionId === "yuukei-intelligence",
-  );
   const showOnboarding =
     !!onboardingState &&
     !onboardingState.completed &&
@@ -1352,10 +1295,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           worldPackError={worldPackError}
           switchingPack={switchingPack}
           onChooseWorldPack={chooseWorldPack}
-          extension={intelligenceExtension}
-          client={client}
-          changingExtensions={changingExtensions}
-          onExtensionResult={applyExtensionResult}
           observationSettings={observationSettings}
           observationSettingsError={observationSettingsError}
           changingObservationSettings={changingObservationSettings}

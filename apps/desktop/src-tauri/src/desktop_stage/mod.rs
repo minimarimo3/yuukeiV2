@@ -66,7 +66,6 @@ struct DesktopStageState {
     active_drags: BTreeMap<String, ActiveActorDrag>,
     active_walks: BTreeMap<String, ActiveStageWalk>,
     away_actors: BTreeSet<String>,
-    conversation_composer: Option<DesktopConversationComposer>,
     actor_scale_percent: u16,
     window_observation_enabled: bool,
 }
@@ -85,7 +84,6 @@ impl Default for DesktopStageState {
             active_drags: BTreeMap::new(),
             active_walks: BTreeMap::new(),
             away_actors: BTreeSet::new(),
-            conversation_composer: None,
             actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
             window_observation_enabled: false,
         }
@@ -178,16 +176,6 @@ pub struct DesktopStageSnapshot {
     pub monitors: Vec<StageMonitor>,
     pub actors: Vec<StageActor>,
     pub bubbles: Vec<StageBubble>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation_composer: Option<DesktopConversationComposer>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopConversationComposer {
-    pub actor_id: String,
-    pub monitor_id: String,
-    pub anchor: StageAnchor,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -241,70 +229,6 @@ impl DesktopStageManager {
         let snapshot = self.snapshot()?;
         self.raise_overlay_windows(app, &snapshot.monitors)?;
         app.emit(STAGE_STATE_EVENT, &snapshot).map_err(to_message)
-    }
-
-    pub fn open_conversation_composer(
-        &self,
-        app: &AppHandle,
-        actor_id: &str,
-    ) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        open_conversation_composer_in_state(&mut state, actor_id)?;
-        let overlay_label = state.conversation_composer.as_ref().and_then(|composer| {
-            state
-                .monitors
-                .iter()
-                .find(|monitor| monitor.id == composer.monitor_id)
-                .map(|monitor| monitor.label.clone())
-        });
-        drop(state);
-        self.emit_state(app)?;
-        if let Some(window) = overlay_label.and_then(|label| app.get_webview_window(&label)) {
-            window.set_ignore_cursor_events(false).map_err(to_message)?;
-            window.show().map_err(to_message)?;
-            window.set_focus().map_err(to_message)?;
-        }
-        Ok(())
-    }
-
-    pub fn close_conversation_composer(&self, app: &AppHandle) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        let changed = close_conversation_composer_in_state(&mut state);
-        drop(state);
-        if changed {
-            self.emit_state(app)?;
-        }
-        Ok(())
-    }
-
-    pub fn close_conversation_composer_for_overlay(
-        &self,
-        app: &AppHandle,
-        overlay_label: &str,
-    ) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        let owns_composer = state
-            .conversation_composer
-            .as_ref()
-            .is_some_and(|composer| {
-                state.monitors.iter().any(|monitor| {
-                    monitor.id == composer.monitor_id && monitor.label == overlay_label
-                })
-            });
-        if !owns_composer || !close_conversation_composer_in_state(&mut state) {
-            return Ok(());
-        }
-        drop(state);
-        self.emit_state(app)
     }
 
     pub fn set_persisted_actor_anchors(
@@ -743,13 +667,6 @@ impl DesktopStageManager {
                 actor.bounds = bounds;
                 actor.anchor = anchor.clone();
                 actor.visible = window.is_visible().unwrap_or(true);
-            }
-            if state
-                .conversation_composer
-                .as_ref()
-                .is_some_and(|composer| composer.actor_id == actor_id)
-            {
-                open_conversation_composer_in_state(&mut state, &actor_id)?;
             }
         }
         self.emit_state(app)
@@ -1242,13 +1159,6 @@ fn dismiss_bubble_in_state(state: &mut DesktopStageState, bubble_id: &str, creat
 }
 
 fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTreeSet<String>) {
-    if state
-        .conversation_composer
-        .as_ref()
-        .is_some_and(|composer| !actor_ids.contains(&composer.actor_id))
-    {
-        state.conversation_composer = None;
-    }
     state
         .bubbles
         .retain(|_, bubble| actor_ids.contains(&bubble.actor_id));
@@ -1284,80 +1194,6 @@ fn clear_actor_presentation(state: &mut DesktopStageState, actor_id: &str) {
     state.perches.remove(actor_id);
     state.active_drags.remove(actor_id);
     state.active_walks.remove(actor_id);
-    if state
-        .conversation_composer
-        .as_ref()
-        .is_some_and(|composer| composer.actor_id == actor_id)
-    {
-        state.conversation_composer = None;
-    }
-}
-
-fn open_conversation_composer_in_state(
-    state: &mut DesktopStageState,
-    actor_id: &str,
-) -> Result<(), String> {
-    let actor = state
-        .actors
-        .get(actor_id)
-        .ok_or_else(|| format!("unknown actor for conversation composer: {actor_id}"))?;
-    let monitor = state
-        .monitors
-        .iter()
-        .find(|monitor| point_is_inside(&actor.anchor, &monitor.bounds))
-        .or_else(|| {
-            state
-                .monitors
-                .iter()
-                .find(|monitor| rects_intersect(&actor.bounds, &monitor.bounds))
-        })
-        .or_else(|| state.monitors.first());
-    let anchor = match monitor {
-        Some(monitor) if point_is_inside(&actor.anchor, &monitor.bounds) => actor.anchor.clone(),
-        Some(monitor) => {
-            clamp_anchor_to_monitor(default_actor_anchor(&actor.bounds), &monitor.bounds)
-        }
-        None => default_actor_anchor(&actor.bounds),
-    };
-    state.conversation_composer = Some(DesktopConversationComposer {
-        actor_id: actor_id.to_string(),
-        monitor_id: monitor
-            .map(|monitor| monitor.id.clone())
-            .unwrap_or_default(),
-        anchor,
-    });
-    Ok(())
-}
-
-fn point_is_inside(point: &StageAnchor, rect: &StageRect) -> bool {
-    point.visible
-        && point.x >= rect.x
-        && point.x <= rect.x + rect.width
-        && point.y >= rect.y
-        && point.y <= rect.y + rect.height
-}
-
-fn rects_intersect(first: &StageRect, second: &StageRect) -> bool {
-    first.x < second.x + second.width
-        && first.x + first.width > second.x
-        && first.y < second.y + second.height
-        && first.y + first.height > second.y
-}
-
-fn close_conversation_composer_in_state(state: &mut DesktopStageState) -> bool {
-    state.conversation_composer.take().is_some()
-}
-
-fn clamp_anchor_to_monitor(mut anchor: StageAnchor, bounds: &StageRect) -> StageAnchor {
-    let inset = 12.0;
-    let min_x = bounds.x + inset;
-    let max_x = (bounds.x + bounds.width - inset).max(min_x);
-    let min_y = bounds.y + inset;
-    let max_y = (bounds.y + bounds.height - inset).max(min_y);
-    anchor.x = anchor.x.clamp(min_x, max_x);
-    anchor.y = anchor.y.clamp(min_y, max_y);
-    anchor.visible = true;
-    anchor
 }
 
 fn active_bubble_id_for_actor(state: &DesktopStageState, actor_id: &str) -> Option<String> {
@@ -1409,7 +1245,6 @@ impl DesktopStageState {
             monitors: self.monitors.clone(),
             actors: self.actors.values().cloned().collect(),
             bubbles: self.bubbles.values().cloned().collect(),
-            conversation_composer: self.conversation_composer.clone(),
         }
     }
 }

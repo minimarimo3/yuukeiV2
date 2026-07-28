@@ -9,7 +9,6 @@ import {
   headingRotationY,
   loadInitialActorSurfaceState,
   normalizeMotionId,
-  openConversationFromContextMenu,
   shouldBeginActorPointerGesture,
   shouldStartAvatarGrab,
 } from "./ActorApp";
@@ -29,16 +28,6 @@ import {
 import type { ActorSurfaceAsset, YuukeiClient } from "./yuukeiClient";
 
 describe("ActorApp renderer helpers", () => {
-  it("opens conversation for the context-clicked actor", async () => {
-    const preventDefault = vi.fn();
-    const open = vi.fn(async () => undefined);
-
-    await openConversationFromContextMenu({ preventDefault }, "yuukei", open);
-
-    expect(preventDefault).toHaveBeenCalledOnce();
-    expect(open).toHaveBeenCalledWith("yuukei");
-  });
-
   it("does not begin a poke or drag for a macOS Control-click", () => {
     expect(shouldBeginActorPointerGesture({ button: 0, ctrlKey: true })).toBe(
       false,

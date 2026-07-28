@@ -2,81 +2,6 @@ use super::*;
 use std::collections::VecDeque;
 
 #[test]
-fn conversation_composer_opens_for_actor_and_closes() {
-    let mut state = bubble_state(&["yuukei", "partner"]);
-
-    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
-    assert_eq!(
-        state
-            .snapshot()
-            .conversation_composer
-            .as_ref()
-            .map(|composer| composer.actor_id.as_str()),
-        Some("yuukei")
-    );
-
-    open_conversation_composer_in_state(&mut state, "partner").expect("replace composer");
-    assert_eq!(
-        state
-            .snapshot()
-            .conversation_composer
-            .as_ref()
-            .map(|composer| composer.actor_id.as_str()),
-        Some("partner")
-    );
-
-    close_conversation_composer_in_state(&mut state);
-    assert!(state.snapshot().conversation_composer.is_none());
-}
-
-#[test]
-fn conversation_composer_rejects_unknown_actor() {
-    let mut state = bubble_state(&["yuukei"]);
-
-    let error = open_conversation_composer_in_state(&mut state, "missing")
-        .expect_err("unknown actor must fail");
-
-    assert!(error.contains("unknown actor"));
-    assert!(state.snapshot().conversation_composer.is_none());
-}
-
-#[test]
-fn conversation_composer_uses_actor_fallback_anchor_and_monitor() {
-    let mut state = bubble_state(&["yuukei"]);
-    state.monitors = vec![test_monitor(1000.0, 700.0)];
-    let actor = state.actors.get_mut("yuukei").expect("actor");
-    actor.bounds.x = -900.0;
-    actor.bounds.y = -900.0;
-    actor.anchor = StageAnchor {
-        x: -500.0,
-        y: -500.0,
-        visible: false,
-    };
-
-    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
-    let composer = state
-        .snapshot()
-        .conversation_composer
-        .expect("composer snapshot");
-
-    assert_eq!(composer.monitor_id, "monitor-0");
-    assert!(composer.anchor.visible);
-    assert!(composer.anchor.x >= 0.0);
-    assert!(composer.anchor.y >= 0.0);
-    assert!(composer.anchor.x <= 1000.0);
-    assert!(composer.anchor.y <= 700.0);
-}
-
-#[test]
-fn closing_conversation_composer_reports_only_real_changes() {
-    let mut state = bubble_state(&["yuukei"]);
-    open_conversation_composer_in_state(&mut state, "yuukei").expect("open composer");
-
-    assert!(close_conversation_composer_in_state(&mut state));
-    assert!(!close_conversation_composer_in_state(&mut state));
-}
-
-#[test]
 fn actor_window_labels_hex_encode_actor_ids() {
     assert_eq!(actor_window_label("yuukei"), "actor-7975756b6569");
     assert_eq!(actor_window_label("partner"), "actor-706172746e6572");
@@ -407,7 +332,6 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
         away_actors: BTreeSet::new(),
-        conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };
@@ -769,7 +693,6 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
         active_drags: BTreeMap::new(),
         active_walks: BTreeMap::new(),
         away_actors: BTreeSet::new(),
-        conversation_composer: None,
         actor_scale_percent: DEFAULT_ACTOR_SCALE_PERCENT,
         window_observation_enabled: true,
     };
