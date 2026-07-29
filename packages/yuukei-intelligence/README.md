@@ -10,6 +10,18 @@ LiteRT-LM 0.14.0のC APIを呼び、同梱されたGemma 4 E4Bを次の限定用
 常設チャットや自由会話の生成器ではありません。`dialogue.generate`はDaihon由来の
 `instruction`がない呼び出しを無言で拒否します。
 
+## 制約付きデコード
+
+モデルが返す構造は、プロンプトでJSONを依頼するだけではありません。各capability
+専用のJSON SchemaをLiteRT-LMのtool定義として渡し、conversationのconstrained
+decodingを有効にしています。モデルは`submit_yuukei_result`を一度だけ呼び、その
+argumentsだけがCoreへの結果になります。通常テキストや想定外のtool callは
+後処理でJSONらしい箇所を拾わず、推論失敗として安全側に倒します。
+
+この経路を採用する理由は、LiteRT-LM 0.14.0の公開C ABIが任意のRegex／Lark／
+LlGuidance JSON Schema引数を公開していない一方、JSON Schema付きtoolとGemma用
+制約付きデコードを公開しているためです。
+
 ## Windowsパッケージ
 
 ```powershell

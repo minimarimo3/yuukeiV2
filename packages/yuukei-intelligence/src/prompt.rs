@@ -39,7 +39,7 @@ pub fn dialogue(input: &Value) -> Option<(String, String, i32)> {
          Daihon authored scenes always have priority. Follow the Daihon instruction below and do not continue the scene structure.\n\
          Silence is valid. If the instructed reaction would feel forced, return {{\"speak\":false}}.\n\
          If speaking, keep text at or below {max_length} characters.\n\
-         Return JSON only: {{\"speak\":boolean,\"text\"?:string}}.\n\
+         Put only {{\"speak\":boolean,\"text\"?:string}} in the required result tool arguments.\n\
          Do not choose an expression or motion. Default to Japanese unless the scene clearly requires another language.\n\n\
          Persona:\n{}\n\nCurrent event:\n{}\n\n\
          Daihon author instruction for this scene line:\n{instruction}\
@@ -49,7 +49,7 @@ pub fn dialogue(input: &Value) -> Option<(String, String, i32)> {
         pretty(&recent_context)
     );
     Some((
-        "You are a dialogue.generate provider for Yuukei. Return only valid JSON. Never explain it or include Markdown.".to_string(),
+        "You are a dialogue.generate provider for Yuukei. Use only the required result tool. Never explain the result or include Markdown.".to_string(),
         prompt,
         160,
     ))
@@ -67,11 +67,11 @@ pub fn interpret(input: &Value) -> (String, String, i32) {
         .and_then(Value::as_str)
         .unwrap_or("");
     (
-        "You are a dialogue.interpret provider for Yuukei. Return only valid JSON. The choice must be listed or 不明.".to_string(),
+        "You are a dialogue.interpret provider for Yuukei. Use only the required result tool. The choice must be listed or 不明.".to_string(),
         format!(
             "Classify the user's text for this Yuukei Daihon scene.\n\
              Choose exactly one provided value. If no choice clearly matches, choose 不明.\n\
-             Do not write dialogue or add personality. Return JSON only: {{\"choice\":\"...\"}}.\n\n\
+             Do not write dialogue or add personality. Put {{\"choice\":\"...\"}} in the result tool arguments.\n\n\
              Question:\n{question}\n\nChoices:\n{}\n\nText to classify:\n{text}",
             pretty(&Value::Array(
                 choices
@@ -94,13 +94,13 @@ pub fn extract(input: &Value) -> (String, String, i32) {
         .and_then(Value::as_str)
         .unwrap_or("");
     (
-        "You are a dialogue.extract provider for Yuukei. Return only valid JSON. Never explain it."
+        "You are a dialogue.extract provider for Yuukei. Use only the required result tool. Never explain the result."
             .to_string(),
         format!(
             "Extract one requested string value from the user's text for a Yuukei Daihon scene.\n\
              If absent, ambiguous, empty, unsupported, or longer than 100 characters, return \
              {{\"found\":false,\"value\":\"不明\"}}.\n\
-             Do not write dialogue. Return JSON only: {{\"found\":boolean,\"value\":\"...\"}}.\n\n\
+             Do not write dialogue. Put {{\"found\":boolean,\"value\":\"...\"}} in the result tool arguments.\n\n\
              Extraction instruction:\n{instruction}\n\nText to extract from:\n{text}"
         ),
         120,
@@ -149,12 +149,12 @@ pub fn memory_index(input: &Value) -> (String, String, i32) {
         .collect::<Vec<_>>()
         .join("\n");
     (
-        "You are a memory.index provider for Yuukei. Return only valid JSON and do not invent facts.".to_string(),
+        "You are a memory.index provider for Yuukei. Use only the required result tool and do not invent facts.".to_string(),
         format!(
             "Consolidate one day of Yuukei event log records into memory notes.\n\
              Produce diary as a third-person memo in 2 to 4 sentences and 0 to 5 durable newFacts \
              such as user preferences, habits, promises, or recurring context.\n\
-             Return JSON only: {{\"diary\":\"...\",\"newFacts\":[\"...\"]}}.\n\n\
+             Put {{\"diary\":\"...\",\"newFacts\":[\"...\"]}} in the result tool arguments.\n\n\
              Date:\n{date}\n\nDigest lines:\n{digest}"
         ),
         320,
@@ -174,14 +174,14 @@ pub fn mood(input: &Value) -> (String, String, i32) {
         "secondsSinceLastUserActivity": input.get("secondsSinceLastUserActivity")
     });
     (
-        "You are a mood.evaluate provider for Yuukei. Return only valid JSON. Never generate dialogue.".to_string(),
+        "You are a mood.evaluate provider for Yuukei. Use only the required result tool. Never generate dialogue.".to_string(),
         format!(
             "あなたは{name}です。最近の出来事から今の気分を評価してください。\n\
              これは発話生成ではありません。\n\
              moodは必ず ふつう, うれしい, たいくつ, さみしい, 心配, ねむい のどれか。\n\
              talkDesireは今ひとりごとを言いたい度合いを0から100の整数で。\n\
              topicは話したいことがあれば短く、なければ空文字で。\n\
-             Return JSON only: {{\"mood\":\"ふつう\",\"talkDesire\":50,\"topic\":\"\"}}.\n\n\
+             Put {{\"mood\":\"ふつう\",\"talkDesire\":50,\"topic\":\"\"}} in the result tool arguments.\n\n\
              Persona:\n{}\n\nCurrent context:\n{}\n\nRecent context:\n{}",
             pretty(&persona),
             pretty(&context),

@@ -9,6 +9,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
 use serde_json::{json, Value};
 
+use crate::constraint::{self, RESULT_TOOL_NAME};
+
 type EngineSettingsCreate =
     unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, *const c_char) -> *mut c_void;
 type EngineSettingsDelete = unsafe extern "C" fn(*mut c_void);
@@ -23,6 +25,8 @@ type ConversationConfigCreate = unsafe extern "C" fn() -> *mut c_void;
 type ConversationConfigDelete = unsafe extern "C" fn(*mut c_void);
 type ConversationConfigSetSession = unsafe extern "C" fn(*mut c_void, *const c_void);
 type ConversationConfigSetSystem = unsafe extern "C" fn(*mut c_void, *const c_char);
+type ConversationConfigSetTools = unsafe extern "C" fn(*mut c_void, *const c_char);
+type ConversationConfigSetEnableConstrainedDecoding = unsafe extern "C" fn(*mut c_void, bool);
 type ConversationCreate = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
 type ConversationDelete = unsafe extern "C" fn(*mut c_void);
 type ConversationOptionalArgsCreate = unsafe extern "C" fn() -> *mut c_void;
@@ -49,6 +53,9 @@ struct Api {
     conversation_config_delete: ConversationConfigDelete,
     conversation_config_set_session: ConversationConfigSetSession,
     conversation_config_set_system: ConversationConfigSetSystem,
+    conversation_config_set_tools: ConversationConfigSetTools,
+    conversation_config_set_enable_constrained_decoding:
+        ConversationConfigSetEnableConstrainedDecoding,
     conversation_create: ConversationCreate,
     conversation_delete: ConversationDelete,
     conversation_optional_args_create: ConversationOptionalArgsCreate,
@@ -102,6 +109,14 @@ impl Api {
                 conversation_config_set_system: symbol(
                     &library,
                     b"litert_lm_conversation_config_set_system_message\0",
+                )?,
+                conversation_config_set_tools: symbol(
+                    &library,
+                    b"litert_lm_conversation_config_set_tools\0",
+                )?,
+                conversation_config_set_enable_constrained_decoding: symbol(
+                    &library,
+                    b"litert_lm_conversation_config_set_enable_constrained_decoding\0",
                 )?,
                 conversation_create: symbol(&library, b"litert_lm_conversation_create\0")?,
                 conversation_delete: symbol(&library, b"litert_lm_conversation_delete\0")?,
@@ -192,7 +207,8 @@ impl LiteRtEngine {
         json!({
             "provider": "litert-lm",
             "model": self.model_name,
-            "backend": self.backend
+            "backend": self.backend,
+            "constrainedDecoding": "gemma-tool-json-schema"
         })
     }
 
@@ -201,8 +217,14 @@ impl LiteRtEngine {
         system_prompt: &str,
         prompt: &str,
         max_output_tokens: i32,
+        schema: &Value,
     ) -> Result<String> {
-        let system_prompt = CString::new(system_prompt)?;
+        let system_prompt = CString::new(format!(
+            "{system_prompt}\n\
+             You must invoke the {RESULT_TOOL_NAME} tool exactly once. \
+             Put the entire answer in its arguments. Do not reply with ordinary text."
+        ))?;
+        let tools = CString::new(serde_json::to_string(&constraint::tool_definition(schema))?)?;
         let message = CString::new(serde_json::to_string(
             &json!({ "role": "user", "content": prompt }),
         )?)?;
@@ -226,6 +248,11 @@ impl LiteRtEngine {
             (self.api.conversation_config_set_session)(conversation_config, session_config);
             (self.api.session_config_delete)(session_config);
             (self.api.conversation_config_set_system)(conversation_config, system_prompt.as_ptr());
+            (self.api.conversation_config_set_tools)(conversation_config, tools.as_ptr());
+            (self.api.conversation_config_set_enable_constrained_decoding)(
+                conversation_config,
+                true,
+            );
 
             let conversation = (self.api.conversation_create)(self.engine, conversation_config);
             (self.api.conversation_config_delete)(conversation_config);
@@ -266,7 +293,7 @@ impl LiteRtEngine {
             };
             (self.api.json_response_delete)(response);
             (self.api.conversation_delete)(conversation);
-            extract_text(&copied?)
+            extract_tool_arguments(&copied?)
         }
     }
 }
@@ -310,30 +337,31 @@ fn create_engine(
     Ok(engine)
 }
 
-fn extract_text(response: &str) -> Result<String> {
+fn extract_tool_arguments(response: &str) -> Result<String> {
     let value: Value = serde_json::from_str(response).context("invalid LiteRT-LM response JSON")?;
-    if let Some(text) = value.get("text").and_then(Value::as_str) {
-        return Ok(text.to_string());
+    let calls = value
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .context("constrained LiteRT-LM response did not contain a tool call")?;
+    if calls.len() != 1 {
+        bail!(
+            "constrained LiteRT-LM response contained {} tool calls instead of one",
+            calls.len()
+        );
     }
-    if let Some(content) = value.get("content") {
-        if let Some(text) = content.as_str() {
-            return Ok(text.to_string());
-        }
-        if let Some(parts) = content.as_array() {
-            let text = parts
-                .iter()
-                .filter_map(|part| {
-                    part.get("text")
-                        .and_then(Value::as_str)
-                        .or_else(|| part.as_str())
-                })
-                .collect::<String>();
-            if !text.is_empty() {
-                return Ok(text);
-            }
-        }
+    let function = calls[0]
+        .get("function")
+        .context("constrained LiteRT-LM tool call did not contain a function")?;
+    if function.get("name").and_then(Value::as_str) != Some(RESULT_TOOL_NAME) {
+        bail!("constrained LiteRT-LM response called an unexpected tool");
     }
-    bail!("LiteRT-LM response did not contain text")
+    let arguments = function
+        .get("arguments")
+        .context("constrained LiteRT-LM tool call did not contain arguments")?;
+    if !arguments.is_object() {
+        bail!("constrained LiteRT-LM tool arguments were not a JSON object");
+    }
+    serde_json::to_string(arguments).context("failed to serialize constrained tool arguments")
 }
 
 fn runtime_dir() -> Result<PathBuf> {
@@ -365,4 +393,36 @@ fn cache_dir() -> Result<PathBuf> {
     Ok(env::temp_dir()
         .join("yuukei-intelligence")
         .join("litert-cache"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_only_the_expected_constrained_tool_arguments() {
+        let response = json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": RESULT_TOOL_NAME,
+                    "arguments": { "choice": "はい" }
+                }
+            }]
+        });
+        assert_eq!(
+            extract_tool_arguments(&response.to_string()).expect("arguments"),
+            r#"{"choice":"はい"}"#
+        );
+    }
+
+    #[test]
+    fn rejects_free_text_instead_of_post_hoc_json_extraction() {
+        let response = json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "{\"choice\":\"はい\"}" }]
+        });
+        assert!(extract_tool_arguments(&response.to_string()).is_err());
+    }
 }

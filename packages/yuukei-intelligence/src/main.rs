@@ -1,3 +1,4 @@
+mod constraint;
 mod intelligence;
 mod litert;
 mod memory;

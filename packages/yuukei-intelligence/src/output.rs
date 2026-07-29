@@ -288,54 +288,9 @@ fn normalize_memory_retrieve_capability(value: &Value) -> Value {
 }
 
 fn parse_object(text: &str) -> Option<Value> {
-    let stripped = strip_code_fence(text);
-    serde_json::from_str::<Value>(stripped)
+    serde_json::from_str::<Value>(text.trim())
         .ok()
-        .or_else(|| extract_json_object(stripped).and_then(|json| serde_json::from_str(json).ok()))
-}
-
-fn strip_code_fence(text: &str) -> &str {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed;
-    };
-    let rest = rest
-        .strip_prefix("json")
-        .or_else(|| rest.strip_prefix("JSON"))
-        .unwrap_or(rest)
-        .trim_start();
-    rest.strip_suffix("```").unwrap_or(rest).trim()
-}
-
-fn extract_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, character) in text[start..].char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match character {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&text[start..start + offset + character.len_utf8()]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+        .filter(Value::is_object)
 }
 
 fn non_negative_integer(value: Option<&Value>) -> i64 {
@@ -366,10 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn extracts_json_from_surrounding_text() {
+    fn rejects_json_embedded_in_surrounding_text() {
         assert_eq!(
             parse_extract("answer: {\"found\":true,\"value\":\"あんぱん\"} done"),
-            json!({ "found": true, "value": "あんぱん" })
+            unknown_extract()
         );
     }
 }

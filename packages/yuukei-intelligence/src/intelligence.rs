@@ -1,11 +1,11 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
 
-use crate::{litert::LiteRtEngine, memory, output, prompt};
+use crate::{constraint, litert::LiteRtEngine, memory, output, prompt};
 
 enum EngineState {
     Uninitialized,
-    Ready(LiteRtEngine),
+    Ready(Box<LiteRtEngine>),
     Failed(String),
 }
 
@@ -64,7 +64,8 @@ impl IntelligenceRuntime {
             .pointer("/constraints/maxLength")
             .and_then(Value::as_u64)
             .unwrap_or(120) as usize;
-        match self.infer(&system, &prompt, max_tokens) {
+        let schema = constraint::dialogue(max_length);
+        match self.infer(&system, &prompt, max_tokens, &schema) {
             Ok((text, metadata)) => (output::parse_dialogue(&text, max_length), metadata),
             Err((error, metadata)) => {
                 eprintln!("yuukei-intelligence: dialogue generation failed: {error:#}");
@@ -80,7 +81,8 @@ impl IntelligenceRuntime {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        match self.infer(&system, &prompt, max_tokens) {
+        let schema = constraint::interpret(choices);
+        match self.infer(&system, &prompt, max_tokens, &schema) {
             Ok((text, metadata)) => (output::parse_interpret(&text, choices), metadata),
             Err((error, metadata)) => {
                 eprintln!("yuukei-intelligence: interpretation failed: {error:#}");
@@ -94,7 +96,7 @@ impl IntelligenceRuntime {
 
     fn extract(&mut self, input: &Value) -> (Value, Value) {
         let (system, prompt, max_tokens) = prompt::extract(input);
-        match self.infer(&system, &prompt, max_tokens) {
+        match self.infer(&system, &prompt, max_tokens, &constraint::extract()) {
             Ok((text, metadata)) => (output::parse_extract(&text), metadata),
             Err((error, metadata)) => {
                 eprintln!("yuukei-intelligence: extraction failed: {error:#}");
@@ -115,7 +117,7 @@ impl IntelligenceRuntime {
             return memory::index(input, None, json!({}));
         }
         let (system, prompt, max_tokens) = prompt::memory_index(input);
-        match self.infer(&system, &prompt, max_tokens) {
+        match self.infer(&system, &prompt, max_tokens, &constraint::memory_index()) {
             Ok((text, metadata)) => {
                 let summary = output::parse_memory_summary(&text);
                 memory::index(input, summary, metadata)
@@ -129,7 +131,7 @@ impl IntelligenceRuntime {
 
     fn evaluate_mood(&mut self, input: &Value) -> (Value, Value) {
         let (system, prompt, max_tokens) = prompt::mood(input);
-        match self.infer(&system, &prompt, max_tokens) {
+        match self.infer(&system, &prompt, max_tokens, &constraint::mood()) {
             Ok((text, metadata)) => (output::parse_mood(&text), metadata),
             Err((error, metadata)) => {
                 eprintln!("yuukei-intelligence: mood evaluation failed: {error:#}");
@@ -146,10 +148,11 @@ impl IntelligenceRuntime {
         system_prompt: &str,
         prompt: &str,
         max_output_tokens: i32,
+        schema: &Value,
     ) -> std::result::Result<(String, Value), (anyhow::Error, Value)> {
         if matches!(self.engine, EngineState::Uninitialized) {
             self.engine = match LiteRtEngine::load_packaged() {
-                Ok(engine) => EngineState::Ready(engine),
+                Ok(engine) => EngineState::Ready(Box::new(engine)),
                 Err(error) => EngineState::Failed(format!("{error:#}")),
             };
         }
@@ -157,7 +160,7 @@ impl IntelligenceRuntime {
             EngineState::Ready(engine) => {
                 let metadata = engine.metadata();
                 engine
-                    .generate(system_prompt, prompt, max_output_tokens)
+                    .generate(system_prompt, prompt, max_output_tokens, schema)
                     .map(|text| (text, metadata.clone()))
                     .map_err(|error| (error, metadata))
             }
