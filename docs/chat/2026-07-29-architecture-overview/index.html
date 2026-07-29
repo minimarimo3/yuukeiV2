@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yuukei 現在のアーキテクチャ（2026-07-29 実装スナップショット）</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --panel-2: #fbfbf9;
+    --ink: #1b1c1a;
+    --ink-2: #55584f;
+    --ink-3: #86897f;
+    --line: #dcdcd4;
+    --accent: #3f6f4e;
+    --accent-soft: #e4efe6;
+    --home: #3f6f4e;
+    --host: #6a5a9c;
+    --surface: #a2622c;
+    --ext: #2f6f86;
+    --pack: #8a5a70;
+    --warn: #a4562a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14150f;
+      --panel: #1c1e19;
+      --panel-2: #212420;
+      --ink: #eceade;
+      --ink-2: #b3b5a8;
+      --ink-3: #7f8378;
+      --line: #33362e;
+      --accent: #8fc39c;
+      --accent-soft: #24322a;
+      --home: #8fc39c;
+      --host: #b3a6e2;
+      --surface: #e0a469;
+      --ext: #83c3dc;
+      --pack: #dda3ba;
+      --warn: #e0a06d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", system-ui, sans-serif;
+    line-height: 1.75;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px 96px; }
+  header {
+    padding: 56px 0 28px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 32px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .08em;
+    color: var(--ink-3);
+    text-transform: uppercase;
+  }
+  h1 { font-size: 30px; line-height: 1.35; margin: 10px 0 6px; letter-spacing: -.01em; }
+  .sub { color: var(--ink-2); font-size: 14px; margin: 0; }
+  h2 {
+    font-size: 20px;
+    margin: 56px 0 14px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    margin-right: 10px;
+  }
+  h3 { font-size: 15px; margin: 26px 0 8px; color: var(--ink); }
+  p { margin: 10px 0; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+  code {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  a { color: var(--accent); }
+
+  .verdict {
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin: 24px 0 8px;
+  }
+  .verdict p:first-child { margin-top: 0; }
+  .verdict p:last-child { margin-bottom: 0; }
+
+  .note {
+    font-size: 13px;
+    color: var(--ink-2);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 16px 0;
+  }
+  .note strong { color: var(--ink); }
+
+  figure { margin: 22px 0; }
+  figcaption {
+    font-size: 12.5px;
+    color: var(--ink-3);
+    margin-top: 10px;
+    font-family: var(--mono);
+  }
+  .scroller { overflow-x: auto; }
+  svg { display: block; max-width: 100%; height: auto; }
+
+  /* ---- layered diagram ---- */
+  .stack { display: grid; gap: 10px; }
+  .band {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .band > .band-title {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .06em;
+    color: var(--ink-3);
+    margin-bottom: 10px;
+  }
+  .band.home { border-left: 3px solid var(--home); }
+  .band.host { border-left: 3px solid var(--host); }
+  .band.surface { border-left: 3px solid var(--surface); }
+  .band.ext { border-left: 3px solid var(--ext); }
+  .band.pack { border-left: 3px solid var(--pack); }
+  .cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+  .cell {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 9px 11px;
+    font-size: 13px;
+  }
+  .cell b { display: block; font-weight: 600; font-size: 13px; }
+  .cell span { display: block; color: var(--ink-3); font-family: var(--mono); font-size: 11px; margin-top: 3px; }
+  .flowmark {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    letter-spacing: .04em;
+  }
+
+  /* ---- steps ---- */
+  ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 20px 0; }
+  ol.steps > li {
+    counter-increment: s;
+    position: relative;
+    padding: 12px 0 12px 52px;
+    border-bottom: 1px dashed var(--line);
+  }
+  ol.steps > li:last-child { border-bottom: 0; }
+  ol.steps > li::before {
+    content: counter(s, decimal-leading-zero);
+    position: absolute; left: 0; top: 13px;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 7px;
+  }
+  ol.steps b { font-weight: 600; }
+  ol.steps .where { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); display: block; }
+
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; letter-spacing: .04em; color: var(--ink-3); font-weight: 600; text-transform: uppercase; }
+  td.mono, th.mono { font-family: var(--mono); font-size: 12px; }
+  tbody tr:hover { background: var(--panel-2); }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    border-radius: 999px;
+    padding: 1px 9px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--ink-2);
+  }
+  .pill.ok { color: var(--home); border-color: color-mix(in srgb, var(--home) 40%, var(--line)); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+
+  .checks { display: grid; gap: 8px; margin: 18px 0; }
+  .check {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 11px 14px;
+    font-size: 13.5px;
+  }
+  .check .mark { font-family: var(--mono); font-size: 15px; line-height: 1.5; }
+  .check.pass .mark { color: var(--home); }
+  .check.soft .mark { color: var(--warn); }
+  .check small { display: block; color: var(--ink-2); font-size: 12.5px; }
+
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+  pre b { color: var(--ink); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  @media (max-width: 620px) {
+    h1 { font-size: 24px; }
+    .wrap { padding: 0 16px 64px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">yuukeiV2 / architecture snapshot</div>
+  <h1>現在のアーキテクチャ（実装から読み直したもの）</h1>
+  <p class="sub">2026-07-29 時点 / HEAD = <span class="mono">d937481</span>「fix:LiteRT-LMの制約付きJSONデコードを実装」</p>
+</header>
+
+<div class="verdict">
+  <p><b>結論。</b>02-architecture.md の Resident Mesh は、境界としてはコードにほぼそのまま入っている。crate 依存グラフに逆流はなく、<code>yuukei-daihon</code> は protocol にすら依存しない完全な葉、Tauri 型は <code>apps/desktop/src-tauri</code> の外に出ていない。AGENTS.md の Avoid に対する明確な違反は見つからなかった。</p>
+  <p>ただし現状は <b>「Resident Mesh の形をした単一プロセス」</b>である。Resident Home は独立サーバーではなく Device Host が <code>ResidentHome</code> 構造体を <code>Arc</code> で抱える in-process 呼び出しで、protocol は型としては JSON 化可能だが、まだ一度もプロセス境界を越えていない。Cloud-Capable Layout は設計のみ。プロセス境界を実際に越えているのは Extension（process JSONL）だけで、そこが唯一の実証済みリモート化ポイントになっている。</p>
+</div>
+
+<h2><span class="num">01</span>全体像 — 4つの責務と、その実体</h2>
+
+<p>ドキュメントの5コンポーネントが、実際にどのファイルとして存在しているか。括弧内は実測行数。</p>
+
+<figure>
+<div class="stack">
+
+  <div class="band surface">
+    <div class="band-title">SURFACE CLIENT — 身体と演出（人格・記憶を持たない）</div>
+    <div class="cells">
+      <div class="cell"><b>ActorApp</b><span>src/ActorApp.tsx (1445)</span></div>
+      <div class="cell"><b>BubbleSurfaceApp</b><span>src/BubbleSurfaceApp.tsx (594)</span></div>
+      <div class="cell"><b>設定画面 App</b><span>src/App.tsx (1324)</span></div>
+      <div class="cell"><b>ヒット判定・ジェスチャー</b><span>actorHitZones / pointerGesture</span></div>
+    </div>
+  </div>
+
+  <div class="flowmark">▲ Tauri event <code>yuukei-command</code>（RuntimeCommand 配信） ／ ▼ <code>invoke()</code> 約60コマンド</div>
+
+  <div class="band host">
+    <div class="band-title">DEVICE HOST — OS観測・ウィンドウ・権限・ローカル Extension のホスト</div>
+    <div class="cells">
+      <div class="cell"><b>Tauri アプリ層</b><span>src-tauri/src/lib.rs (2005)</span></div>
+      <div class="cell"><b>Desktop Stage</b><span>desktop_stage/ (窓・perch・walk・drag)</span></div>
+      <div class="cell"><b>観測</b><span>window / folder / download / idle / power</span></div>
+      <div class="cell"><b>生活リズム</b><span>life_rhythm.rs, presence loop</span></div>
+      <div class="cell"><b>設定・インストール</b><span>settings / extension_settings / world_pack_*</span></div>
+      <div class="cell"><b>CLI Surface</b><span>apps/cli（同じ device-host を使う）</span></div>
+    </div>
+  </div>
+
+  <div class="flowmark">▼ <code>home.ingest_event(RuntimeEvent)</code>（現状は同一プロセス内の直接呼び出し） ／ ▲ <code>broadcast::Receiver&lt;RuntimeCommand&gt;</code></div>
+
+  <div class="band home">
+    <div class="band-title">RESIDENT HOME — 住人の継続性。event log が記録の正</div>
+    <div class="cells">
+      <div class="cell"><b>event_flow</b><span>ingest → dispatch → emit (595)</span></div>
+      <div class="cell"><b>dialogue</b><span>LLM fallback / interpret (610)</span></div>
+      <div class="cell"><b>memory</b><span>index / retrieve 中継 (358)</span></div>
+      <div class="cell"><b>mood</b><span>気分と talk_impulse 調停 (425)</span></div>
+      <div class="cell"><b>choice / speech</b><span>選択肢の await、TTS 起動</span></div>
+      <div class="cell"><b>CapabilityRouter</b><span>crates/yuukei-capability</span></div>
+      <div class="cell"><b>ExtensionRegistry</b><span>crates/yuukei-extension (1588)</span></div>
+      <div class="cell"><b>Canonical Event Log</b><span>event-log → SQLite (1075)</span></div>
+    </div>
+  </div>
+
+  <div class="flowmark">◀ capability 呼び出し・hook・event 提案 ／ ▶ 台本 dispatch</div>
+
+  <div class="cells" style="grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
+    <div class="band ext" style="margin:0">
+      <div class="band-title">EXTENSION — 別プロセス（唯一の実プロセス境界）</div>
+      <div class="cells">
+        <div class="cell"><b>yuukei-intelligence</b><span>Rust exe / persistentJsonl / 9 capability</span></div>
+        <div class="cell"><b>yuukei-voicevox</b><span>node / oneshot / speech.synthesis</span></div>
+      </div>
+    </div>
+    <div class="band pack" style="margin:0">
+      <div class="band-title">WORLD PACK + DAIHON HOST — 世界観と決定的な生活</div>
+      <div class="cells">
+        <div class="cell"><b>yuukei-world</b><span>WorldPack / DaihonAdapter (3943)</span></div>
+        <div class="cell"><b>yuukei-daihon</b><span>lexer→parser→runtime (計 5.5k)</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+<figcaption>行数は .rs / .tsx の実測値（テストファイルを除く）。</figcaption>
+</figure>
+
+<div class="note">
+<strong>境界の実際：</strong> Surface ↔ Device Host は Tauri IPC で本当に切れている（型は <code>packages/yuukei-protocol</code> に ts-rs で自動生成）。Device Host ↔ Resident Home は crate 境界のみで、通信ではない。Resident Home ↔ Extension は stdin/stdout の JSONL で、ここだけが実プロセス境界。
+</div>
+
+<h2><span class="num">02</span>crate 依存グラフ — 逆流はない</h2>
+
+<figure>
+<div class="scroller">
+<svg viewBox="0 0 900 510" role="img" aria-label="crate 依存グラフ">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--ink-3)"/>
+    </marker>
+    <style>
+      .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; rx: 8; }
+      .box.app { stroke: var(--surface); stroke-width: 1.8; }
+      .box.host { stroke: var(--host); stroke-width: 1.8; }
+      .box.home { stroke: var(--home); stroke-width: 1.8; }
+      .lbl { fill: var(--ink); font-family: var(--mono); font-size: 12.5px; }
+      .sub { fill: var(--ink-3); font-family: var(--mono); font-size: 10.5px; }
+      .edge { stroke: var(--ink-3); stroke-width: 1.2; fill: none; marker-end: url(#ah); opacity: .75; }
+      .edge.dash { stroke-dasharray: 4 4; opacity: .5; }
+      .tier { fill: var(--ink-3); font-family: var(--mono); font-size: 10px; letter-spacing: .08em; }
+    </style>
+  </defs>
+
+  <text class="tier" x="8" y="30">APPS</text>
+  <rect class="box app" x="120" y="16" width="235" height="44"/>
+  <text class="lbl" x="136" y="36">yuukei-desktop</text>
+  <text class="sub" x="136" y="51">Tauri 2 / tray / windows</text>
+
+  <rect class="box app" x="545" y="16" width="215" height="44"/>
+  <text class="lbl" x="561" y="36">yuukei-cli-surface</text>
+  <text class="sub" x="561" y="51">検証用メニューCLI</text>
+
+  <text class="tier" x="8" y="128">HOST</text>
+  <rect class="box host" x="300" y="112" width="270" height="44"/>
+  <text class="lbl" x="316" y="132">yuukei-device-host</text>
+  <text class="sub" x="316" y="147">観測 / 設定 / インストール / 生活リズム</text>
+
+  <text class="tier" x="8" y="218">CORE</text>
+  <rect class="box home" x="300" y="202" width="270" height="44"/>
+  <text class="lbl" x="316" y="222">yuukei-resident-home</text>
+  <text class="sub" x="316" y="237">住人の継続性・記録の正</text>
+
+  <rect class="box" x="24" y="296" width="185" height="44"/>
+  <text class="lbl" x="38" y="316">yuukei-world</text>
+  <text class="sub" x="38" y="331">WorldPack / DaihonAdapter</text>
+
+  <rect class="box" x="228" y="296" width="175" height="44"/>
+  <text class="lbl" x="242" y="316">yuukei-extension</text>
+  <text class="sub" x="242" y="331">process runtime / hooks</text>
+
+  <rect class="box" x="422" y="296" width="175" height="44"/>
+  <text class="lbl" x="436" y="316">yuukei-event-log</text>
+  <text class="sub" x="436" y="331">SQLite / privacy filter</text>
+
+  <rect class="box" x="616" y="296" width="175" height="44"/>
+  <text class="lbl" x="630" y="316">yuukei-capability</text>
+  <text class="sub" x="630" y="331">CapabilityRouter</text>
+
+  <text class="tier" x="8" y="474">LEAF</text>
+  <rect class="box" x="24" y="412" width="185" height="44"/>
+  <text class="lbl" x="38" y="432">yuukei-daihon</text>
+  <text class="sub" x="38" y="447">chumsky / miette のみ</text>
+
+  <rect class="box" x="422" y="412" width="270" height="44"/>
+  <text class="lbl" x="436" y="432">yuukei-protocol</text>
+  <text class="sub" x="436" y="447">RuntimeEvent / Command / ts-rs export</text>
+
+  <!-- edges -->
+  <path class="edge" d="M 237,60 L 380,112"/>
+  <path class="edge" d="M 652,60 L 500,112"/>
+  <path class="edge" d="M 435,156 L 435,202"/>
+
+  <path class="edge" d="M 350,246 L 150,296"/>
+  <path class="edge" d="M 390,246 L 320,296"/>
+  <path class="edge" d="M 480,246 L 505,296"/>
+  <path class="edge" d="M 520,246 L 690,296"/>
+
+  <path class="edge" d="M 100,340 L 100,412"/>
+  <path class="edge" d="M 170,340 L 450,412"/>
+  <path class="edge" d="M 300,340 L 480,412"/>
+  <path class="edge" d="M 500,340 L 520,412"/>
+  <path class="edge" d="M 690,340 L 620,412"/>
+  <path class="edge" d="M 330,368 C 420,382 560,382 660,344" />
+
+  <path class="edge dash" d="M 300,44 C 200,120 130,180 240,296"/>
+  <path class="edge dash" d="M 780,60 C 850,180 850,300 700,412"/>
+
+  <text class="sub" x="216" y="382">extension → capability</text>
+</svg>
+</div>
+<figcaption>実線 = Cargo.toml の直接依存（主要経路）。破線 = apps から core への直参照（desktop は device-host に加え resident-home / world / protocol を、cli は protocol を直接使う）。device-host は core の全 crate を直接参照する。</figcaption>
+</figure>
+
+<div class="note">
+<strong>読みどころ。</strong> <code>yuukei-daihon</code> の依存は chumsky / miette / rand / chrono だけで、<code>yuukei-protocol</code> すら入っていない。AGENTS.md の「Resident Home を Daihon 内部型に依存させない」が、<code>yuukei-world</code> の <code>DaihonAdapter</code> trait による間接化として実際に成立している。Resident Home は <code>Arc&lt;dyn DaihonAdapter&gt;</code> しか知らない。
+</div>
+
+<h2><span class="num">03</span>イベント一巡 — 観測1件が声になるまで</h2>
+
+<p><code>ResidentHome::ingest_event</code> から <code>emit_command_for_event</code> までの実処理順。<span class="mono">crates/yuukei-resident-home/src/event_flow.rs</span> がこの流れの本体。</p>
+
+<ol class="steps">
+  <li><b>観測 → RuntimeEvent</b><span class="where">device-host: desktop_observation.rs / life_rhythm.rs / runtime.rs</span>
+  ウィンドウ・フォルダ・ダウンロード・アイドル・スリープ復帰・5分ごとの <code>presence.life_tick</code>・設定間隔（既定5分）の <code>presence.talk_impulse</code>。観測3種は既定OFF、タイトルとフルパスは記録せずカテゴリへ正規化する。</li>
+
+  <li><b>検証 → 追記 → snapshot 反映</b><span class="where">validate_runtime_event → event_log.append → apply_runtime_event_to_snapshot</span>
+  residentId 一致、RFC3339、World Pack が宣言した actor か、privacy.category 非空。<b>まず記録し</b>、それから解釈する。</li>
+
+  <li><b>選択肢の解決 / 解釈中のキュー退避</b><span class="where">resolve_pending_choice_event / defer_event_while_interpreting</span>
+  「解釈」await 中は <code>conversation.*</code> だけを最大16件キューへ積み、溢れたら <code>daihon.interpretation.queue.dropped</code> を記録して捨てる（捨てたことも記録に残る）。</li>
+
+  <li><b>Extension へ通知 → 提案イベントの取り込み</b><span class="where">notify_extensions_event_appended</span>
+  購読中の Extension が新しい RuntimeEvent を<b>提案</b>する。Resident Home が検証して log へ追記し、同じループの後段へ回す（最大 <code>MAX_EXTENSION_EVENT_HOPS = 4</code> 段）。</li>
+
+  <li><b>気分と衝動の調停</b><span class="where">maybe_evaluate_mood / moderate_talk_impulse_event</span>
+  <code>presence.life_tick</code> で <code>mood.evaluate</code> を呼び、結果は <code>ext.yuukei-intelligence.mood.changed</code> として内部イベント化。talkDesire が低ければ <code>presence.talk_impulse</code> を握り潰し、<code>presence.talk_impulse.skipped</code> を残す。</li>
+
+  <li><b>文脈の付与（enrich）</b><span class="where">enrich_event_for_daihon_dispatch</span>
+  <code>actorLocation</code> / <code>actorPresence</code> / <code>aiConnected</code> を注入。<code>desktop.folder.opened</code> なら直近7日の <code>desktop.download.completed</code> を引いて「最近の届きもの」を足す。<b>台本が状態を問い合わせる代わりに、Home が答えを持って行く</b>形。</li>
+
+  <li><b>signal の許可判定</b><span class="where">world_pack.allows_signal_with_aliases</span>
+  Pack の <code>signals.allow</code> と Extension が寄贈した別名の合成テーブルに無ければ、ここで静かに終了。</li>
+
+  <li><b>Daihon dispatch</b><span class="where">daihon.dispatch_with_interpret → daihon.dispatch.result を記録</span>
+  台本が動けば RuntimeCommand 列が返る。「解釈」に当たると Home 側のハンドラが <code>dialogue.interpret</code> capability を呼び、その間 3 のキューが効く。</li>
+
+  <li><b>台本が沈黙したときだけ LLM</b><span class="where">maybe_generate_dialogue_fallback（dialogue.generate, 上限120字）</span>
+  <b>AI は隙間を埋めるだけで、台本を置き換えない</b>という 01-concept の方針が、この分岐一箇所に集約されている。provider が居なければ何も起きない。</li>
+
+  <li><b>beforeCommandEmit フック</b><span class="where">apply_extensions_before_command_emit</span>
+  Extension が RuntimeCommand を変換できる唯一の点（<code>ExtensionHookPoint</code> は現在この1種のみ）。実行順は開発者の priority ではなく <code>settings/extensions.json</code> のユーザー設定。</li>
+
+  <li><b>発話予約 → 記録 → 配信 → TTS</b><span class="where">emit_command_for_event</span>
+  健全な <code>speech.synthesis</code> provider が居れば <code>speechPending: true</code> を付け、command も event log へ追記してから <code>broadcast</code> で Surface へ。TTS は別タスクで走り、完了時に <code>audio.play</code>（実長つき）が吹き出しの寿命を延ばす。</li>
+</ol>
+
+<div class="note">
+<strong>この流れの一貫性：</strong> RuntimeEvent も RuntimeCommand も、Surface に届く前に必ず event log へ入る。記憶・気分・記録 UI はすべてこの log からの派生で、どの派生も消して作り直せる。04-event-log-and-memory.md の「canonical log が正、他は derived」が実装として守られている。
+</div>
+
+<h2><span class="num">04</span>Capability と Extension の現在地</h2>
+
+<p><code>yuukei-capability</code> が定義する capability は10種。それを埋めているのは既定同梱の2つだけで、どちらも process runtime。</p>
+
+<table>
+  <thead>
+    <tr><th class="mono">capability</th><th>提供者</th><th>使われ方（Resident Home 側）</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="mono">dialogue.generate</td><td>yuukei-intelligence</td><td>台本が沈黙したときのフォールバック発話（120字上限）</td></tr>
+    <tr><td class="mono">dialogue.interpret</td><td>yuukei-intelligence</td><td>Daihon の「解釈」。await 中は会話イベントをキュー</td></tr>
+    <tr><td class="mono">dialogue.extract</td><td>yuukei-intelligence</td><td>会話からの事実抽出</td></tr>
+    <tr><td class="mono">memory.index</td><td>yuukei-intelligence</td><td>1トリガあたり最大7日分ずつ log を索引化</td></tr>
+    <tr><td class="mono">memory.retrieve</td><td>yuukei-intelligence</td><td>事実10件 / エピソード5件、10秒 timeout</td></tr>
+    <tr><td class="mono">memory.list / update / forget</td><td>yuukei-intelligence</td><td>設定画面「記憶」からの閲覧・修正・忘却</td></tr>
+    <tr><td class="mono">mood.evaluate</td><td>yuukei-intelligence</td><td>life_tick 契機、120秒 timeout（ローカル26Bを想定）</td></tr>
+    <tr><td class="mono">speech.synthesis</td><td>yuukei-voicevox</td><td>dialogue.say の後追い。失敗しても文字は出る</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead>
+    <tr><th>Extension</th><th class="mono">runtime</th><th>境界</th><th>特記</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>yuukei-intelligence</td>
+      <td class="mono">process / persistentJsonl</td>
+      <td>常駐 exe に JSONL、起動 timeout 120秒</td>
+      <td>LiteRT-LM を <code>libloading</code> で動的ロード。<code>ext.yuukei-intelligence.mood.changed</code> を発行し、別名 <code>気分_変化</code> を台本へ寄贈する</td>
+    </tr>
+    <tr>
+      <td>yuukei-voicevox</td>
+      <td class="mono">process / oneshot</td>
+      <td>node を都度起動、15秒 timeout</td>
+      <td>住人別話者を設定文字列（<code>yuukei=2,partner=3</code>）で持つ</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+<strong>Extension が Core を触れない仕組み：</strong> どちらも Cargo workspace には居るが、<code>yuukei-intelligence</code> の依存に core crate は1つも無い（anyhow / libloading / serde / uuid のみ）。<b>同じリポジトリに居るのに、コード上の結合が存在しない</b>——これが「Extension は公開 protocol のコピーだけを受け取る」の実装的な担保になっている。連続3回失敗で supervisor が休止させる異常系も入っている。
+</div>
+
+<h2><span class="num">05</span>状態の置き場（YUUKEI_DATA_DIR）</h2>
+
+<pre><b>YUUKEI_DATA_DIR/</b>
+├── <b>residents/&lt;installId&gt;/</b>          住人1人ぶんの生活史。Pack install ごとに分離
+│   ├── events.sqlite3               <b>canonical event log（記録の正）</b> 100万件超で古い10%をtrim
+│   ├── scene-history.json           シーン実行履歴（derived）
+│   ├── variables.json               Daihon 変数（derived）
+│   └── mood.json                    気分（60分超過で破棄する揮発状態）
+├── <b>settings/</b>
+│   ├── app.json                     おしゃべり間隔・表示倍率（50〜200%）
+│   ├── stage.json                   actor の足元 anchor。<b>操作結果なので log へは流さない</b>
+│   └── extensions.json              有効/無効・hook 実行順・capability 既定
+├── <b>extensions/&lt;extensionId&gt;/</b>       インストール済み Extension（コピー式）
+├── <b>extension-data/&lt;extensionId&gt;/</b>   Extension 専有ストア（記憶DBなど、derived）
+└── app-activity.jsonl               アプリ動作ログ。10MB×3世代ローテ
+</pre>
+
+<p>「住人の位置は event log に入れない／住人の<b>現在地</b>（<code>actor.location.set</code> / <code>actor.exit</code> / <code>actor.enter</code>）は入れる」という切り分けが効いている。前者はユーザーの操作結果、後者は物語上の出来事で、再起動時に復元されるのは後者だけ。</p>
+
+<h2><span class="num">06</span>AGENTS.md の Avoid との照合</h2>
+
+<div class="checks">
+  <div class="check pass"><div class="mark">✓</div><div><b>Resident Home に Tauri / OS API が漏れていない</b><small><code>tauri</code> / <code>windows</code> / <code>objc2</code> crate は <code>apps/desktop/src-tauri</code> の Cargo.toml にしか現れない。resident-home の依存は core 5 crate と tokio / serde / chrono だけ。</small></div></div>
+
+  <div class="check pass"><div class="mark">✓</div><div><b>Surface が人格・記憶・capability 選択を持っていない</b><small>フロントは <code>invoke()</code> と <code>yuukei-command</code> リスナのみ。capability の選択は <code>settings/extensions.json</code> → Resident Home の CapabilityRouter。</small></div></div>
+
+  <div class="check pass"><div class="mark">✓</div><div><b>Extension 同士が直結していない</b><small>voicevox も intelligence も互いを知らない。合成は Resident Home の <code>emit_command_for_event</code>（発話 → TTS）で行われる。</small></div></div>
+
+  <div class="check pass"><div class="mark">✓</div><div><b>記憶スキーマが Core に焼き込まれていない</b><small>Core が持つのは <code>MemorySnippet</code> 等の protocol 型だけ。実体の索引は extension-data 配下。</small></div></div>
+
+  <div class="check pass"><div class="mark">✓</div><div><b>World Pack が OS/AI を直接呼んでいない</b><small><code>packs/default-yuukei/pack.json</code> は capability を <code>optional</code> で宣言するのみ。<code>required</code> は空＝AI 無しでも起動する。</small></div></div>
+
+  <div class="check soft"><div class="mark">△</div><div><b>「chat UI から始めない」は守られているが、設定画面が肥大している</b><small><code>App.tsx</code> 1324行 + パネル4種。ROADMAP の未チェック項目「App.tsx の残りの分割」「開発者向け文言の排除」と一致する。体験の中心はデスクトップ上の住人のままなので方針違反ではない。</small></div></div>
+</div>
+
+<h2><span class="num">07</span>目に付いた構造上の論点（提案ではなく観察）</h2>
+
+<h3>1. Resident Home が「サーバー」になる日のコスト</h3>
+<p>現在 Device Host は <code>ResidentHome</code> を直接 <code>await</code> している。protocol 型は全て serde 可能で ts-rs export もされているので<b>型の準備は済んでいる</b>が、<code>ingest_event</code> が <code>Vec&lt;RuntimeCommand&gt;</code> を同期的に返す形になっているのが、リモート化したときに最初に効く箇所になる。broadcast 側（command stream）は既にストリーム形なので、そちらは素直に乗る。</p>
+
+<h3>2. hook point が1種類だけ</h3>
+<p><code>ExtensionHookPoint</code> の variant は <code>BeforeCommandEmit</code> のみ。02 が挙げる <code>onEventAppended</code> と <code>signalAliases</code> は hook ではなく、それぞれ event 購読・manifest 宣言という別経路で実装されている。ドキュメントは3つを並列に列挙しているので、読み手が「3つの hook point がある」と誤読しうる。02 の Extension 節の書き方だけ揃える余地がある。</p>
+
+<h3>3. 大きくなっている実装ファイル</h3>
+<p><code>yuukei-world/src/lib.rs</code> 3943行が単一ファイル（WorldPack 定義・検証・DaihonAdapter・シーン履歴が同居）、<code>device-host/src/runtime.rs</code> 1219行。後者は ROADMAP に分割候補として載っているが、前者は載っていない。境界としては正しい位置にあるので緊急ではない。</p>
+
+<h3>4. Windows 実機確認が M5 の残タスク</h3>
+<p>M2 の観測（IShellWindows によるフォルダ遭遇、EnumWindows によるウィンドウ地形）が「Windows 実機未検証」のまま ROADMAP に残っている一方、直近3コミットは Windows 固有の修正（タスクバー干渉、常時前面窓の除去、キャプション）で埋まっている。実装は進んだが ROADMAP のチェックが追いついていない状態に見える。</p>
+
+<footer>
+  <p>調査方法：HEAD <span class="mono">d937481</span> のワークツリーから Cargo.toml 群・manifest.json・pack.json・<span class="mono">event_flow.rs</span> / <span class="mono">lib.rs</span> 系を読んだ静的レビュー。<b>cargo test / pnpm test は実行していない</b>ので、動作の裏付けではなく構造の記述として読んでほしい。行数は空行込みの実測値。</p>
+</footer>
+
+</div>
+</body>
+</html>
