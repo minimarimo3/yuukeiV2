@@ -136,7 +136,7 @@ AI Extensionが直接World Packやevent logを書き換えない。AIの出力�
 
 ## Event Processing Flow
 
-新設計の基本フロー:
+基本フロー:
 
 ```mermaid
 flowchart TB
@@ -197,7 +197,7 @@ World Packは「この場面でこの能力が必要」という宣言だけを�
 
 Extensionの選択、権限、実行場所、timeout、fallbackはResident Homeが管理する。World Packは特定Extension名に強く依存しない。
 
-World Pack作者が、Daihon不一致時だけAIへ環境起点の余白を委任したい場合は `llmDelegation` でcanonical signalを明示する。未宣言のsignalは委任されず、`llmDelegation` のないPackは従来通り沈黙する。v1ではユーザー発話を汎用会話へフォールバックさせない。`dialogue.generate` はDaihonが生成指示を所有する場合に限り使い、常設チャットの代替にしない。
+World Pack作者が、Daihon不一致時だけAIへ環境起点の余白を委任したい場合は `llmDelegation` でcanonical signalを明示する。未宣言のsignalは委任されず、`llmDelegation` のないPackはDaihon不一致時に沈黙する。v1ではユーザー発話を汎用会話へフォールバックさせない。`dialogue.generate` はDaihonが生成指示を所有する場合に限り使い、常設チャットの代替にしない。
 
 ```json
 {

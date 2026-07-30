@@ -2,7 +2,7 @@
 
 Yuukei Coreが持つのは「記憶」ではなく「記録」である。
 
-記憶方式は変化が速い。将来、OSSの記憶エンジン、独自バイナリDB、専用ハードウェア、ローカルLLM、クラウドAI、全く別の検索方式が登場しても差し替えられる必要がある。CoreがSummaries、Facts、Episodes、vector storeのような固定モデルを所有すると、その変化に弱くなる。
+記憶方式は変化が速いため、OSSの記憶エンジン、独自バイナリDB、専用ハードウェア、ローカルLLM、クラウドAI、異なる検索方式へ差し替えられる構造とする。CoreがSummaries、Facts、Episodes、vector storeのような固定モデルを所有すると、この交換可能性が失われる。
 
 ## Canonical Event Log
 
@@ -36,7 +36,7 @@ Extensionが `RuntimeCommand` を変換した場合、Resident Homeは `extensio
 
 長期記憶はMemory Extensionが作る派生物である。
 
-Extensionはmanifestで許可されたevent log範囲を読み、好きな方式で記憶を構築できる。
+Extensionはmanifestで許可されたevent log範囲を読み、任意の方式で記憶を構築できる。
 
 - 要約DB。
 - facts/episodes分類。
@@ -59,7 +59,7 @@ Yuukei Coreは、それらの内部構造を知らない。Coreは `memory.index
 - `memory.update`: factテキストの編集のみ(episodeは出来事の記録なので編集不可)。空文字と500文字超は拒否する。
 - `memory.forget`: ID指定の個別削除、または `all: true` での全削除。全削除UIは確認を必須にする。
 
-統合は遅延実行でよい。Resident Homeは `app.startup` と `device.sleep.before` を受けたとき、event log上の `memory.index` 成功記録を見て、今日より前の未統合日を直近7日分までMemory Extensionへ渡す。失敗やprovider未登録はCoreの動作を止めず、次回の起動やスリープ前に再試行される。
+統合は遅延実行とする。Resident Homeは `app.startup` と `device.sleep.before` を受けたとき、event log上の `memory.index` 成功記録を見て、今日より前の未統合日を直近7日分までMemory Extensionへ渡す。失敗やprovider未登録はCoreの動作を止めず、次回の起動やスリープ前に再試行される。
 
 想起には小さな予算を置く。発話生成の直前に `memory.retrieve` を呼び、facts最大10件、episodes最大5件を `DialogueGenerateInput.memories` へ入れる。retrieveの失敗、timeout、provider未登録は、記憶なしの発話生成として扱う。`dialogue.interpret` は機械的判定なので記憶を受け取らない。
 
@@ -89,7 +89,7 @@ Resident Homeはgrantを検証し、許可されたevent type、privacy category
 
 ## Official Intelligence Extension
 
-公式のLLM/Memory Extensionは用意してよい。ただし、それは推奨実装であってCoreではない。
+公式のLLM/Memory Extensionは推奨実装として提供するが、Coreには含めない。
 
 公式Extensionの役割:
 
@@ -149,13 +149,13 @@ type EventLogRecord = {
 
 ## Reindexing
 
-Memory Extensionを交換したとき、Coreはevent logを再生して新Extensionへ `memory.rebuild` を依頼できるべきである。
+Memory Extensionを交換したとき、Coreはevent logを再生し、新しいExtensionへ `memory.rebuild` を依頼できる。
 
-再index時の考え方:
+再indexの要件:
 
 - Coreはevent logを順序付きで提供する。
-- Extensionは自分の内部DBを破棄して再構築してよい。
+- Extensionは自分の内部DBを破棄して再構築できる。
 - 途中失敗してもcanonical event logは壊れない。
 - Extension固有の移行はExtension責任。
 
-この構造により、Yuukeiは特定の記憶研究や実装に賭けず、将来の良い方式を取り込める。
+この構造により、Yuukeiは特定の記憶方式に固定されず、新しい方式を取り込める。

@@ -1,6 +1,6 @@
-# Yuukei Design Notes
+# Yuukei Design
 
-既存MVPの実装を説明する文書ではなく、次の実装者やCodexが「何を作るべきか」を読み取るための思想と境界をまとめます。
+この文書群は、Yuukeiを新規に実装する際のプロダクト思想、責務、通信境界を定義します。既存MVPの実装構造は対象としません。
 
 Yuukei Coreは、LLMアプリでも、チャットUIでも、デスクトップマスコットでもありません。Coreの責務は、`Daihon`、canonical event log、内部`CapabilityRouter`、Extension実行境界、surface protocolを束ね、UI内生活者が継続して存在するための土台を提供することです。
 
@@ -40,11 +40,11 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 - Surfaceは身体であり、人格や長期状態を所有しない。
 - Extensionは、CoreやWorld Packの所有者にならない。
 
-## Recommended Technical Anchor
+## Default Technical Anchor
 
-最初の実装はRust/Tauri軸でよい。ただし、Resident Home内部はTauri非依存にする。TauriはDevice HostやDesktop Surfaceを実装するための選択肢であり、Coreの境界に染み込ませない。
+初期実装の既定技術はRust/Tauriとする。ただし、Resident Home内部はTauri非依存とする。TauriはDevice HostやDesktop Surfaceの実装基盤であり、Coreの境界には持ち込まない。
 
-最小構成では、同一マシン内でResident Home、Device Host、Surface Client、Extension実行プロセスを起動してよい。将来のクラウド構成では、同じprotocolをWebSocketまたはHTTP/JSON-RPC越しに流せるようにする。
+最小構成では、Resident Home、Device Host、Surface Client、Extension実行プロセスを同一マシン上で起動する。クラウド構成でも同じprotocolを使用し、WebSocketまたはHTTP/JSON-RPC越しに通信できるようにする。
 
 ## Development Surfaces
 

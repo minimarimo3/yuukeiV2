@@ -1,8 +1,8 @@
 # Protocols: 意味境界の通信契約
 
-Yuukeiの境界は、ライブラリ呼び出しではなくprotocolとして扱う。最初は同一プロセス内の関数でもよいが、設計上はJSON-RPCまたはWebSocketで分離できる形にする。
+Yuukeiの境界は、ライブラリ呼び出しではなくprotocolとして扱う。初期実装で同一プロセス内の関数を使う場合も、JSON-RPCまたはWebSocketで分離できる契約を維持する。
 
-完全なスキーマを早く固定しすぎない。固定するのは、意味境界を保つために必要な概念フィールドだけにする。
+スキーマは、意味境界を保つために必要な概念フィールドに限定する。実装固有の詳細を早期に固定しない。
 
 ## Common Envelope
 
@@ -78,7 +78,7 @@ type RuntimeEvent = YuukeiMessage & {
 - `desktop.window.appeared` / `desktop.window.closed` / `desktop.window.focused`: payloadは `windowKey`(セッション内で安定な不透明ID)と `app`(アプリ名を正規化した文字列)。**ウィンドウタイトルは記録しない**。位置・サイズの変化はevent logへ流さず、Device Host内の地形スナップショット(perch追従用)だけが持つ。`focused` は1秒未満の切り替えをデバウンスする。
 - `desktop.folder.opened`: payloadは `category`(`downloads` / `desktop` / `documents` / `pictures` / `trash` / `other`)と `app`(`finder` / `explorer`)。**生のパスは記録しない**。同じフォルダの連続再通知はデバウンスする。実装はWindows(IShellWindows)を優先し、macOS(Accessibility/Scripting、要権限)はベストエフォート。
 - `desktop.download.completed`: Downloadsディレクトリのwatcherから発行する。payloadは `fileName` と `fileCategory`(`image` / `video` / `audio` / `document` / `archive` / `app` / `other`)。フルパスは記録しない。ブラウザの一時ファイル(`.crdownload` / `.part` 等)は完了までイベント化しない。
-- これらのrecordには `privacy.category: "desktop-observation"` を付け、event log閲覧・削除UI(M4)の対象にする。
+- これらのrecordには `privacy.category: "desktop-observation"` を付け、event log閲覧・削除UIの対象にする。
 
 Daihon向け標準別名は `窓_出現` / `窓_消滅` / `窓_注目` / `フォルダ_開いた` / `ダウンロード_完了`。Daihonへは、payloadのキーに加えて次の日本語入力名を渡す: `desktop.window.*` では `入力#アプリ`(app)と `入力#窓ID`(windowKey)、`desktop.folder.opened` では `入力#フォルダ`(category)と `入力#アプリ`、`desktop.download.completed` では `入力#ファイル名`(fileName)と `入力#ファイル種類`(fileCategory)。
 
@@ -177,7 +177,7 @@ Desktop Stage向けのcommand family:
 - `stage.walk`: 住人を同一モニタ内で水平に歩かせる(v1は水平のみ、モニタをまたがない)。payloadは `destination`(`right-edge` | `left-edge`)、`motion`(World Packの `motions` に登録したモーションID。省略時 `walk`)、`speedPxPerSec`(省略時 240)。Device Hostがactor windowを一定速度で目標x(モニタ端、余白はDevice Hostが決める)へ動かす。perch中に受けたら先に座りを解除する(`stage.perch.ended` reason: `walk`)。歩行が終わったら `stage.walk.ended` RuntimeEvent(payload: `reason` = `arrived` | `user-drag` | `replaced`)を返し、最終位置をstage状態として永続化する(02)。歩行中につままれたら中断(`user-drag`)、新しい `stage.walk` を受けたら置き換え(`replaced`)。
 - 歩行中の見た目はsnapshot経由で伝える。Resident Homeは `stage.walk` commandの通過時にactorの `motion`(payloadの `motion`)と `heading`(`destination` から導出した `left` | `right`)を設定し、`stage.walk.ended` RuntimeEventで両方を既定(空文字=正面・静止)へ戻す。Surfaceは `heading` が付いている間、住人を進行方向へ向けて描画する。`heading` は `ActorSnapshot` のfieldで、空文字が正面を意味する。
 
-ユーザーは住人を長押し(500ms)でつまんで、デスクトップの好きな場所へ動かせる。長押し未満のクリックは従来どおり `avatar.gesture.poke`。つまんだ時点で `avatar.gesture.grab` が発行され、perch中なら座りは解除されて `stage.perch.ended`(reason: `user-drag`)が返る。移動中はOSネイティブのウィンドウドラッグを使い、離した位置はモニタ内へクランプして確定、`avatar.gesture.drop` が発行される。確定した位置はDevice Hostのstage状態として永続化される(02)。
+ユーザーは住人を長押し(500ms)でつまんで、デスクトップの任意の場所へ動かせる。500ms未満のクリックは `avatar.gesture.poke` として扱う。つまんだ時点で `avatar.gesture.grab` が発行され、perch中なら座りは解除されて `stage.perch.ended`(reason: `user-drag`)が返る。移動中はOSネイティブのウィンドウドラッグを使い、離した位置はモニタ内へクランプして確定し、`avatar.gesture.drop` が発行される。確定した位置はDevice Hostのstage状態として永続化される(02)。
 
 これらは演出意図のprotocolであり、OS API呼び出しそのものではない。World PackとDaihonは「雨を降らせる」「この住人をこのanchorに座らせる」といった意図を出し、Desktop Device HostとSurfaceがmonitor、actor window、内容密着のbubble window、一時effect window、OS window anchor、cursorなどの整合性を管理する。
 
@@ -204,7 +204,7 @@ Desktop Surfaceの吹き出しは住人ごとに同時に1個までとする。`
 - `speechPending` なし(声を持たない住人、provider不在)の吹き出しは、表示直後から推定速度で逐次表示する。逐次表示は表示時間が尽きる前に必ず全文に到達させる。
 - 寿命の同期: `speechPending` 付き吹き出しの初期表示時間は「フォールバック猶予+読み時間」とする。対応する `audio.play` が届いたら、表示時間を max(読み時間, 表示からの経過+音声実長+余韻1.5秒) に置き換える。payloadに明示 `durationMs` がある場合も、音声がそれより長ければ同様に延長する(音声再生中に吹き出しが先へ消えることを防ぐ)。`audio.play` の `durationMs` が欠けている場合は推定速度フォールバックと同じ扱いにする。
 - 吹き出しの大きさは全文で確保し、逐次表示の進行で伸縮させない。未解決の選択肢はテキストの逐次表示と独立に即表示する。
-- 対応する吹き出しがすでに消えている・置き換えられている `audio.play` は、表示状態に影響を与えない(再生は従来どおり後勝ち1本)。
+- 対応する吹き出しがすでに消えている、または置き換えられている `audio.play` は表示状態に影響を与えない。音声再生は後勝ち1本とする。
 
 Daihon作者がWorld Packの `speakerAliases` を使って短く書いた場合も、RuntimeCommandに出る話者はcanonical actor IDへ正規化する。SurfaceやExtensionは `ゆ` や `パ` のような台本上の短縮名を解釈せず、`target.actorId` と `payload.speakerId` のcanonical actor IDだけを扱う。
 
@@ -397,7 +397,7 @@ CLI Surfaceの目的は、GUI(desktop Surface)と同じcanonical signalを同じ
 
 - 動的一覧(アクター、ヒットゾーン、拡張機能)は、固定項目の後にID辞書順で 1..N(拡張機能は 2..N+1)を割り当て、番号を安定させる。0 は戻る。
 - ジェスチャーはGUIと同じDevice Host入口(`send_avatar_gesture_poke` / `send_avatar_gesture_grab` / `send_avatar_gesture_drop`)を呼ぶ。ヒットゾーンはactive World Packのavatar定義(`hitZones`)から列挙する。
-- CLIが実ポインタを持たないため、pokeの付帯フィールドは固定値 `input: {kind: "cli", button: "none"}`、`screen: {x: 0, y: 0}`、`hitSurface: "unknown"` とする。`"unknown"` はdesktop Surfaceが素材判定に失敗したときのフォールバック値と同じであり、GUIからの信号と同じ形を保つ(台本は `入力#hitSurface` を常に参照できる)。`hitBone` は送らない(現状どのpackも参照していない)。
+- CLIは実ポインタを持たないため、pokeの付帯フィールドは固定値 `input: {kind: "cli", button: "none"}`、`screen: {x: 0, y: 0}`、`hitSurface: "unknown"` とする。`"unknown"` はdesktop Surfaceが素材判定に失敗したときのフォールバック値と同じであり、GUIからの信号と同じ形を保つ(台本は `入力#hitSurface` を常に参照できる)。CLI入力には `hitBone` を含めない。
 
 例: default packで「yuukeiの頭を撫でる」は `printf '1\n2\n1\n0\n' | yuukei-cli-surface`(1 撫でる → アクター2 yuukei → ヒットゾーン1 head → 0 終了。アクター番号はID辞書順のため partner=1, yuukei=2)。
 
@@ -408,7 +408,7 @@ CLI Surfaceの目的は、GUI(desktop Surface)と同じcanonical signalを同じ
 
 #### コマンドラインフラグ
 
-受け付けるフラグは `-h` / `--help` のみ。従来の `--say` などの機能別フラグは廃止し、すべて番号メニュー(パイプ入力可)で行う。
+受け付けるフラグは `-h` / `--help` のみとし、`--say` などの機能別フラグは設けない。すべての操作は番号メニュー(パイプ入力可)から行う。
 
 ## CapabilityInvocation
 
@@ -444,7 +444,7 @@ type CapabilityInvocation = {
 - `mood.evaluate`: 最近の出来事から住人の現在の気分を固定語彙、話したい度、短い話題として評価する。
 - `embedding.generate`: Memory Extensionなどが使うembedding生成。
 
-Extensionは内部DBや外部APIを自由に使える。ただし、event logを改変しない。Extensionが生成した派生物はExtensionの所有物であり、再index可能であるべき。
+Extensionは任意の内部DBや外部APIを利用できる。ただし、event logを改変しない。Extensionが生成した派生物はExtensionが所有し、再index可能な構造とする。
 
 `dialogue.generate` の出力はプレーンテキストではなく、次の構造化出力にする。
 
@@ -459,7 +459,7 @@ type DialogueGenerateOutput = {
 
 `speak: false` は正当な結果であり、Resident Homeはcommandを発行しない。`speak: true` の場合だけ、Resident Homeがdefault actor宛の `dialogue.say` と、必要に応じて `avatar.expression` / `avatar.motion` を作る。
 
-Capability route登録は、少なくともExtension ID、提供capability、必要権限、実行場所、設定schema、health状態を持つ。設定画面はDevice Hostが表示してよいが、設定値の所有と権限管理はResident Homeに寄せる。
+Capability route登録は、少なくともExtension ID、提供capability、必要権限、実行場所、設定schema、health状態を持つ。設定画面の表示はDevice Hostが担当できるが、設定値の所有と権限管理はResident Homeに寄せる。
 
 ### Extension Settings Schema
 
@@ -504,9 +504,9 @@ Extension同士は直接つながない。LLMが作った文でも、Daihonが�
 4. TTS Extensionがaudio reference、duration、timing、viseme、subtitle alignmentを返す。
 5. Surface Clientは `dialogue.say` と `speechRef` を合わせ、現在表示中の文字に音声を同期させる。
 
-v1の実装は「再生開始の同期+全長ベースの逐次表示」とする。Resident Homeは `dialogue.say` を即時配信し(健全なproviderがあるときは `payload.speechPending: true` を付けて)、`speech.synthesis` routeが登録されている場合だけ並行して合成を依頼する。合成入力は `text`、`speakerId`(canonical actor ID)、`displayCommandId` で、出力は音声本体ではなく参照(`audioPath` などのローカル参照)と `durationMs`。成功時はResident Homeが `audio.play`(payload: `audioPath`、`durationMs`、causalityの `sourceCommandId` に元の `dialogue.say`)を発行し、Device Hostが再生するとともに、対応する吹き出しの寿命延長とテキスト逐次表示の起点にする(表示ルールはDesktop Surfaceの吹き出し節)。新しい `audio.play` が来たら再生中の音声は中断してよい。provider不在・timeout・失敗時は何も発行せず、テキスト表示は猶予後に推定速度の逐次表示へフォールバックする。モーラ単位の字幕同期やvisemeは将来の拡張に残す。
+v1の実装は「再生開始の同期+全長ベースの逐次表示」とする。Resident Homeは `dialogue.say` を即時配信し(健全なproviderがあるときは `payload.speechPending: true` を付けて)、`speech.synthesis` routeが登録されている場合だけ並行して合成を依頼する。合成入力は `text`、`speakerId`(canonical actor ID)、`displayCommandId` で、出力は音声本体ではなく参照(`audioPath` などのローカル参照)と `durationMs`。成功時はResident Homeが `audio.play`(payload: `audioPath`、`durationMs`、causalityの `sourceCommandId` に元の `dialogue.say`)を発行し、Device Hostが再生するとともに、対応する吹き出しの寿命延長とテキスト逐次表示の起点にする(表示ルールはDesktop Surfaceの吹き出し節)。新しい `audio.play` を受けた場合は再生中の音声を中断できる。provider不在・timeout・失敗時は何も発行せず、テキスト表示は猶予後に推定速度の逐次表示へフォールバックする。モーラ単位の字幕同期とvisemeはv1の対象外とし、後続versionで拡張可能な契約を維持する。
 
-この構造により、TTS Extensionは文章がDaihon由来かLLM由来かを知らなくてよい。Memory Extensionも同様に、発話生成Extensionの内部事情ではなくevent logとcontextだけを読む。
+この構造により、TTS Extensionは文章がDaihon由来かLLM由来かを知る必要がない。Memory Extensionも同様に、発話生成Extensionの内部事情ではなくevent logとcontextだけを読む。
 
 ## Device Host to Resident Home
 

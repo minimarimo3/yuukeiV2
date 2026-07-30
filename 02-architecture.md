@@ -40,7 +40,7 @@ Yuukeiは、単一のデスクトップアプリではなく、Resident Homeを�
 
 Device Hostは人格や長期記憶を所有しない。端末が変わっても住人は同じであり続ける。
 
-ユーザーがWorld Packディレクトリを選ぶ設定UIはDevice Hostに置いてよい。Device Hostはローカルファイルダイアログ、OS権限、選択パスの保存を扱う。ただし、active World Packの解釈、residentId、event logの分離、住人の継続性はResident Home側の起動設定として扱い、Surface Clientへ人格状態を持たせない。
+ユーザーがWorld Packディレクトリを選ぶ設定UIはDevice Hostに置く。Device Hostはローカルファイルダイアログ、OS権限、選択パスの保存を扱う。ただし、active World Packの解釈、residentId、event logの分離、住人の継続性はResident Home側の起動設定として扱い、Surface Clientへ人格状態を持たせない。
 
 Device Hostは、定期的なひとりごとのきっかけとして `presence.talk_impulse` を発行できる。おしゃべりの間隔は分単位のアプリ本体設定として `YUUKEI_DATA_DIR/settings/app.json` に保存し、既定は5分、0分で無効にする。実際の発火間隔は機械的になりすぎないよう設定値の前後に小さく揺らし、直近の会話や住人へのジェスチャーの直後はその回を見送る。
 
@@ -48,11 +48,11 @@ Device Hostは、定期的なひとりごとのきっかけとして `presence.t
 
 Desktop Surfaceは、透明なモニタ全面windowを常設してはならない。クリック透過はnative windowをOSのZ-order、window単位capture、画面端gestureの対象外にしないためである。actorと吹き出しは見えている内容に密着した個別windowにし、雨、暗転、dialog burstなど全面を必要とするeffect windowはeffectの開始時だけ生成・表示し、最後のeffectが終了したら閉じる。イベントループ維持など描画以外の都合でowner windowが必要な場合も、Topmostの可視windowにはしない。
 
-住人の表示倍率もアプリ本体設定として `settings/app.json` に保存する。値は50〜200%の倍率(既定100%)で、全住人共通の1値とする(住人ごとの個別倍率は将来候補)。Surfaceのactorウィンドウは基準サイズ(420×560 logical px)に倍率を掛けたサイズで生成し、縦横比は変えない。設定変更は再起動なしで全actorウィンドウへ反映し、足元(下辺中央)を基準に伸縮する。perch中の住人はリサイズ後にperch位置を再計算し、バルーン配置や衝突回避も倍率適用後のサイズで計算する。
+住人の表示倍率もアプリ本体設定として `settings/app.json` に保存する。値は50〜200%の倍率(既定100%)で、v1では全住人共通の1値とし、住人ごとの個別倍率は扱わない。Surfaceのactorウィンドウは基準サイズ(420×560 logical px)に倍率を掛けたサイズで生成し、縦横比は変えない。設定変更は再起動なしで全actorウィンドウへ反映し、足元(下辺中央)を基準に伸縮する。perch中の住人はリサイズ後にperch位置を再計算し、バルーン配置や衝突回避も倍率適用後のサイズで計算する。
 
-セリフの吹き出しも舞台の整合性の一部としてDevice Hostが管理する。表示は住人ごとに同時に1個までとし、同一シーン内の連続セリフは読み時間ベースで順送り、別イベントのセリフが来たら残りを破棄して置き換える(表示ルールの詳細は03)。音声再生は後勝ち1本のままだが、`audio.play` の再生開始時に対応する吹き出しの寿命を音声の実長+余韻まで延長し、文字は音声再生に合わせて逐次表示する(逐次表示ルールの詳細は03。音声キューの完全同期は将来候補)。
+セリフの吹き出しも舞台の整合性の一部としてDevice Hostが管理する。表示は住人ごとに同時に1個までとし、同一シーン内の連続セリフは読み時間ベースで順送り、別イベントのセリフが来たら残りを破棄して置き換える(表示ルールの詳細は03)。音声再生は後勝ち1本とし、`audio.play` の再生開始時に対応する吹き出しの寿命を音声の実長+余韻まで延長する。文字は音声再生に合わせて逐次表示し、v1では吹き出しキューと音声キューの完全同期は扱わない(逐次表示ルールの詳細は03)。
 
-住人の画面上の位置は、actorごとの足元anchor(下辺中央、logical px)として `YUUKEI_DATA_DIR/settings/stage.json` に永続化する。保存のタイミングはユーザーのドラッグ確定時、表示倍率の変更時、自発歩行(`stage.walk`、03参照)の終了時。起動時は保存位置を現在のモニタ構成へ正規化(モニタ内クランプ・衝突回避)して復元し、保存がないactorは従来の自動配置を使う。perch(ウィンドウ枠への座り)は地形が揮発なので永続化しない。位置はユーザーの操作結果であって観測ではないため、event logには流さずstage状態としてのみ持つ。
+住人の画面上の位置は、actorごとの足元anchor(下辺中央、logical px)として `YUUKEI_DATA_DIR/settings/stage.json` に永続化する。保存のタイミングはユーザーのドラッグ確定時、表示倍率の変更時、自発歩行(`stage.walk`、03参照)の終了時。起動時は保存位置を現在のモニタ構成へ正規化(モニタ内クランプ・衝突回避)して復元し、保存がないactorには自動配置を適用する。perch(ウィンドウ枠への座り)は地形が揮発するため永続化しない。位置はユーザーの操作結果であって観測ではないため、event logには流さずstage状態としてのみ持つ。
 
 画面座標とは別に、住人の物語上の現在地と舞台への在席状態をResident Homeが持つ。`ActorSnapshot.location` は `desktop`、`downloads`、`pictures` のような意味上の場所ID、`ActorSnapshot.presence` は `present` または `away` である。場所IDはOSの実パスではなくWorld Packが台本内で安定して使う語彙であり、フォルダ観測のカテゴリと同じIDを使えば「住人の現在地とユーザーが開いた場所が一致した」場面を書ける。`actor.location.set`、`actor.exit`、`actor.enter` はcanonical event logへ記録し、Resident Homeの再起動時にこの3種を順に再生して現在地と在席状態を復元する。
 
@@ -71,11 +71,11 @@ Desktop Stageは `presence: away` の住人のactor window、吹き出し、選�
 
 Surface Clientは、人格、記憶、Daihon実行、Capability選択を所有しない。
 
-デスクトップのVRM表示(actorウィンドウ)は、キャラクターを壁紙や背後のウィンドウから区別するため、シルエット外周に白い縁取りを常時表示する(2026-07-14ユーザー確定)。縁取りはWebGL描画結果のアルファシルエットに対するCSS/SVGフィルタ(feMorphologyで膨張→白塗り→元画像を上に合成)で、画面表示にのみ付与する。VRM標準(MToon)のメッシュ単位アウトラインは前髪や服など内側の輪郭にも線が出るため採用しない。クリック可能領域の判定はフィルタ適用前のWebGLバッファのアルファ値を読むため、縁取りでクリック領域は変化しない。
+デスクトップのVRM表示(actorウィンドウ)は、キャラクターを壁紙や背後のウィンドウから区別するため、シルエット外周に白い縁取りを常時表示する。縁取りはWebGL描画結果のアルファシルエットに対するCSS/SVGフィルタ(feMorphologyで膨張→白塗り→元画像を上に合成)で、画面表示にのみ付与する。VRM標準(MToon)のメッシュ単位アウトラインは前髪や服など内側の輪郭にも線が出るため採用しない。クリック可能領域の判定はフィルタ適用前のWebGLバッファのアルファ値を読むため、縁取りでクリック領域は変化しない。
 
 ### Extension
 
-ユーザーまたは開発者が追加する交換可能な拡張単位。ローカルプロセス、将来の軽量runtime、クラウドAPI、専用ハードウェア、別端末上のサービスのどれでもよい。外部開発者向け概念はExtensionだけであり、能力提供、message変換、event購読、event発行、Daihon signal alias寄贈をmanifestの連続的な権限宣言で表す。
+ユーザーまたは開発者が追加する交換可能な拡張単位。実行形態は、ローカルプロセス、軽量runtime、クラウドAPI、専用ハードウェア、別端末上のサービスへ拡張可能とする。外部開発者向け概念はExtensionだけであり、能力提供、message変換、event購読、event発行、Daihon signal alias寄贈をmanifestの連続的な権限宣言で表す。
 
 例:
 
@@ -125,7 +125,7 @@ flowchart TB
   Surface --> Home
 ```
 
-最初の実装はこの構成でよい。すべて同一マシン上で動いても、境界は将来のリモート化を前提に通信protocolとして切る。
+初期実装はこの構成を採用する。すべて同一マシン上で動く場合も、各境界はリモート化可能な通信protocolとして定義する。
 
 ## Cloud-Capable Layout
 
@@ -180,4 +180,4 @@ sequenceDiagram
 
 ## Implementation Bias
 
-Rust/Tauriは最初のDevice HostとDesktop Surfaceに向いている。Resident HomeはRustでよいが、Tauri型、WebView、window handle、OS APIを内部に入れない。通信境界、event log、capability routingを先に作り、UIやOS観測はDevice Host側に置く。
+初期のDevice HostとDesktop SurfaceにはRust/Tauriを、Resident HomeにはRustを推奨する。Resident Home内部にはTauri型、WebView、window handle、OS APIを入れない。通信境界、event log、capability routingを先に実装し、UIやOS観測はDevice Host側に置く。
