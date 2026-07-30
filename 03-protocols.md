@@ -67,6 +67,7 @@ type RuntimeEvent = YuukeiMessage & {
 - `desktop.window.appeared`: デスクトップに新しいウィンドウが現れた。
 - `desktop.window.closed`: ウィンドウが消えた。
 - `desktop.window.focused`: 前面のウィンドウが変わった。
+- `stage.perch.disturbed`: 座っている足場のウィンドウが大きく移動またはリサイズされ、身体反応が必要になった。
 - `desktop.folder.opened`: Finder/Explorerで既知カテゴリのフォルダが表示された。
 - `desktop.download.completed`: Downloadsへ新しいファイルが追加された。
 - `mobile.location.changed`: スマホ側で位置文脈が変わった。
@@ -95,6 +96,8 @@ RuntimeEventはevent logへ保存される。個人情報や重い観測は、�
 - `会話_入力` -> `conversation.text`
 - `画面_接続` -> `surface.attach`
 - `アプリ_起動` -> `app.startup`
+- `設定_開いた` -> `app.settings.opened`
+- `ごまかし画面_閉じた` -> `stage.owned-overlay.dismissed`
 - `生活_定期` -> `presence.life_tick`
 - `雑談_定期` -> `presence.talk_impulse`
 - `時間帯_変化` -> `presence.time_period`
@@ -114,6 +117,8 @@ RuntimeEventはevent logへ保存される。個人情報や重い観測は、�
 - `ダウンロード_完了` -> `desktop.download.completed`
 
 `presence.life_tick` は生活時計の定期進行を表し、ユーザーが無操作状態であることは意味しない。実際のidle検出は別のcanonical signalとしてDevice Hostが観測する。Device HostはOSの無操作時間(最後のキーボード・マウス入力からの経過秒)を既存のpresence tickで定期サンプリングし、しきい値(既定300秒)を超えた時点で `presence.idle.start`(payload: `thresholdSeconds`)を発行する。その後に操作が再開されたら `presence.idle.end`(payload: `idleMinutes`、`idleSeconds`)を発行する。Daihonには `presence.idle.end` の不在時間が `入力#不在分` としても渡される。無操作時間を取得できないプラットフォームでは、この観測は発行されないだけで他へ影響しない。
+
+生活時計eventは、Device Hostのローカル時刻から `localHour` (0〜23)、`localMinute` (0〜59)、`timePeriod` をpayloadへ入れる。Daihon dispatchの組み込み時刻は、まずevent timestampをResident Home実行環境のローカルtimezoneへ変換し、payloadの時・分が有効ならその成分だけを上書きする。payloadがなければ変換後の時・分をそのまま使う。端末とResident Homeのtimezoneが異なり得る構成では、生活上の時・分はDevice Host由来の `localHour` / `localMinute` を優先する。ただし、これらはtimezone IDやUTC offsetそのものを表すfieldではない。
 
 Daihon load時にYuukei側のWorld/Daihon境界で標準別名をcanonical IDへ解決する。Daihon core自体はYuukei固有signal辞書を所有しない。
 
@@ -153,6 +158,11 @@ type RuntimeCommand = YuukeiMessage & {
 - `actor.location.set`: 住人の意味上の現在地を変える。payloadの `location` は空でない安定した場所IDであり、OSの実パスや画面座標ではない。在席状態は変えない。
 - `actor.exit`: 住人を現在のSurfaceの舞台から退場させ、`presence` を `away` にする。payloadに `location` があれば、退場と同時に現在地も原子的に変える。
 - `actor.enter`: 住人を現在のSurfaceの舞台へ登場させ、`presence` を `present` にする。payloadに `location` があれば、登場と同時に現在地も原子的に変える。省略時は現在地を保つ。
+- `actor.activity.start`: 継続する生活Activityを開始する。
+- `actor.activity.phase.set`: 現在Activityの段階または関心対象を更新する。
+- `actor.activity.interrupt`: 現在Activityを一時的に中断する。
+- `actor.activity.resume`: 中断中のActivityを再開する。
+- `actor.activity.end`: 現在Activityを終了する。
 - `surface.move`: Surface内または画面上の位置を変える。
 - `surface.attach`: ウィンドウ、フォルダ、スマホウィジェットなどに寄り添う。
 - `ui.notification`: 通知として現れる。
@@ -165,17 +175,60 @@ Desktop Surfaceでは、デスクトップ全体を一つの舞台として扱�
 
 Resident HomeはDaihon dispatch時、eventの `actorId` が指す住人、指定がなければWorld Packのdefault actorについて、現在の `location` と `presence` を派生contextとしてそれぞれ `入力#場所`、`入力#在席` へ渡す。canonical event本体へこの派生値を追記はしない。
 
+### Actor Activity Commands
+
+ActorActivityはResident Homeが所有し、`target.actorId` の住人へ適用する。Surfaceは `ResidentSnapshot` に含まれる結果を描画するだけで、Activityの正本を持たない。
+
+- `actor.activity.start` payload:
+  - `activity`（必須）: 活動の安定した意味ID。protocol互換入力として `kind` も受理できる。
+  - `activityId`（任意）: 今回の実行ID。省略時はcommandの `id` を使う。
+  - `phase`（任意）: 最初の段階。省略時は `active`。
+  - `focus`（任意）: privacy-safeな意味ラベル。
+  - `interruptible`（任意）: 省略時は `true`。
+  - `continuesWhileAway`（任意）: 省略時は `true`。
+- `actor.activity.phase.set` payload:
+  - `activityId`（任意）と、`phase`、`focus` の一方または両方。空の `focus` は関心対象を消す。
+- `actor.activity.interrupt` payload:
+  - `activityId`（任意）、`reason`（任意、省略時 `interrupted`）。現在Activityが中断可能かつ未中断の場合だけ適用する。
+- `actor.activity.resume` payload:
+  - `activityId`（任意）。中断時刻と理由を消し、最初の `startedAt` は保つ。
+- `actor.activity.end` payload:
+  - `activityId`（任意）。一致する現在Activityをsnapshotから消す。
+
+新しい `actor.activity.start` は、現在Activityが `interruptible: true` なら置き換える。現在Activityが `interruptible: false` なら無視する。`continuesWhileAway: false` のActivityをawayの住人へ開始した場合、またはそのActivity中に住人が退場した場合は `interruptionReason: "actor-away"` で中断する。その住人の `actor.enter` では、この理由による中断だけを自動解除する。
+
+`phase.set`、`interrupt`、`resume`、`end` に `activityId` があり、現在の `ActorActivity.activityId` と一致しない場合、そのcommandは古いActivityに対するstale transitionとして副作用なしで無視する。非同期処理、timer、遅延終了など、次のActivity開始後に届く可能性があるproducerは、開始時に得た `activityId` を後続commandへ必ず付ける。`activityId` を省略したcommandは、その時点の現在Activityを明示的に操作するものとして扱う。
+
 Desktop Stage向けのcommand family:
 
 - `actor.place`: 住人を画面上のanchorへ移動する。`payload.anchor` は `screenRect`、`activeWindow`、将来の `osWindow` などの意味的anchorを持てる。Device Hostが許可済みOS観測から座標へ解決し、解決不能なら安全なfallback位置を使う。
 - `screen.effect.start`: 雨、暗転、画面揺れ、集中線などのscreen-wide effectを開始する。`payload.kind`、`effectId`、`durationMs`、`intensity`、`clickThrough` などを持てる。Device Hostは最初のactive effect開始時にだけ一時effect windowを生成する。
 - `screen.effect.stop`: `effectId` または `kind` を指定してscreen-wide effectを止める。active effectが0件になったら一時effect windowを閉じる。
 - `screen.dialogBurst.start`: 偽エラーダイアログなどの演出overlayを開始する。実OS native dialogを大量生成せず、演出中だけ存在するYuukei所有の一時effect window上に描画する。
+- `stage.owned-overlay.show`: Yuukei所有の設定画面内へ、閉じられる短時間の演出overlayを1枚表示する。現在の実装は `style: "error"`、plain textの `title` / `message`、`durationMs` のみを受ける。titleは48文字、messageは240文字、表示時間は4〜15秒へDesktop Stage側で制限する。HTML、URL、ファイルpath、任意座標、外部アプリを対象にする指定は受けない。同じactorの新しいoverlayは以前のものを置き換える。
 - `screen.dialogBurst.clear`: dialog burstを全消去する。ESCやemergency clearなど、Device Host側の安全操作からも呼べる。
 - `stage.perch`: 住人を対象ウィンドウの枠(v1は上辺のみ)へ座らせる。`payload.windowKey` で対象を指定し、Device Hostが地形スナップショットから座標へ解決して追従する(対象の移動・リサイズに追いつく)。対象ウィンドウが消えたら住人はデスクトップ(通常位置)へ降り、`stage.perch.ended`(reason: `window-closed`)をRuntimeEventとして返す。配置はウィンドウ単位まで。フォルダ内アイコン単位の座標はv1では扱わない。
 - `stage.perch.release`: 座っている住人をデスクトップへ降ろす。
 - `stage.walk`: 住人を同一モニタ内で水平に歩かせる(v1は水平のみ、モニタをまたがない)。payloadは `destination`(`right-edge` | `left-edge`)、`motion`(World Packの `motions` に登録したモーションID。省略時 `walk`)、`speedPxPerSec`(省略時 240)。Device Hostがactor windowを一定速度で目標x(モニタ端、余白はDevice Hostが決める)へ動かす。perch中に受けたら先に座りを解除する(`stage.perch.ended` reason: `walk`)。歩行が終わったら `stage.walk.ended` RuntimeEvent(payload: `reason` = `arrived` | `user-drag` | `replaced`)を返し、最終位置をstage状態として永続化する(02)。歩行中につままれたら中断(`user-drag`)、新しい `stage.walk` を受けたら置き換え(`replaced`)。
 - 歩行中の見た目はsnapshot経由で伝える。Resident Homeは `stage.walk` commandの通過時にactorの `motion`(payloadの `motion`)と `heading`(`destination` から導出した `left` | `right`)を設定し、`stage.walk.ended` RuntimeEventで両方を既定(空文字=正面・静止)へ戻す。Surfaceは `heading` が付いている間、住人を進行方向へ向けて描画する。`heading` は `ActorSnapshot` のfieldで、空文字が正面を意味する。
+
+perch中の対象ウィンドウが大きく移動またはリサイズされた場合、Device Hostは座標追従とは別に `stage.perch.disturbed` RuntimeEventを発行する。
+
+- 対象住人はeventの `actorId`、足場はpayloadの `windowKey` で示す。
+- `reason` は `window-moved` または `window-resized`。
+- `movementDistancePx`、`widthChangePx`、`heightChangePx` は変化の大きさだけを表す非負整数で、16px単位へ丸め、4096pxで上限を設ける。変更前後の座標や矩形はeventへ含めない。
+- 同じ変化の連続発火はDevice Hostで抑制する。小さな揺れはevent化せず、通常のperch追従だけを行う。
+- `privacy.category: "desktop-observation"`、`retention: "short"` を必須とする。ウィンドウタイトル、実座標、実サイズは記録しない。
+
+このeventはUIとの身体的因果をDaihonへ伝えるためのものであり、perchそのものを解除しない。台本は踏ん張る、座り直すなどのActivity段階とmotionを選べる。
+
+`stage.perch.ended` は、perchが解除されたことをDevice HostからResident Homeへ返すRuntimeEventである。対象住人はeventの `actorId`、解除した足場はpayloadの `windowKey`、原因は `reason` で示す。少なくとも `window-closed`、`observation-disabled`、`walk`、`user-drag` を扱う。
+
+ウィンドウ観測の許可がONからOFFへ変わった場合、Device Hostは観測loopと地形利用を止め、すべてのactive perchを解除し、actorを安全なデスクトップ位置へ戻してから、各actorについて `stage.perch.ended` (`reason: "observation-disabled"`)を発行する。対応するperch Activityもこのeventを受けて終了し、観測できなくなった `windowKey` や `perched` 段階をResident Homeへ残さない。再び観測を有効化しても、以前のperchを暗黙には復元しない。
+
+`stage.perch.ended` は観測した `windowKey` を含むため、理由にかかわらず `privacy.category: "desktop-observation"`、`retention: "short"` を付ける。ウィンドウタイトル、実座標、実サイズは含めない。観測許可の取消後に残せるのは、この短期保持の終了recordと、window identityを含まないActorActivity終了結果だけである。
+
+`app.settings.opened` はYuukei自身の設定windowがフォーカスされたときだけ発行する。初回オンボーディングがactive（未完了かつ未dismiss）の間は発行せず、完了またはdismiss後は発行できる。10分のcooldownでfocus往復による連打を防ぐ。`stage.owned-overlay.show` の表示はDesktop Stage snapshotへ一時保持され、設定Surfaceが再接続しても残り時間内なら同じoverlayを復元する。期限はhost側のtimerが管理し、renderer側のtimerは補助として同じdismiss経路を使うため、設定Surfaceが停止してもActivityを取り残さない。hostは一時的なdispatch失敗またはrendererとの予約競合時に、上限回数を持つ100ms〜2秒のbackoffで再試行し、無限loopにはしない。ユーザーのcloseまたは期限切れでは、対象actorを持つ `stage.owned-overlay.dismissed` (`reason: "user-dismissed" | "expired"`)を先にRuntimeへ渡し、成功したoverlayだけをStageから消す。dispatch失敗時は表示を保持して予約を解除し、rendererもpending状態を解除してclose、Escape、または期限処理を再試行できる。Runtime通知後のsnapshot送信だけが失敗した場合、次のretryはoverlayが `Missing` であることを確認して最新snapshotだけを再送し、dismissed eventは重複発行しない。同時または重複dismissは予約によって二重発行しない。
 
 ユーザーは住人を長押し(500ms)でつまんで、デスクトップの任意の場所へ動かせる。500ms未満のクリックは `avatar.gesture.poke` として扱う。つまんだ時点で `avatar.gesture.grab` が発行され、perch中なら座りは解除されて `stage.perch.ended`(reason: `user-drag`)が返る。移動中はOSネイティブのウィンドウドラッグを使い、離した位置はモニタ内へクランプして確定し、`avatar.gesture.drop` が発行される。確定した位置はDevice Hostのstage状態として永続化される(02)。
 
@@ -323,6 +376,7 @@ type ResidentSnapshot = {
     heading: string;
     location: string;
     presence: "present" | "away";
+    activity?: ActorActivity;
     speaking?: boolean;
     bubble?: string;
   }>;
@@ -334,6 +388,22 @@ type ResidentSnapshot = {
 ```
 
 SnapshotはSurface向けの現在状態であり、記憶DBの内容を直接含めない。必要な文脈はResident HomeがCapability呼び出し時に渡す。
+
+```ts
+type ActorActivity = {
+  kind: string;
+  activityId: string;
+  phase: string;
+  focus?: string;
+  startedAt: string;
+  interruptible: boolean;
+  continuesWhileAway: boolean;
+  interruptedAt?: string;
+  interruptionReason?: string;
+};
+```
+
+`ActorActivity` はResident Homeがevent logから復元する生活状態である。`startedAt` は最初の開始時刻を保持し、中断・再開では変えない。`interruptedAt` と `interruptionReason` がなければ進行中、あれば中断中である。Surface固有の再生位置やrenderer内部状態は含めない。
 
 ## SurfaceSession
 

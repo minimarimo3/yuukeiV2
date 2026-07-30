@@ -343,6 +343,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
     })),
     reportActorStageAnchor: vi.fn(async () => undefined),
     dismissStageBubble: vi.fn(async () => undefined),
+    dismissOwnedOverlay: vi.fn(async () => undefined),
     openSettingsWindow: vi.fn(async () => undefined),
     sendConversationChoice: vi.fn(async () => []),
     sendAvatarGesturePoke: vi.fn(async () => [
@@ -420,6 +421,43 @@ describe("App", () => {
       "true",
     );
     expect(client.attachSurface).not.toHaveBeenCalled();
+  });
+
+  it("restores and dismisses a Yuukei-owned settings overlay from stage state", async () => {
+    const dismissOwnedOverlay = vi.fn(async () => undefined);
+    const client = clientFixture({
+      dismissOwnedOverlay,
+      getDesktopStageState: vi.fn(async () => ({
+        monitors: [],
+        actors: [],
+        bubbles: [],
+        ownedOverlays: [
+          {
+            overlayId: "overlay-guard",
+            actorId: "yuukei",
+            style: "error" as const,
+            title: "読み込みエラー",
+            message: "この設定は、いまだけ見られません。",
+            createdAtMs: Date.now(),
+            durationMs: 8_000,
+          },
+        ],
+      })),
+    });
+
+    const { container } = render(<App client={client} />);
+
+    expect(await screen.findByText("読み込みエラー")).toBeInTheDocument();
+    const workspace = container.querySelector(".settings-workspace");
+    expect(workspace).toHaveAttribute("inert");
+    expect(workspace).toHaveAttribute("aria-hidden", "true");
+    fireEvent.click(
+      screen.getByRole("button", { name: "ごまかし画面を閉じる" }),
+    );
+    expect(dismissOwnedOverlay).toHaveBeenCalledWith(
+      "overlay-guard",
+      "user-dismissed",
+    );
   });
 
   it("shows onboarding for an initial launch", async () => {

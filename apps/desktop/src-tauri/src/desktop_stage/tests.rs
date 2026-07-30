@@ -67,6 +67,26 @@ fn actor_window_reconcile_closes_stale_and_creates_missing_windows() {
 }
 
 #[test]
+fn initial_window_reconcile_keeps_away_actor_hidden() {
+    let specs = test_specs(&["yuukei", "partner"]);
+    let snapshots = BTreeMap::from([
+        (
+            "yuukei".to_string(),
+            test_actor_snapshot(ActorPresence::Present),
+        ),
+        (
+            "partner".to_string(),
+            test_actor_snapshot(ActorPresence::Away),
+        ),
+    ]);
+
+    let visibility = actor_window_visibility(&specs, &snapshots);
+
+    assert_eq!(visibility.get("yuukei"), Some(&true));
+    assert_eq!(visibility.get("partner"), Some(&false));
+}
+
+#[test]
 fn actor_placement_avoids_existing_bounds_when_space_allows() {
     let monitors = vec![StageMonitor {
         id: "monitor-0".to_string(),
@@ -327,12 +347,16 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
             ),
         )]),
         bubbles: BTreeMap::new(),
+        owned_overlays: BTreeMap::new(),
+        owned_overlay_dismissals: BTreeSet::new(),
         bubble_queues: BTreeMap::new(),
         bubble_scene_keys: BTreeMap::new(),
         perches: BTreeMap::from([(
             "yuukei".to_string(),
             StagePerch {
                 window_key: "window-1".to_string(),
+                disturbance_baseline: None,
+                last_disturbed_at: None,
             },
         )]),
         terrain_windows: BTreeMap::new(),
@@ -344,21 +368,269 @@ fn window_terrain_loss_restores_actor_and_reports_perch_ended() {
         window_observation_enabled: true,
     };
 
-    let (apply_bounds, ended) = apply_window_terrain_to_state(&mut state, &[]);
+    let (apply_bounds, events) = apply_window_terrain_to_state(&mut state, &[], Instant::now());
 
     assert_eq!(
-        ended,
+        events.perch_ended,
         vec![StagePerchEnded {
             actor_id: "yuukei".to_string(),
             window_key: "window-1".to_string(),
             reason: "window-closed",
         }]
     );
+    assert!(events.perch_disturbed.is_empty());
     assert!(state.perches.is_empty());
     assert_eq!(apply_bounds.len(), 1);
     assert_eq!(
         state.actors.get("yuukei").expect("actor").bounds.width,
         ACTOR_WINDOW_WIDTH
+    );
+}
+
+#[test]
+fn disabling_window_observation_restores_perched_actor_and_reports_ended() {
+    let initial_frame = yuukei_device_host::DesktopWindowFrame {
+        x: 100.0,
+        y: 300.0,
+        width: 400.0,
+        height: 300.0,
+    };
+    let mut state = perched_test_state(initial_frame);
+
+    let (apply_bounds, ended) = set_window_observation_enabled_in_state(&mut state, false);
+
+    assert!(!state.window_observation_enabled);
+    assert!(state.perches.is_empty());
+    assert!(state.terrain_windows.is_empty());
+    assert_eq!(apply_bounds.len(), 1);
+    assert_eq!(state.actors["yuukei"].bounds.width, ACTOR_WINDOW_WIDTH);
+    assert_eq!(state.actors["yuukei"].bounds.height, ACTOR_WINDOW_HEIGHT);
+    assert_eq!(
+        ended,
+        vec![StagePerchEnded {
+            actor_id: "yuukei".to_string(),
+            window_key: "window-1".to_string(),
+            reason: "observation-disabled",
+        }]
+    );
+}
+
+#[test]
+fn stage_perch_after_observation_revoke_is_rejected_without_mutating_perch_state() {
+    let mut state = bubble_state(&["yuukei"]);
+    state.window_observation_enabled = false;
+
+    let outcome = apply_stage_perch_to_state(&mut state, "yuukei", "window-1");
+
+    assert_eq!(outcome, StagePerchApplyOutcome::RejectedObservationDisabled);
+    assert!(state.perches.is_empty());
+}
+
+#[test]
+fn abrupt_window_move_disturbs_perched_actor_and_cooldown_prevents_event_flood() {
+    let spec = test_specs(&["yuukei"]).remove(0);
+    let initial_frame = yuukei_device_host::DesktopWindowFrame {
+        x: 100.0,
+        y: 300.0,
+        width: 400.0,
+        height: 300.0,
+    };
+    let mut state = DesktopStageState {
+        monitors: vec![test_monitor(1200.0, 900.0)],
+        actors: BTreeMap::from([(
+            "yuukei".to_string(),
+            actor_from_spec(
+                &spec,
+                StageRect {
+                    x: 200.0,
+                    y: 200.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                true,
+            ),
+        )]),
+        perches: BTreeMap::from([(
+            "yuukei".to_string(),
+            StagePerch {
+                window_key: "window-1".to_string(),
+                disturbance_baseline: Some(initial_frame.clone()),
+                last_disturbed_at: None,
+            },
+        )]),
+        terrain_windows: BTreeMap::from([("window-1".to_string(), initial_frame)]),
+        window_observation_enabled: true,
+        ..DesktopStageState::default()
+    };
+    let started_at = Instant::now();
+
+    let (_, first) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 200.0, 300.0, 400.0, 300.0,
+        )],
+        started_at,
+    );
+    assert_eq!(
+        first.perch_disturbed,
+        vec![StagePerchDisturbed {
+            actor_id: "yuukei".to_string(),
+            window_key: "window-1".to_string(),
+            reason: "window-moved",
+            movement_distance_px: 96,
+            width_change_px: 0,
+            height_change_px: 0,
+        }]
+    );
+
+    let (_, during_cooldown) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 300.0, 300.0, 400.0, 300.0,
+        )],
+        started_at + Duration::from_secs(1),
+    );
+    assert!(during_cooldown.perch_disturbed.is_empty());
+
+    let (_, after_cooldown) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 400.0, 300.0, 400.0, 300.0,
+        )],
+        started_at + PERCH_DISTURBANCE_COOLDOWN,
+    );
+    assert_eq!(after_cooldown.perch_disturbed.len(), 1);
+    assert_eq!(after_cooldown.perch_disturbed[0].reason, "window-moved");
+}
+
+#[test]
+fn gradual_window_move_accumulates_from_last_emitted_baseline() {
+    let initial_frame = yuukei_device_host::DesktopWindowFrame {
+        x: 100.0,
+        y: 300.0,
+        width: 400.0,
+        height: 300.0,
+    };
+    let mut state = perched_test_state(initial_frame);
+    let started_at = Instant::now();
+
+    for (seconds, x) in [(1, 120.0), (2, 140.0), (3, 160.0)] {
+        let (bounds, events) = apply_window_terrain_to_state(
+            &mut state,
+            &[test_window_observation("window-1", x, 300.0, 400.0, 300.0)],
+            started_at + Duration::from_secs(seconds),
+        );
+        assert_eq!(
+            bounds.len(),
+            1,
+            "coordinate following stopped at tick {seconds}"
+        );
+        assert!(events.perch_disturbed.is_empty());
+    }
+
+    let (_, threshold_crossed) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 180.0, 300.0, 400.0, 300.0,
+        )],
+        started_at + Duration::from_secs(4),
+    );
+    assert_eq!(threshold_crossed.perch_disturbed.len(), 1);
+    assert_eq!(
+        threshold_crossed.perch_disturbed[0].movement_distance_px,
+        80
+    );
+
+    let (_, during_cooldown) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 280.0, 300.0, 400.0, 300.0,
+        )],
+        started_at + Duration::from_secs(5),
+    );
+    assert!(during_cooldown.perch_disturbed.is_empty());
+
+    let (_, after_cooldown) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 280.0, 300.0, 400.0, 300.0,
+        )],
+        started_at + Duration::from_secs(8),
+    );
+    assert_eq!(after_cooldown.perch_disturbed.len(), 1);
+    assert_eq!(after_cooldown.perch_disturbed[0].movement_distance_px, 96);
+}
+
+#[test]
+fn gradual_window_resize_accumulates_until_large_resize_threshold() {
+    let initial_frame = yuukei_device_host::DesktopWindowFrame {
+        x: 100.0,
+        y: 300.0,
+        width: 400.0,
+        height: 300.0,
+    };
+    let mut state = perched_test_state(initial_frame);
+    let started_at = Instant::now();
+
+    for (seconds, width) in [(1, 430.0), (2, 460.0), (3, 490.0)] {
+        let (_, events) = apply_window_terrain_to_state(
+            &mut state,
+            &[test_window_observation(
+                "window-1", 100.0, 300.0, width, 300.0,
+            )],
+            started_at + Duration::from_secs(seconds),
+        );
+        assert!(events.perch_disturbed.is_empty());
+    }
+
+    let (_, events) = apply_window_terrain_to_state(
+        &mut state,
+        &[test_window_observation(
+            "window-1", 100.0, 300.0, 520.0, 300.0,
+        )],
+        started_at + Duration::from_secs(4),
+    );
+    assert_eq!(
+        events.perch_disturbed,
+        vec![StagePerchDisturbed {
+            actor_id: "yuukei".to_string(),
+            window_key: "window-1".to_string(),
+            reason: "window-resized",
+            movement_distance_px: 0,
+            width_change_px: 128,
+            height_change_px: 0,
+        }]
+    );
+}
+
+#[test]
+fn large_resize_disturbs_but_small_frame_changes_do_not() {
+    let previous = yuukei_device_host::DesktopWindowFrame {
+        x: 100.0,
+        y: 300.0,
+        width: 400.0,
+        height: 300.0,
+    };
+    let small_change = yuukei_device_host::DesktopWindowFrame {
+        x: 120.0,
+        y: 310.0,
+        width: 440.0,
+        height: 330.0,
+    };
+    assert!(perch_disturbance_between(&previous, &small_change).is_none());
+
+    let large_resize = yuukei_device_host::DesktopWindowFrame {
+        width: 520.0,
+        ..previous.clone()
+    };
+    assert_eq!(
+        perch_disturbance_between(&previous, &large_resize),
+        Some(PerchDisturbanceSummary {
+            reason: "window-resized",
+            movement_distance_px: 0,
+            width_change_px: 128,
+            height_change_px: 0,
+        })
     );
 }
 
@@ -380,6 +652,8 @@ fn beginning_user_drag_releases_perch_with_user_drag_reason() {
             "yuukei".to_string(),
             StagePerch {
                 window_key: "window-1".to_string(),
+                disturbance_baseline: None,
+                last_disturbed_at: None,
             },
         )]),
         ..DesktopStageState::default()
@@ -475,6 +749,8 @@ fn stage_walk_state_releases_perch_and_tracks_replacement() {
             "yuukei".to_string(),
             StagePerch {
                 window_key: "window-1".to_string(),
+                disturbance_baseline: None,
+                last_disturbed_at: None,
             },
         )]),
         ..DesktopStageState::default()
@@ -687,12 +963,16 @@ fn actor_scale_recomputes_perched_actor_with_scaled_size() {
             ),
         )]),
         bubbles: BTreeMap::new(),
+        owned_overlays: BTreeMap::new(),
+        owned_overlay_dismissals: BTreeSet::new(),
         bubble_queues: BTreeMap::new(),
         bubble_scene_keys: BTreeMap::new(),
         perches: BTreeMap::from([(
             "yuukei".to_string(),
             StagePerch {
                 window_key: "window-1".to_string(),
+                disturbance_baseline: None,
+                last_disturbed_at: None,
             },
         )]),
         terrain_windows: BTreeMap::from([("window-1".to_string(), target)]),
@@ -1149,6 +1429,109 @@ fn bubble_state(actor_ids: &[&str]) -> DesktopStageState {
     }
 }
 
+#[test]
+fn owned_overlay_accepts_only_bounded_plain_error_content() {
+    let mut state = bubble_state(&["yuukei"]);
+    let mut command = owned_overlay("overlay-1", "yuukei");
+    command.payload.insert(
+        "title".to_string(),
+        Value::String(format!("題{}", "あ".repeat(80))),
+    );
+    command.payload.insert(
+        "message".to_string(),
+        Value::String(format!("\u{0000}<script>危険</script>{}", "い".repeat(300))),
+    );
+    command
+        .payload
+        .insert("durationMs".to_string(), Value::Number(99_000u64.into()));
+
+    assert!(apply_owned_overlay_to_state(&mut state, &command, 1_234).is_some());
+    let overlay = state.owned_overlays.get("overlay-1").expect("overlay");
+    assert_eq!(overlay.style, "error");
+    assert_eq!(overlay.created_at_ms, 1_234);
+    assert_eq!(overlay.duration_ms, MAX_OWNED_OVERLAY_DURATION_MS);
+    assert_eq!(overlay.title.chars().count(), MAX_OWNED_OVERLAY_TITLE_CHARS);
+    assert_eq!(
+        overlay.message.chars().count(),
+        MAX_OWNED_OVERLAY_MESSAGE_CHARS
+    );
+    assert!(!overlay.message.contains('\u{0000}'));
+    // Markup stays inert text; the Rust surface never accepts an HTML field or URL.
+    assert!(overlay.message.contains("<script>"));
+}
+
+#[test]
+fn owned_overlay_rejects_unknown_style_and_replaces_same_actor_overlay() {
+    let mut state = bubble_state(&["yuukei"]);
+    let first = owned_overlay("overlay-1", "yuukei");
+    assert!(apply_owned_overlay_to_state(&mut state, &first, 100).is_some());
+
+    let mut unknown = owned_overlay("overlay-unknown", "yuukei");
+    unknown
+        .payload
+        .insert("style".to_string(), Value::String("html".to_string()));
+    assert!(apply_owned_overlay_to_state(&mut state, &unknown, 200).is_none());
+    assert!(state.owned_overlays.contains_key("overlay-1"));
+
+    let second = owned_overlay("overlay-2", "yuukei");
+    assert!(apply_owned_overlay_to_state(&mut state, &second, 300).is_some());
+    assert_eq!(state.owned_overlays.len(), 1);
+    assert!(state.owned_overlays.contains_key("overlay-2"));
+}
+
+#[test]
+fn owned_overlay_expiration_delay_uses_the_host_deadline() {
+    let mut state = bubble_state(&["yuukei"]);
+    let accepted = apply_owned_overlay_to_state(
+        &mut state,
+        &owned_overlay("overlay-expiring", "yuukei"),
+        1_000,
+    )
+    .expect("accepted overlay");
+
+    assert_eq!(
+        owned_overlay_expiration_delay_at(&accepted, 2_500),
+        Duration::from_millis(6_500)
+    );
+    assert_eq!(
+        owned_overlay_expiration_delay_at(&accepted, 12_000),
+        Duration::ZERO
+    );
+}
+
+#[test]
+fn owned_overlay_dismissal_reservation_can_retry_after_dispatch_failure() {
+    let mut state = bubble_state(&["yuukei"]);
+    apply_owned_overlay_to_state(&mut state, &owned_overlay("overlay-retry", "yuukei"), 1_000)
+        .expect("accepted overlay");
+
+    let OwnedOverlayDismissReservation::Reserved(first) =
+        reserve_owned_overlay_dismissal_in_state(&mut state, "overlay-retry")
+    else {
+        panic!("overlay should be reserved");
+    };
+    assert_eq!(first.overlay_id, "overlay-retry");
+    assert_eq!(
+        reserve_owned_overlay_dismissal_in_state(&mut state, "overlay-retry"),
+        OwnedOverlayDismissReservation::Busy
+    );
+    assert!(state.owned_overlays.contains_key("overlay-retry"));
+
+    // A failed runtime dispatch releases only the reservation. Presentation state
+    // remains available for the renderer or host timer to retry.
+    cancel_owned_overlay_dismissal_in_state(&mut state, "overlay-retry");
+    assert!(matches!(
+        reserve_owned_overlay_dismissal_in_state(&mut state, "overlay-retry"),
+        OwnedOverlayDismissReservation::Reserved(_)
+    ));
+    assert!(finish_owned_overlay_dismissal_in_state(&mut state, "overlay-retry").is_some());
+    assert!(!state.owned_overlays.contains_key("overlay-retry"));
+    assert_eq!(
+        reserve_owned_overlay_dismissal_in_state(&mut state, "overlay-retry"),
+        OwnedOverlayDismissReservation::Missing
+    );
+}
+
 fn say(
     id: &str,
     actor_id: &str,
@@ -1176,6 +1559,27 @@ fn say(
         source_command_id: None,
         trace_id: None,
     });
+    command
+}
+
+fn owned_overlay(id: &str, actor_id: &str) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new("stage.owned-overlay.show", "daihon", "resident-default");
+    command.id = id.to_string();
+    command.target = Some(yuukei_protocol::CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some(actor_id.to_string()),
+    });
+    command
+        .payload
+        .insert("style".to_string(), Value::String("error".to_string()));
+    command
+        .payload
+        .insert("title".to_string(), Value::String("エラー".to_string()));
+    command.payload.insert(
+        "message".to_string(),
+        Value::String("表示できません".to_string()),
+    );
     command
 }
 
@@ -1258,6 +1662,57 @@ fn test_monitor(width: f64, height: f64) -> StageMonitor {
     }
 }
 
+fn test_window_observation(
+    window_key: &str,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> DesktopWindowObservation {
+    DesktopWindowObservation {
+        window_key: window_key.to_string(),
+        app: "test-app".to_string(),
+        frame: yuukei_device_host::DesktopWindowFrame {
+            x,
+            y,
+            width,
+            height,
+        },
+        focused: true,
+    }
+}
+
+fn perched_test_state(initial_frame: yuukei_device_host::DesktopWindowFrame) -> DesktopStageState {
+    let spec = test_specs(&["yuukei"]).remove(0);
+    DesktopStageState {
+        monitors: vec![test_monitor(1200.0, 900.0)],
+        actors: BTreeMap::from([(
+            "yuukei".to_string(),
+            actor_from_spec(
+                &spec,
+                StageRect {
+                    x: 200.0,
+                    y: 200.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+                true,
+            ),
+        )]),
+        perches: BTreeMap::from([(
+            "yuukei".to_string(),
+            StagePerch {
+                window_key: "window-1".to_string(),
+                disturbance_baseline: Some(initial_frame.clone()),
+                last_disturbed_at: None,
+            },
+        )]),
+        terrain_windows: BTreeMap::from([("window-1".to_string(), initial_frame)]),
+        window_observation_enabled: true,
+        ..DesktopStageState::default()
+    }
+}
+
 fn test_specs(actor_ids: &[&str]) -> Vec<ActorWindowSpec> {
     actor_ids
         .iter()
@@ -1269,4 +1724,18 @@ fn test_specs(actor_ids: &[&str]) -> Vec<ActorWindowSpec> {
             index,
         })
         .collect()
+}
+
+fn test_actor_snapshot(presence: ActorPresence) -> ActorSnapshot {
+    ActorSnapshot {
+        display_name: "actor".to_string(),
+        expression: "neutral".to_string(),
+        motion: "idle".to_string(),
+        heading: String::new(),
+        location: "desktop".to_string(),
+        presence,
+        speaking: Some(false),
+        bubble: None,
+        activity: None,
+    }
 }

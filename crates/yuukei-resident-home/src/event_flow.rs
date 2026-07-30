@@ -337,16 +337,87 @@ impl ResidentHome {
                         ActorPresence::Away => "away",
                     }
                     .to_string(),
+                    actor.activity.clone(),
                 )
             })
         };
-        if let Some((location, presence)) = actor_context {
+        if let Some((location, presence, activity)) = actor_context {
             event
                 .payload
                 .insert("actorLocation".to_string(), Value::String(location));
             event
                 .payload
                 .insert("actorPresence".to_string(), Value::String(presence));
+            if let Some(activity) = activity {
+                event
+                    .payload
+                    .insert("actorActivity".to_string(), Value::String(activity.kind));
+                event.payload.insert(
+                    "actorActivityId".to_string(),
+                    Value::String(activity.activity_id),
+                );
+                event.payload.insert(
+                    "actorActivityPhase".to_string(),
+                    Value::String(activity.phase),
+                );
+                event.payload.insert(
+                    "actorActivityFocus".to_string(),
+                    Value::String(activity.focus.unwrap_or_default()),
+                );
+                event.payload.insert(
+                    "actorActivityStartedAt".to_string(),
+                    Value::String(activity.started_at),
+                );
+                event.payload.insert(
+                    "actorActivityInterruptible".to_string(),
+                    Value::Bool(activity.interruptible),
+                );
+                event.payload.insert(
+                    "actorActivityInterrupted".to_string(),
+                    Value::Bool(activity.interrupted_at.is_some()),
+                );
+                event.payload.insert(
+                    "actorActivityInterruptionReason".to_string(),
+                    Value::String(activity.interruption_reason.unwrap_or_default()),
+                );
+                event.payload.insert(
+                    "actorActivityContinuesWhileAway".to_string(),
+                    Value::Bool(activity.continues_while_away),
+                );
+            } else {
+                event
+                    .payload
+                    .insert("actorActivity".to_string(), Value::String(String::new()));
+                event
+                    .payload
+                    .insert("actorActivityId".to_string(), Value::String(String::new()));
+                event.payload.insert(
+                    "actorActivityPhase".to_string(),
+                    Value::String(String::new()),
+                );
+                event.payload.insert(
+                    "actorActivityFocus".to_string(),
+                    Value::String(String::new()),
+                );
+                event.payload.insert(
+                    "actorActivityStartedAt".to_string(),
+                    Value::String(String::new()),
+                );
+                event
+                    .payload
+                    .insert("actorActivityInterruptible".to_string(), Value::Bool(false));
+                event
+                    .payload
+                    .insert("actorActivityInterrupted".to_string(), Value::Bool(false));
+                event.payload.insert(
+                    "actorActivityInterruptionReason".to_string(),
+                    Value::String(String::new()),
+                );
+                event.payload.insert(
+                    "actorActivityContinuesWhileAway".to_string(),
+                    Value::Bool(false),
+                );
+            }
         }
         let ai_connected = self
             .capabilities
@@ -564,9 +635,29 @@ impl ResidentHome {
             }
             "actor.location.set" | "actor.exit" | "actor.enter" => {
                 super::apply_actor_presence_command(actor, &command.kind, &command.payload);
+                super::apply_actor_activity_command(
+                    actor,
+                    &command.kind,
+                    &command.id,
+                    &command.timestamp,
+                    &command.payload,
+                );
                 if command.kind == "actor.exit" {
                     state.active_walk_commands.remove(&actor_id);
                 }
+            }
+            "actor.activity.start"
+            | "actor.activity.phase.set"
+            | "actor.activity.interrupt"
+            | "actor.activity.resume"
+            | "actor.activity.end" => {
+                super::apply_actor_activity_command(
+                    actor,
+                    &command.kind,
+                    &command.id,
+                    &command.timestamp,
+                    &command.payload,
+                );
             }
             _ => {}
         }

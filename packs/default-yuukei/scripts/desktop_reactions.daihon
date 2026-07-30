@@ -1,14 +1,138 @@
 ## desktop reactions
-### startup
+### 前回の窓辺を片づける
 合図: ＠アプリ_起動
+条件:（入力#活動 = 「window-watching」）
 話者: ゆ
-＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
-「起きました。今は＜入力#時間帯＞ですね。」
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動終了＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=idle_breathe＞
 
-### surface attached
-合図: ＠画面_接続
+### 前回の一時活動を片づける
+合図: ＠アプリ_起動
+条件:（入力#在席 = 「present」 かつ 入力#活動 != 「」 かつ 入力#活動 != 「window-watching」 かつ 入力#活動画面外継続 = いいえ）
 話者: ゆ
-「ここにいます。」
+全体#生活中の活動 = 「」
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動終了＞
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 眠りを続ける
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「深夜」 かつ 入力#在席 = 「present」 かつ 入力#活動 = 「sleeping」 かつ 入力#活動画面外継続 = はい）
+話者: ゆ
+＜活動段階 「resting」 関心=「desk-edge」＞
+＜動作 sleep_enter 繰り返し=いいえ 終了後=sleep_loop＞
+
+### うたた寝を続ける
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「深夜」 かつ 入力#在席 = 「present」 かつ 入力#活動 = 「napping」 かつ 入力#活動画面外継続 = はい）
+話者: ゆ
+＜活動段階 「resting」 関心=「desk-edge」＞
+＜動作 sleep_enter 繰り返し=いいえ 終了後=sleep_loop＞
+
+### 朝に眠りを片づける
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「朝」 かつ 入力#在席 = 「present」 かつ （入力#活動 = 「sleeping」 または 入力#活動 = 「napping」））
+話者: ゆ
+＜活動終了＞
+＜活動開始 種類=「waking-up」 段階=「stirring」 関心=「desktop」 画面外継続=いいえ 中断可能=はい＞
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 昼に眠りを片づける
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「昼」 かつ 入力#在席 = 「present」 かつ （入力#活動 = 「sleeping」 または 入力#活動 = 「napping」））
+話者: ゆ
+＜活動終了＞
+＜活動開始 種類=「watching-the-room」 段階=「observing」 関心=「desktop」 画面外継続=いいえ 中断可能=はい＞
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 夜に眠りを片づける
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「夜」 かつ 入力#在席 = 「present」 かつ （入力#活動 = 「sleeping」 または 入力#活動 = 「napping」））
+話者: ゆ
+＜活動終了＞
+＜活動開始 種類=「tidying-up」 段階=「settling」 関心=「desktop-edge」 画面外継続=いいえ 中断可能=はい＞
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
+
+### Downloads探索から安全に帰る
+合図: ＠アプリ_起動
+条件:（入力#在席 = 「present」 かつ 入力#活動 = 「exploring-downloads」）
+話者: ゆ
+全体#生活中の活動 = 「」
+全体#外出中の活動 = 「」
+全体#外出先で遭遇 = いいえ
+＜活動段階 「returning」 関心=「desktop」＞
+＜登場 場所=「desktop」＞
+＜動作 drop_recover 繰り返し=いいえ 終了後=idle_breathe＞
+＜活動終了＞
+
+### Pictures探索から安全に帰る
+合図: ＠アプリ_起動
+条件:（入力#在席 = 「present」 かつ 入力#活動 = 「exploring-pictures」）
+話者: ゆ
+全体#生活中の活動 = 「」
+全体#外出中の活動 = 「」
+全体#外出先で遭遇 = いいえ
+＜活動段階 「returning」 関心=「desktop」＞
+＜登場 場所=「desktop」＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=idle_breathe＞
+＜活動終了＞
+
+### 復元できない継続活動を片づける
+合図: ＠アプリ_起動
+条件:（入力#在席 = 「present」 かつ 入力#活動 != 「」 かつ 入力#活動 != 「window-watching」 かつ 入力#活動 != 「sleeping」 かつ 入力#活動 != 「napping」 かつ 入力#活動 != 「exploring-downloads」 かつ 入力#活動 != 「exploring-pictures」 かつ 入力#活動画面外継続 = はい）
+話者: ゆ
+全体#生活中の活動 = 「」
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動終了＞
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 朝の寝起き
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「朝」 かつ 入力#活動 = 「」 かつ 入力#在席 = 「present」）
+話者: ゆ
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動開始 種類=「waking-up」 段階=「stirring」 関心=「desktop」 画面外継続=いいえ 中断可能=はい＞
+＜活動段階 「awake」 関心=「desktop」＞
+＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 昼の途中
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「昼」 かつ 入力#活動 = 「」 かつ 入力#在席 = 「present」）
+話者: ゆ
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動開始 種類=「watching-the-room」 段階=「observing」 関心=「desktop」 画面外継続=いいえ 中断可能=はい＞
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 夜の片づけ中
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「夜」 かつ 入力#活動 = 「」 かつ 入力#在席 = 「present」）
+話者: ゆ
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動開始 種類=「tidying-up」 段階=「settling」 関心=「desktop-edge」 画面外継続=いいえ 中断可能=はい＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 深夜の居眠り
+合図: ＠アプリ_起動
+条件:（入力#時間帯 = 「深夜」 かつ 入力#活動 = 「」 かつ 入力#在席 = 「present」）
+話者: ゆ
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動開始 種類=「sleeping」 段階=「resting」 関心=「desk-edge」 画面外継続=はい 中断可能=はい＞
+＜動作 sleep_enter 繰り返し=いいえ 終了後=sleep_loop＞
 
 ### poke yuukei head
 合図: ＠住人_つつく
@@ -29,10 +153,10 @@
 ### pat yuukei head
 合図: ＠住人_なでる
 条件:（入力#hitZoneId = 「head」 かつ 入力#actorId = 「yuukei」）
-話者: パ
-ゆ: ＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
+話者: ゆ
+＜動作 pat_react 繰り返し=いいえ 終了後=idle_breathe＞
 ＜表情 笑顔＞
-「ふふ、ゆうけいさん、ちょっと得意げです。」
+「……もう少しだけなら、いいですよ。」
 
 ### pat partner head
 合図: ＠住人_なでる
@@ -69,14 +193,16 @@
 ### before sleep
 合図: ＠端末_スリープ前
 話者: ゆ
+＜活動終了＞
+＜活動開始 種類=「sleeping」 段階=「resting」 関心=「desk-edge」 画面外継続=はい 中断可能=はい＞
 ＜動作 sleep_enter 繰り返し=いいえ 終了後=sleep_loop＞
-「少し眠ります。」
 
 ### wake
 合図: ＠端末_復帰
 話者: ゆ
+＜活動段階 「waking」 関心=「desktop」＞
 ＜動作 wake_up 繰り返し=いいえ 終了後=idle_breathe＞
-「おかえりなさい。」
+＜活動終了＞
 
 ### cloth pull yuukei shoes
 合図: ＠住人_つつく
@@ -133,6 +259,10 @@
 合図: ＠住人_つまむ
 条件: 入力#actorId = 「yuukei」
 話者: ゆ
+全体#窓へ移動中 = いいえ
+全体#目標の窓 = 「」
+全体#座っている窓 = 「」
+＜活動終了＞
 ＜表情 驚き＞
 ＜動作 grab_start 繰り返し=いいえ 終了後=grab_hold＞
 「わわっ、急に持ち上げないでください……！」

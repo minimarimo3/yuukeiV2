@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -59,6 +59,53 @@ pub struct AppState {
     window_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     download_observer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     ready_surface_windows: StdMutex<HashSet<String>>,
+    settings_focus_gate: StdMutex<SettingsFocusGate>,
+}
+
+const SETTINGS_OPENED_COOLDOWN: Duration = Duration::from_secs(10 * 60);
+const OWNED_OVERLAY_EXPIRATION_MAX_ATTEMPTS: usize = 8;
+const OWNED_OVERLAY_EXPIRATION_RETRY_BASE: Duration = Duration::from_millis(100);
+const OWNED_OVERLAY_EXPIRATION_RETRY_MAX: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Default)]
+struct SettingsFocusGate {
+    last_emitted_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnedOverlayDismissOutcome {
+    Dismissed,
+    Busy,
+    Missing,
+}
+
+trait OwnedOverlayDismissPort {
+    fn reserve(
+        &self,
+        overlay_id: &str,
+    ) -> Result<desktop_stage::OwnedOverlayDismissReservation, String>;
+    fn cancel(&self, overlay_id: &str) -> Result<(), String>;
+    async fn emit_runtime_dismissed(
+        &self,
+        overlay: &desktop_stage::StageOwnedOverlay,
+        reason: &str,
+    ) -> Result<(), String>;
+    fn finish(&self, overlay_id: &str) -> Result<(), String>;
+    fn reconcile_snapshot(&self) -> Result<(), String>;
+}
+
+impl SettingsFocusGate {
+    fn should_emit(&mut self, now: Instant, onboarding_inactive: bool) -> bool {
+        if !onboarding_inactive
+            || self
+                .last_emitted_at
+                .is_some_and(|last| now.saturating_duration_since(last) < SETTINGS_OPENED_COOLDOWN)
+        {
+            return false;
+        }
+        self.last_emitted_at = Some(now);
+        true
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -549,6 +596,28 @@ fn dismiss_stage_bubble(
 }
 
 #[tauri::command]
+async fn dismiss_owned_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    overlay_id: String,
+    reason: String,
+) -> Result<(), String> {
+    let reason = match reason.as_str() {
+        "user-dismissed" | "expired" => reason,
+        _ => return Err("unsupported owned overlay dismissal reason".to_string()),
+    };
+    let runtime = state.runtime.lock().await.clone();
+    match dismiss_owned_overlay_lifecycle(&app, &runtime, &state.stage, overlay_id.trim(), &reason)
+        .await?
+    {
+        OwnedOverlayDismissOutcome::Dismissed | OwnedOverlayDismissOutcome::Missing => Ok(()),
+        OwnedOverlayDismissOutcome::Busy => {
+            Err("owned overlay dismissal is already in progress".to_string())
+        }
+    }
+}
+
+#[tauri::command]
 fn open_settings_window(app: AppHandle) -> Result<(), String> {
     show_settings_window(&app)
 }
@@ -973,6 +1042,7 @@ pub fn run() {
                 window_observer: Mutex::new(None),
                 download_observer: Mutex::new(None),
                 ready_surface_windows: StdMutex::new(HashSet::new()),
+                settings_focus_gate: StdMutex::new(SettingsFocusGate::default()),
             });
             {
                 let state = app.handle().state::<AppState>();
@@ -1019,6 +1089,28 @@ pub fn run() {
                 }
             }
             if window.label() == "settings" {
+                if matches!(event, WindowEvent::Focused(true)) {
+                    let app = window.app_handle().clone();
+                    let state = app.state::<AppState>();
+                    let onboarding_inactive =
+                        LocalYuukeiRuntime::onboarding_state_in(state.env.clone())
+                            .map(|onboarding| onboarding.completed || onboarding.dismissed)
+                            .unwrap_or(false);
+                    let should_emit = state
+                        .settings_focus_gate
+                        .lock()
+                        .map(|mut gate| gate.should_emit(Instant::now(), onboarding_inactive))
+                        .unwrap_or(false);
+                    if should_emit {
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppState>();
+                            let runtime = state.runtime.lock().await.clone();
+                            if let Err(error) = runtime.emit_settings_opened().await {
+                                eprintln!("Yuukei settings-opened event failed: {error}");
+                            }
+                        });
+                    }
+                }
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let state = window.app_handle().state::<AppState>();
@@ -1066,6 +1158,7 @@ pub fn run() {
             get_desktop_stage_state,
             report_actor_stage_anchor,
             dismiss_stage_bubble,
+            dismiss_owned_overlay,
             open_settings_window,
             send_conversation_choice,
             send_avatar_gesture_poke,
@@ -1570,9 +1663,31 @@ async fn reconcile_window_observer(
     let runtime = state.runtime.lock().await.clone();
     let settings = runtime.observation_settings().map_err(to_message)?;
     let enabled = window_observer::observation_loop_enabled(&settings);
-    state
+    let perch_ended = state
         .stage
-        .set_window_observation_enabled(settings.windows)?;
+        .set_window_observation_enabled(app, settings.windows)?;
+    for ended in perch_ended {
+        if let Err(error) = runtime
+            .emit_stage_perch_ended(&ended.actor_id, &ended.window_key, ended.reason)
+            .await
+        {
+            let _ = runtime.logger().record(
+                "stage.perch.ended.error",
+                "device-host",
+                serde_json::json!({
+                    "actorId": ended.actor_id,
+                    "windowKey": ended.window_key,
+                    "reason": ended.reason,
+                    "message": error.to_string()
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            );
+        }
+    }
     let mut current = state.window_observer.lock().await;
     match (enabled, current.is_some()) {
         (true, false) => {
@@ -1628,8 +1743,8 @@ fn spawn_window_observer(
             if settings.windows {
                 let observations = window_observer::collect_desktop_windows();
                 match stage.apply_window_terrain(&app, &observations) {
-                    Ok(ended) => {
-                        for event in ended {
+                    Ok(events) => {
+                        for event in events.perch_ended {
                             if let Err(error) = runtime
                                 .emit_stage_perch_ended(
                                     &event.actor_id,
@@ -1640,6 +1755,34 @@ fn spawn_window_observer(
                             {
                                 let _ = runtime.logger().record(
                                     "stage.perch.ended.error",
+                                    "device-host",
+                                    serde_json::json!({
+                                        "actorId": event.actor_id,
+                                        "windowKey": event.window_key,
+                                        "message": error.to_string()
+                                    })
+                                    .as_object()
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect(),
+                                );
+                            }
+                        }
+                        for event in events.perch_disturbed {
+                            if let Err(error) = runtime
+                                .emit_stage_perch_disturbed(
+                                    &event.actor_id,
+                                    &event.window_key,
+                                    event.reason,
+                                    event.movement_distance_px,
+                                    event.width_change_px,
+                                    event.height_change_px,
+                                )
+                                .await
+                            {
+                                let _ = runtime.logger().record(
+                                    "stage.perch.disturbed.error",
                                     "device-host",
                                     serde_json::json!({
                                         "actorId": event.actor_id,
@@ -1889,7 +2032,37 @@ fn spawn_command_forwarder(
                     }
                 }
             }
-            if command.kind == "stage.walk" {
+            if command.kind == "stage.owned-overlay.show" {
+                match stage.handle_owned_overlay_command(&app, &command) {
+                    Ok(Some(overlay)) => {
+                        spawn_owned_overlay_expiration(
+                            app.clone(),
+                            runtime.clone(),
+                            stage.clone(),
+                            overlay,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Yuukei owned overlay ignored: {error}"),
+                }
+            } else if command.kind == "stage.perch" {
+                match stage.handle_stage_perch_command(&app, &command) {
+                    Ok(Some(ended)) => {
+                        if let Err(error) = runtime
+                            .emit_stage_perch_ended(
+                                &ended.actor_id,
+                                &ended.window_key,
+                                ended.reason,
+                            )
+                            .await
+                        {
+                            eprintln!("Yuukei stage.perch rejection event failed: {error}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Yuukei stage.perch ignored: {error}"),
+                }
+            } else if command.kind == "stage.walk" {
                 if let Err(error) = handle_stage_walk_command(
                     app.clone(),
                     runtime.clone(),
@@ -1907,6 +2080,138 @@ fn spawn_command_forwarder(
             let _ = app.emit("yuukei-command", &command);
         }
     })
+}
+
+fn spawn_owned_overlay_expiration(
+    app: AppHandle,
+    runtime: LocalYuukeiRuntime,
+    stage: Arc<DesktopStageManager>,
+    overlay: desktop_stage::StageOwnedOverlay,
+) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(desktop_stage::owned_overlay_expiration_delay(&overlay)).await;
+        let dismiss = || {
+            dismiss_owned_overlay_lifecycle(&app, &runtime, &stage, &overlay.overlay_id, "expired")
+        };
+        if let Err(error) = retry_owned_overlay_expiration(dismiss, tokio::time::sleep).await {
+            eprintln!("Yuukei owned overlay expiration failed: {error}");
+        }
+    });
+}
+
+async fn dismiss_owned_overlay_lifecycle(
+    app: &AppHandle,
+    runtime: &LocalYuukeiRuntime,
+    stage: &DesktopStageManager,
+    overlay_id: &str,
+    reason: &str,
+) -> Result<OwnedOverlayDismissOutcome, String> {
+    let port = RuntimeOwnedOverlayDismissPort {
+        app,
+        runtime,
+        stage,
+    };
+    dismiss_owned_overlay_with_port(&port, overlay_id, reason).await
+}
+
+struct RuntimeOwnedOverlayDismissPort<'a> {
+    app: &'a AppHandle,
+    runtime: &'a LocalYuukeiRuntime,
+    stage: &'a DesktopStageManager,
+}
+
+impl OwnedOverlayDismissPort for RuntimeOwnedOverlayDismissPort<'_> {
+    fn reserve(
+        &self,
+        overlay_id: &str,
+    ) -> Result<desktop_stage::OwnedOverlayDismissReservation, String> {
+        self.stage.reserve_owned_overlay_dismissal(overlay_id)
+    }
+
+    fn cancel(&self, overlay_id: &str) -> Result<(), String> {
+        self.stage.cancel_owned_overlay_dismissal(overlay_id)
+    }
+
+    async fn emit_runtime_dismissed(
+        &self,
+        overlay: &desktop_stage::StageOwnedOverlay,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.runtime
+            .emit_owned_overlay_dismissed(&overlay.actor_id, &overlay.overlay_id, reason)
+            .await
+            .map_err(to_message)?;
+        Ok(())
+    }
+
+    fn finish(&self, overlay_id: &str) -> Result<(), String> {
+        self.stage
+            .finish_owned_overlay_dismissal(self.app, overlay_id)?;
+        Ok(())
+    }
+
+    fn reconcile_snapshot(&self) -> Result<(), String> {
+        self.stage.reconcile_owned_overlay_snapshot(self.app)
+    }
+}
+
+async fn dismiss_owned_overlay_with_port(
+    port: &impl OwnedOverlayDismissPort,
+    overlay_id: &str,
+    reason: &str,
+) -> Result<OwnedOverlayDismissOutcome, String> {
+    let overlay = match port.reserve(overlay_id)? {
+        desktop_stage::OwnedOverlayDismissReservation::Reserved(overlay) => overlay,
+        desktop_stage::OwnedOverlayDismissReservation::Busy => {
+            return Ok(OwnedOverlayDismissOutcome::Busy);
+        }
+        desktop_stage::OwnedOverlayDismissReservation::Missing => {
+            port.reconcile_snapshot()?;
+            return Ok(OwnedOverlayDismissOutcome::Missing);
+        }
+    };
+    if let Err(error) = port.emit_runtime_dismissed(&overlay, reason).await {
+        port.cancel(&overlay.overlay_id)?;
+        return Err(error);
+    }
+    port.finish(&overlay.overlay_id)?;
+    Ok(OwnedOverlayDismissOutcome::Dismissed)
+}
+
+async fn retry_owned_overlay_expiration<Dismiss, DismissFuture, Sleep, SleepFuture>(
+    mut dismiss: Dismiss,
+    mut sleep: Sleep,
+) -> Result<OwnedOverlayDismissOutcome, String>
+where
+    Dismiss: FnMut() -> DismissFuture,
+    DismissFuture: std::future::Future<Output = Result<OwnedOverlayDismissOutcome, String>>,
+    Sleep: FnMut(Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    let mut last_error = None;
+    for attempt in 0..OWNED_OVERLAY_EXPIRATION_MAX_ATTEMPTS {
+        match dismiss().await {
+            Ok(
+                outcome @ (OwnedOverlayDismissOutcome::Dismissed
+                | OwnedOverlayDismissOutcome::Missing),
+            ) => return Ok(outcome),
+            Ok(OwnedOverlayDismissOutcome::Busy) => {}
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < OWNED_OVERLAY_EXPIRATION_MAX_ATTEMPTS {
+            sleep(owned_overlay_expiration_retry_delay(attempt)).await;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        "owned overlay remained busy through bounded expiration retries".to_string()
+    }))
+}
+
+fn owned_overlay_expiration_retry_delay(attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt).unwrap_or(u32::MAX).min(6);
+    OWNED_OVERLAY_EXPIRATION_RETRY_BASE
+        .saturating_mul(2u32.saturating_pow(exponent))
+        .min(OWNED_OVERLAY_EXPIRATION_RETRY_MAX)
 }
 
 async fn handle_stage_walk_command(
@@ -2029,11 +2334,140 @@ fn to_message(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use yuukei_device_host::{
         build_avatar_gesture_poke_event, build_conversation_text_event, AvatarGestureInput,
         AvatarGesturePoke, AvatarGestureScreen, DEFAULT_RESIDENT_ID,
     };
     use yuukei_protocol::{SurfaceKind, SurfaceRenderer};
+
+    #[derive(Debug)]
+    struct OwnedOverlayRaceHarness {
+        exists: bool,
+        reserved: bool,
+        runtime_failures_remaining: usize,
+        runtime_calls: usize,
+    }
+
+    #[derive(Debug)]
+    struct SnapshotRecoveryState {
+        exists: bool,
+        reserved: bool,
+        runtime_dismissed_events: usize,
+        snapshot_emits: usize,
+        fail_first_finish_emit: bool,
+    }
+
+    #[derive(Debug)]
+    struct SnapshotRecoveryPort {
+        state: StdMutex<SnapshotRecoveryState>,
+    }
+
+    impl OwnedOverlayDismissPort for SnapshotRecoveryPort {
+        fn reserve(
+            &self,
+            overlay_id: &str,
+        ) -> Result<desktop_stage::OwnedOverlayDismissReservation, String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "snapshot recovery state lock poisoned".to_string())?;
+            if !state.exists {
+                return Ok(desktop_stage::OwnedOverlayDismissReservation::Missing);
+            }
+            if state.reserved {
+                return Ok(desktop_stage::OwnedOverlayDismissReservation::Busy);
+            }
+            state.reserved = true;
+            Ok(desktop_stage::OwnedOverlayDismissReservation::Reserved(
+                desktop_stage::StageOwnedOverlay {
+                    overlay_id: overlay_id.to_string(),
+                    actor_id: "yuukei".to_string(),
+                    style: "error".to_string(),
+                    title: "エラー".to_string(),
+                    message: "表示できません".to_string(),
+                    created_at_ms: 1_000,
+                    duration_ms: 4_000,
+                },
+            ))
+        }
+
+        fn cancel(&self, _overlay_id: &str) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "snapshot recovery state lock poisoned".to_string())?;
+            state.reserved = false;
+            Ok(())
+        }
+
+        async fn emit_runtime_dismissed(
+            &self,
+            _overlay: &desktop_stage::StageOwnedOverlay,
+            _reason: &str,
+        ) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "snapshot recovery state lock poisoned".to_string())?;
+            state.runtime_dismissed_events += 1;
+            Ok(())
+        }
+
+        fn finish(&self, _overlay_id: &str) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "snapshot recovery state lock poisoned".to_string())?;
+            state.exists = false;
+            state.reserved = false;
+            state.snapshot_emits += 1;
+            if state.fail_first_finish_emit {
+                state.fail_first_finish_emit = false;
+                return Err("simulated first snapshot emit failure".to_string());
+            }
+            Ok(())
+        }
+
+        fn reconcile_snapshot(&self) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "snapshot recovery state lock poisoned".to_string())?;
+            state.snapshot_emits += 1;
+            Ok(())
+        }
+    }
+
+    async fn simulated_owned_overlay_dismiss(
+        state: Arc<tokio::sync::Mutex<OwnedOverlayRaceHarness>>,
+    ) -> Result<OwnedOverlayDismissOutcome, String> {
+        let should_fail = {
+            let mut state = state.lock().await;
+            if !state.exists {
+                return Ok(OwnedOverlayDismissOutcome::Missing);
+            }
+            if state.reserved {
+                return Ok(OwnedOverlayDismissOutcome::Busy);
+            }
+            state.reserved = true;
+            state.runtime_calls += 1;
+            let should_fail = state.runtime_failures_remaining > 0;
+            state.runtime_failures_remaining = state.runtime_failures_remaining.saturating_sub(1);
+            should_fail
+        };
+
+        // Let the competing UI/host caller observe the real in-flight reservation.
+        tokio::task::yield_now().await;
+        let mut state = state.lock().await;
+        state.reserved = false;
+        if should_fail {
+            Err("simulated one-shot runtime dispatch failure".to_string())
+        } else {
+            state.exists = false;
+            Ok(OwnedOverlayDismissOutcome::Dismissed)
+        }
+    }
 
     #[test]
     fn surface_session_contains_required_boundary_fields() {
@@ -2078,6 +2512,121 @@ mod tests {
             actor_motion_route("actor/with/slash", "walk now"),
             "actors/actor%2Fwith%2Fslash/motions/walk%20now"
         );
+    }
+
+    #[test]
+    fn settings_focus_gate_suppresses_active_onboarding_and_focus_spam() {
+        let now = Instant::now();
+        let mut gate = SettingsFocusGate::default();
+        assert!(!gate.should_emit(now, false));
+        assert!(gate.should_emit(now, true));
+        assert!(!gate.should_emit(now + Duration::from_secs(30), true));
+        assert!(gate.should_emit(now + SETTINGS_OPENED_COOLDOWN, true));
+    }
+
+    #[test]
+    fn settings_focus_gate_allows_dismissed_onboarding_semantics() {
+        let now = Instant::now();
+        for (completed, dismissed, expected) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let mut gate = SettingsFocusGate::default();
+            assert_eq!(
+                gate.should_emit(now, completed || dismissed),
+                expected,
+                "completed={completed}, dismissed={dismissed}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn simultaneous_ui_and_host_expiry_recovers_after_one_runtime_failure() {
+        let state = Arc::new(tokio::sync::Mutex::new(OwnedOverlayRaceHarness {
+            exists: true,
+            reserved: false,
+            runtime_failures_remaining: 1,
+            runtime_calls: 0,
+        }));
+        let ui_state = state.clone();
+        let host_state = state.clone();
+        let ui_dismiss = simulated_owned_overlay_dismiss(ui_state);
+        let host_expiry = retry_owned_overlay_expiration(
+            move || simulated_owned_overlay_dismiss(host_state.clone()),
+            |_| async {
+                tokio::task::yield_now().await;
+            },
+        );
+
+        let (ui_result, host_result) = tokio::join!(ui_dismiss, host_expiry);
+        assert!(ui_result.is_err());
+        assert_eq!(host_result, Ok(OwnedOverlayDismissOutcome::Dismissed));
+        let state = state.lock().await;
+        assert!(!state.exists);
+        assert!(!state.reserved);
+        assert_eq!(state.runtime_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn owned_overlay_expiration_retry_is_bounded_and_backed_off() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let sleeps = Arc::new(StdMutex::new(Vec::new()));
+        let attempt_counter = attempts.clone();
+        let recorded_sleeps = sleeps.clone();
+        let result = retry_owned_overlay_expiration(
+            move || {
+                attempt_counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok(OwnedOverlayDismissOutcome::Busy) }
+            },
+            move |duration| {
+                if let Ok(mut sleeps) = recorded_sleeps.lock() {
+                    sleeps.push(duration);
+                }
+                async {}
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            OWNED_OVERLAY_EXPIRATION_MAX_ATTEMPTS
+        );
+        let sleeps = sleeps.lock().expect("sleep record lock");
+        assert_eq!(sleeps.len(), OWNED_OVERLAY_EXPIRATION_MAX_ATTEMPTS - 1);
+        assert!(sleeps
+            .iter()
+            .all(|delay| !delay.is_zero() && *delay <= OWNED_OVERLAY_EXPIRATION_RETRY_MAX));
+        assert!(sleeps.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[tokio::test]
+    async fn missing_retry_reemits_snapshot_after_finish_emit_failure_without_duplicate_runtime_event(
+    ) {
+        let port = SnapshotRecoveryPort {
+            state: StdMutex::new(SnapshotRecoveryState {
+                exists: true,
+                reserved: false,
+                runtime_dismissed_events: 0,
+                snapshot_emits: 0,
+                fail_first_finish_emit: true,
+            }),
+        };
+
+        let result = retry_owned_overlay_expiration(
+            || dismiss_owned_overlay_with_port(&port, "overlay-reconcile", "expired"),
+            |_| async {},
+        )
+        .await;
+
+        assert_eq!(result, Ok(OwnedOverlayDismissOutcome::Missing));
+        let state = port.state.lock().expect("snapshot recovery state");
+        assert!(!state.exists);
+        assert!(!state.reserved);
+        assert_eq!(state.runtime_dismissed_events, 1);
+        assert_eq!(state.snapshot_emits, 2);
     }
 
     #[test]

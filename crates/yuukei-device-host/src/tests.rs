@@ -156,6 +156,70 @@ async fn stage_walk_ended_is_logged_with_actor_and_reason() -> Result<()> {
 }
 
 #[tokio::test]
+async fn stage_perch_disturbed_is_logged_with_actor_and_privacy_safe_summary() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+    let env = test_env(workspace.path(), data.path());
+    let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+
+    runtime
+        .emit_stage_perch_disturbed("yuukei", "window-1", "window-moved", 96, 0, 16)
+        .await?;
+
+    let records = runtime.home().event_log().read(EventLogQuery {
+        kind: Some("stage.perch.disturbed".to_string()),
+        ..EventLogQuery::default()
+    })?;
+    let record = records
+        .records
+        .first()
+        .expect("stage perch disturbed record");
+    assert_eq!(record.actor_id.as_deref(), Some("yuukei"));
+    assert_eq!(record.payload["windowKey"], json!("window-1"));
+    assert_eq!(record.payload["reason"], json!("window-moved"));
+    assert_eq!(record.payload["movementDistancePx"], json!(96));
+    assert_eq!(record.payload["widthChangePx"], json!(0));
+    assert_eq!(record.payload["heightChangePx"], json!(16));
+    assert_eq!(record.payload.len(), 5);
+    assert!(!record.payload.contains_key("x"));
+    assert!(!record.payload.contains_key("y"));
+    assert!(!record.payload.contains_key("title"));
+    let privacy = record.privacy.as_ref().expect("desktop privacy");
+    assert_eq!(privacy.category, DESKTOP_OBSERVATION_PRIVACY_CATEGORY);
+    assert_eq!(privacy.retention, RetentionPolicy::Short);
+    assert!(privacy.extension_readable);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stage_perch_ended_uses_desktop_observation_privacy() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    write_lifecycle_pack(&workspace.path().join("packs").join("default-yuukei"))?;
+    let env = test_env(workspace.path(), data.path());
+    let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+
+    runtime
+        .emit_stage_perch_ended("yuukei", "window-1", "window-closed")
+        .await?;
+
+    let records = runtime.home().event_log().read(EventLogQuery {
+        kind: Some("stage.perch.ended".to_string()),
+        ..EventLogQuery::default()
+    })?;
+    let record = records.records.first().expect("stage perch ended record");
+    assert_eq!(record.actor_id.as_deref(), Some("yuukei"));
+    assert_eq!(record.payload["windowKey"], json!("window-1"));
+    assert_eq!(record.payload["reason"], json!("window-closed"));
+    let privacy = record.privacy.as_ref().expect("desktop privacy");
+    assert_eq!(privacy.category, DESKTOP_OBSERVATION_PRIVACY_CATEGORY);
+    assert_eq!(privacy.retention, RetentionPolicy::Short);
+    assert!(privacy.extension_readable);
+    Ok(())
+}
+
+#[tokio::test]
 async fn desktop_window_events_are_logged_with_desktop_observation_privacy() -> Result<()> {
     let workspace = tempdir()?;
     let data = tempdir()?;

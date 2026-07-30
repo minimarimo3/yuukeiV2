@@ -358,10 +358,21 @@ export type StageBubble = {
   audioDurationMs?: number;
 };
 
+export type StageOwnedOverlay = {
+  overlayId: string;
+  actorId: string;
+  style: "error";
+  title: string;
+  message: string;
+  createdAtMs: number;
+  durationMs: number;
+};
+
 export type DesktopStageState = {
   monitors: StageMonitor[];
   actors: StageActor[];
   bubbles: StageBubble[];
+  ownedOverlays?: StageOwnedOverlay[];
 };
 
 export type ActorWindowDragStarted = { sessionId: string };
@@ -422,6 +433,10 @@ export type YuukeiClient = {
   getDesktopStageState(): Promise<DesktopStageState>;
   reportActorStageAnchor(actorId: string, anchor: StageAnchor): Promise<void>;
   dismissStageBubble(bubbleId: string): Promise<void>;
+  dismissOwnedOverlay(
+    overlayId: string,
+    reason: "user-dismissed" | "expired",
+  ): Promise<void>;
   openSettingsWindow(): Promise<void>;
   sendConversationChoice(
     choiceId: string,
@@ -577,6 +592,8 @@ export const tauriYuukeiClient: YuukeiClient = {
     }),
   dismissStageBubble: (bubbleId: string) =>
     invoke<void>("dismiss_stage_bubble", { bubbleId }),
+  dismissOwnedOverlay: (overlayId, reason) =>
+    invoke<void>("dismiss_owned_overlay", { overlayId, reason }),
   openSettingsWindow: () => invoke<void>("open_settings_window"),
   sendConversationChoice: (choiceId: string, choice: string, index: number) =>
     invoke<RuntimeCommand[]>("send_conversation_choice", {

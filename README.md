@@ -10,13 +10,14 @@ ExtensionはCore内部状態、Surface実装、event logファイルを直接書
 
 ## Reading Order
 
-1. [01-concept.md](01-concept.md): UI内生活者としての思想と避けるべき方向。
-2. [02-architecture.md](02-architecture.md): Resident Home、Device Host、Surface Client、Extensionの完成形。
-3. [03-protocols.md](03-protocols.md): 意味境界の間を流れる最小の通信契約。
-4. [04-event-log-and-memory.md](04-event-log-and-memory.md): 本体が持つ「記録」と、Extensionが作る「記憶」。
-5. [05-world-pack-and-daihon.md](05-world-pack-and-daihon.md): 世界観パック、Daihon、台本とAIの関係。
-6. [06-build-guidance-for-codex.md](06-build-guidance-for-codex.md): 新規実装時の判断基準と作る順番。
-7. [08-daihon-language-reference.md](08-daihon-language-reference.md): World Pack作者向けのDaihon言語リファレンス。
+1. [00-experience-contract.md](00-experience-contract.md): 実装判断と完成判定に優先する体験契約、Golden Scene、受け入れ条件。
+2. [01-concept.md](01-concept.md): UI内生活者としての思想と避けるべき方向。
+3. [02-architecture.md](02-architecture.md): Resident Home、Device Host、Surface Client、Extensionの完成形。
+4. [03-protocols.md](03-protocols.md): 意味境界の間を流れる最小の通信契約。
+5. [04-event-log-and-memory.md](04-event-log-and-memory.md): 本体が持つ「記録」と、Extensionが作る「記憶」。
+6. [05-world-pack-and-daihon.md](05-world-pack-and-daihon.md): 世界観パック、Daihon、台本とAIの関係。
+7. [06-build-guidance-for-codex.md](06-build-guidance-for-codex.md): 新規実装時の判断基準と作る順番。
+8. [08-daihon-language-reference.md](08-daihon-language-reference.md): World Pack作者向けのDaihon言語リファレンス。
 
 ## User and Author Guides
 

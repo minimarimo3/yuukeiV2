@@ -1,0 +1,34 @@
+## 設定_開いた
+
+### 何もしていないとき設定を隠す
+合図: ＠設定_開いた
+条件:（入力#活動 = 「」 かつ 入力#在席 = 「present」 かつ 全体#生活中の活動 = 「」 かつ 全体#窓へ移動中 = いいえ かつ 全体#目標の窓 = 「」 かつ 全体#座っている窓 = 「」）
+話者: ゆ
+＜活動開始 種類=「guarding-secrets」 段階=「noticing」 関心=「own-settings」 画面外継続=いいえ 中断可能=はい＞
+＜表情 驚き＞
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_weight_shift＞
+＜活動段階 「concealing」 関心=「own-settings」＞
+＜ごまかし画面 題=「設定を読み込めません」 本文=「この先は、住人の生活に関わる大事なところです。……いまは何もありません。」 秒数=9＞
+
+### 安全な室内活動を置いて設定を隠す
+合図: ＠設定_開いた
+条件:（（入力#活動 = 「waking-up」 または 入力#活動 = 「watching-the-room」 または 入力#活動 = 「tidying-up」 または 入力#活動 = 「taking-a-break」 または 入力#活動 = 「looking-for-light」 または 入力#活動 = 「dawn-watch」） かつ 入力#活動中断可能 = はい かつ 入力#在席 = 「present」 かつ 全体#生活中の活動 = 「」 かつ 全体#窓へ移動中 = いいえ かつ 全体#目標の窓 = 「」 かつ 全体#座っている窓 = 「」）
+話者: ゆ
+＜活動終了＞
+＜活動開始 種類=「guarding-secrets」 段階=「noticing」 関心=「own-settings」 画面外継続=いいえ 中断可能=はい＞
+＜表情 驚き＞
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_weight_shift＞
+＜活動段階 「concealing」 関心=「own-settings」＞
+＜ごまかし画面 題=「設定を読み込めません」 本文=「この先は、住人の生活に関わる大事なところです。……いまは何もありません。」 秒数=9＞
+
+## ごまかし画面_閉じた
+
+### 見つかった画面を片づける
+合図: ＠ごまかし画面_閉じた
+条件:（入力#actorId = 「yuukei」 かつ 入力#活動 = 「guarding-secrets」）
+話者: ゆ
+＜活動段階 「caught」 関心=「co-resident」＞
+＜表情 照れ＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=idle_breathe＞
+＜活動段階 「tidying-up」 関心=「own-settings」＞
+＜活動終了＞

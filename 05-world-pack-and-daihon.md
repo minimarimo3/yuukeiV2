@@ -58,6 +58,8 @@ World Packは、actorごとにSurface Client向けのrenderer asset参照を宣�
 {
   "id": "yuukei",
   "displayName": "Yuukei",
+  "initialPresence": "present",
+  "initialLocation": "desktop",
   "speakerAliases": ["ゆ"],
   "renderer": {
     "kind": "vrm",
@@ -68,6 +70,8 @@ World Packは、actorごとにSurface Client向けのrenderer asset参照を宣�
   }
 }
 ```
+
+`initialPresence` (`present` / `away`) と `initialLocation` は、event logにそのactorの状態履歴がまだない初回起動時だけ使う初期状態である。省略時はそれぞれ `present` と `desktop` になる。`initialLocation` の空文字はPack load時に拒否され、未知の `initialPresence` もmanifest errorになる。再起動時に `actor.location.set`、`actor.exit`、`actor.enter` の履歴があれば、履歴から復元した状態がPackの初期値より優先される。複数actorを宣言したまま一人だけでGolden体験を始めたい場合は、後から登場させるactorを `"initialPresence": "away"` にできる。
 
 `speakerAliases` はDaihon作者向けの安定した短縮話者名である。`displayName` はUI表示やローカライズのための名前なので、台本上の参照名として暗黙利用しない。Pack load時には、actor IDと `speakerAliases` の重複、空文字、actor IDとの衝突を拒否する。
 
@@ -115,6 +119,25 @@ Daihonの `場所`、`退場`、`登場` は、住人の意味上の現在地と
 場所IDはWorld Pack作者が安定して使う意味語彙であり、OSの実パスではない。`desktop.folder.opened` の `入力#フォルダ` と同じ `downloads`、`pictures` などを使えば、退場中の住人とユーザーが同じフォルダで遭遇するsceneを書ける。複数actorの台本では、これらの関数は現在の `話者` だけを対象にする。
 
 各dispatchには、eventの対象actor、対象指定がなければdefault actorの現在地が `入力#場所`、在席状態が `入力#在席` (`present` / `away`) として渡される。フォルダ遭遇では `条件:（入力#場所 = 入力#フォルダ かつ 入力#在席 = 「away」）` のように判定できる。generic eventでdefault actor以外の現在地を判定したいWorld Packは、actorごとのDaihon変数も併用する。
+
+継続する生活行動には、現在話者を対象とする次の日本語関数を使う。
+
+- `＜活動開始 種類=「window-watching」 段階=「approaching」 関心=「focused-window」 画面外継続=いいえ 中断可能=はい＞`
+- `＜活動段階 「observing」 関心=「window-category」＞`
+- `＜活動中断 理由=「user-interaction」＞`
+- `＜活動再開＞`
+- `＜活動終了＞`
+- `＜ごまかし画面 題=「設定を読み込めません」 本文=「ここは見られません」 秒数=9＞`
+
+`活動開始` はResident Homeが所有するActorActivityを開始し、`活動段階` は同じ活動の進行を更新する。`活動中断` と `活動再開` は最初の開始時刻を保ったまま一時停止と継続を表し、`活動終了` は現在Activityを消す。これらはmotionの別名ではない。Surfaceを再接続またはアプリを再起動しても、event logから活動を復元できる。
+
+`関心` はWorld Packが決めるprivacy-safeな意味ラベルに限定する。`focused-window`、`latest-image`、`downloaded-audio` のようなカテゴリや役割はよいが、ファイルの実パス、ウィンドウタイトル、文書本文、個人名を含む観測値をそのまま保存してはならない。必要な一時観測はevent payloadまたは権限付きruntime queryからその場で使い、継続Activityへコピーしない。
+
+各dispatchでは現在Activityを `入力#活動`、`入力#活動ID`、`入力#活動段階`、`入力#活動関心`、`入力#活動開始時刻`、`入力#活動中断可能`、`入力#活動中断中`、`入力#活動中断理由`、`入力#活動画面外継続` から参照できる。これにより、Downloadsを開いた瞬間に活動を作るのではなく、発見前から画面外で続いていた活動を条件にして `caught in the act` を書ける。
+
+`入力#活動開始時刻` はtimezone offsetを含むRFC 3339の絶対時刻であり、中断・再開や端末timezoneの変更で書き換えない。朝、深夜など端末側の生活時間でActivityを分岐するときは、保存済み開始時刻から時だけを抜き出さず、現在eventの `入力#現在時` / `入力#現在分` またはDaihonの組み込み時刻条件を使う。Device Hostが送る `localHour` / `localMinute` はDaihon dispatch時のローカル時刻を決めるための値で、ActorActivityの永続状態にはコピーしない。
+
+`ごまかし画面` はYuukei自身の設定Surfaceだけに出せる安全なエラー風overlayを作る。`題` と `本文` は必須のplain text、`秒数` は任意である。任意HTML、URL、ファイルpath、外部windowの指定はDaihon関数に存在しない。ユーザーが閉じるか期限が来ると `ごまかし画面_閉じた` が対象actorへ返るため、台本は驚く、隠す、見つかる、片づけるというActivityの段階を発話なしで接続できる。
 
 Daihonのscene選択履歴は、World Pack installごとのアプリデータとして保存する。`頻度: 一度きり` や `頻度: 1日に1回`、直近の繰り返し回避に使う履歴は再起動後も引き継がれるが、別のWorld Packへ切り替えた場合は混ざらない。
 
@@ -235,6 +258,8 @@ Daihon scene内でセリフ1行の文面だけをAIに埋めたい場合は、�
 ## Authoring Principle
 
 World Pack作者は、AIに全部を任せるのではなく、その住人の「らしさ」が出る確定イベントをDaihonで書く。AI ExtensionやMemory Extensionは、その住人が日常の細部に自然に反応するための補助である。
+
+生活機能の公開語彙は **体験 → 反復 → 抽象化** の順で育てる。まず既定住人の具体的な一場面を最後まで成立させ、同じ仕組みを異なる二つ以上の場面で反復し、実際に共通だった制御だけをDaihon関数やWorld Pack schemaへ昇格する。想像上の汎用性のために、固有の芝居を単発motionと発話へ薄めない。一方、一場面だけの固有値をCoreの標準語彙へ持ち上げない。
 
 標準signalのDaihon向け日本語名はYuukeiが提供する。Pack作者は `端末_復帰` や `会話_入力` のような標準別名をそのまま使い、標準signalの別名辞書をPackごとに再定義しない。Pack固有の出来事を追加する場合だけ、Pack内のsignal allowlistとDaihon台本で独自名を定義する。
 

@@ -13,7 +13,7 @@ Yuukeiは、単一のデスクトップアプリではなく、Resident Homeを�
 - active World Packを読み、住人、台本、信号、権限を解釈する。
 - Daihon Hostを呼び、決定的な生活イベントを実行する。
 - canonical event logを保存する。
-- 現在の住人状態、Surface状態、短期状態を管理する。
+- 現在の住人状態、ActorActivity、Surface状態、短期状態を管理する。
 - Extensionがmanifestで提供するcapabilityを内部`CapabilityRouter`へ登録し、LLM、TTS、STT、記憶エンジンなどを呼ぶ。
 - Extensionの登録、順序、権限、hook結果、event提案、signal alias寄贈を管理する。
 - Surface Clientへsnapshotとcommand streamを配信する。
@@ -56,6 +56,18 @@ Desktop Surfaceは、透明なモニタ全面windowを常設してはならな�
 
 画面座標とは別に、住人の物語上の現在地と舞台への在席状態をResident Homeが持つ。`ActorSnapshot.location` は `desktop`、`downloads`、`pictures` のような意味上の場所ID、`ActorSnapshot.presence` は `present` または `away` である。場所IDはOSの実パスではなくWorld Packが台本内で安定して使う語彙であり、フォルダ観測のカテゴリと同じIDを使えば「住人の現在地とユーザーが開いた場所が一致した」場面を書ける。`actor.location.set`、`actor.exit`、`actor.enter` はcanonical event logへ記録し、Resident Homeの再起動時にこの3種を順に再生して現在地と在席状態を復元する。
 
+住人が「いま何をしているか」は、actorごとの `ActorActivity` としてResident Homeが所有する。これは単発motionやSurface内のanimation stateではなく、生活上の継続状態である。
+
+- `kind`: `window-watching`、`exploring-downloads` のような活動の安定した意味ID。
+- `activityId`: 今回の活動実行を識別するID。遅れて届いた古い遷移から新しい活動を守る。
+- `phase`: `approaching`、`perched`、`observing` のような現在段階。
+- `focus`: 関心対象を表すprivacy-safeな意味ラベル。生のパス、ウィンドウタイトル、文書本文を入れない。
+- `startedAt`: 活動を最初に開始した時刻。中断・再開では更新しない。
+- `interruptible`、`interruptedAt`、`interruptionReason`: 中断可能性と現在の中断状態。
+- `continuesWhileAway`: `presence: away` の間も活動が進行するか。
+
+Activityの開始、段階変更、中断、再開、終了はcanonical event logへ記録し、Resident Homeのevent-log replayで `ActorSnapshot.activity` へ復元する。`continuesWhileAway: false` の活動中に退場した場合は `actor-away` で中断し、同じ住人が登場したときにその中断だけを解除する。`true` の活動は画面外でも同じ開始時刻と段階を保持し、経過時間に応じた再会場面へ使える。
+
 Desktop Stageは `presence: away` の住人のactor window、吹き出し、選択肢、音声を現在のDesktop Surfaceへ提示しない。トレイの手動表示切替もawayの住人を登場させない。これは現在のSurface上の身体を隠す処理であり、住人の継続性や現在地そのものはSurface Clientへ移さない。
 
 ### Surface Client
@@ -65,11 +77,11 @@ Desktop Stageは `presence: away` の住人のactor window、吹き出し、選�
 責務:
 
 - ResidentSnapshotを受け取って現在状態を復元する。
-- RuntimeCommandを受け取って、表情、動作、発話、位置、UI演出を表示する。
+- RuntimeCommandを受け取って、表情、動作、発話、位置、UI演出と現在Activityに対応する身体表現を表示する。
 - ユーザーのジェスチャー、ドラッグ、会話入力をDevice HostまたはResident Homeへ送る。
 - VRM、Live2D、2Dアニメーション、モバイルウィジェットなどの描画方式を実装する。
 
-Surface Clientは、人格、記憶、Daihon実行、Capability選択を所有しない。
+Surface Clientは、人格、記憶、Daihon実行、Capability選択、ActorActivityの正本を所有しない。`ActorSnapshot.activity` を描画へ変換してよいが、Surface内だけで活動の開始、段階遷移、完了を確定しない。Surfaceが切断されても活動はResident Homeに残る。
 
 デスクトップのVRM表示(actorウィンドウ)は、キャラクターを壁紙や背後のウィンドウから区別するため、シルエット外周に白い縁取りを常時表示する。縁取りはWebGL描画結果のアルファシルエットに対するCSS/SVGフィルタ(feMorphologyで膨張→白塗り→元画像を上に合成)で、画面表示にのみ付与する。VRM標準(MToon)のメッシュ単位アウトラインは前髪や服など内側の輪郭にも線が出るため採用しない。クリック可能領域の判定はフィルタ適用前のWebGLバッファのアルファ値を読むため、縁取りでクリック領域は変化しない。
 

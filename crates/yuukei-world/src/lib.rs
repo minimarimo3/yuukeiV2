@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use thiserror::Error;
@@ -20,8 +20,8 @@ use yuukei_daihon::{
     CHOICE_FUNCTION_NAME, EXTRACT_FUNCTION_NAME, GENERATE_FUNCTION_NAME, INTERPRET_FUNCTION_NAME,
 };
 use yuukei_protocol::{
-    canonical_signal_id, Causality, CommandTarget, JsonMap, RuntimeCommand, RuntimeEvent,
-    SignalAliasTable,
+    canonical_signal_id, ActorPresence, Causality, CommandTarget, JsonMap, RuntimeCommand,
+    RuntimeEvent, SignalAliasTable,
 };
 
 #[derive(Debug, Error)]
@@ -183,12 +183,24 @@ pub struct WorldPack {
 pub struct ActorDefinition {
     pub id: String,
     pub display_name: String,
+    #[serde(default = "default_actor_initial_presence")]
+    pub initial_presence: ActorPresence,
+    #[serde(default = "default_actor_initial_location")]
+    pub initial_location: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speaker_aliases: Vec<String>,
     #[serde(default)]
     pub profile: JsonMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renderer: Option<ActorRendererDefinition>,
+}
+
+fn default_actor_initial_presence() -> ActorPresence {
+    ActorPresence::Present
+}
+
+fn default_actor_initial_location() -> String {
+    "desktop".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1075,6 +1087,7 @@ impl DaihonAdapter for YuukeiDaihonAdapter {
                     trigger: Some(SystemEvent::new(event.kind.clone(), Span::empty())),
                     default_speaker: Some(world.default_actor_id.clone()),
                     validation_mode: ValidationMode::Strict,
+                    now: event_run_now(event),
                     ..RunOptions::default()
                 },
                 interpretation_count: 0,
@@ -1455,6 +1468,161 @@ impl ActionHandler for YuukeiActionHandler {
                 }
                 self.commands.lock().await.push(command);
             }
+            "活動開始" => {
+                let Some(activity) = named
+                    .get("種類")
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                else {
+                    return Ok(DaihonValue::None);
+                };
+                let mut command = self.command("actor.activity.start", speaker_id);
+                command.payload = JsonMap::from([
+                    ("activity".to_string(), Value::String(activity)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                for (source, target) in [("段階", "phase"), ("関心", "focus")] {
+                    if let Some(value) = named
+                        .get(source)
+                        .map(DaihonValue::to_display_string)
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                    {
+                        command
+                            .payload
+                            .insert(target.to_string(), Value::String(value));
+                    }
+                }
+                for (source, target) in [
+                    ("画面外継続", "continuesWhileAway"),
+                    ("中断可能", "interruptible"),
+                ] {
+                    if let Some(value) = named.get(source).and_then(DaihonValue::as_bool) {
+                        command
+                            .payload
+                            .insert(target.to_string(), Value::Bool(value));
+                    }
+                }
+                self.commands.lock().await.push(command);
+            }
+            "活動段階" => {
+                let phase = named
+                    .get("段階")
+                    .or_else(|| positional.first())
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let focus = named
+                    .get("関心")
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string());
+                if phase.is_none() && focus.is_none() {
+                    return Ok(DaihonValue::None);
+                }
+                let mut command = self.command("actor.activity.phase.set", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(phase) = phase {
+                    command
+                        .payload
+                        .insert("phase".to_string(), Value::String(phase));
+                }
+                if let Some(focus) = focus {
+                    command
+                        .payload
+                        .insert("focus".to_string(), Value::String(focus));
+                }
+                self.commands.lock().await.push(command);
+            }
+            "活動中断" => {
+                let reason = named
+                    .get("理由")
+                    .or_else(|| positional.first())
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let mut command = self.command("actor.activity.interrupt", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(reason) = reason {
+                    command
+                        .payload
+                        .insert("reason".to_string(), Value::String(reason));
+                }
+                self.commands.lock().await.push(command);
+            }
+            "活動再開" => {
+                let mut command = self.command("actor.activity.resume", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "活動終了" => {
+                let mut command = self.command("actor.activity.end", speaker_id);
+                command.payload = JsonMap::from([
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                self.commands.lock().await.push(command);
+            }
+            "ごまかし画面" => {
+                let title = named
+                    .get("題")
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let message = named
+                    .get("本文")
+                    .map(DaihonValue::to_display_string)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let (Some(title), Some(message)) = (title, message) else {
+                    return Ok(DaihonValue::None);
+                };
+                let mut command = self.command("stage.owned-overlay.show", speaker_id);
+                command.payload = JsonMap::from([
+                    ("style".to_string(), Value::String("error".to_string())),
+                    ("title".to_string(), Value::String(title)),
+                    ("message".to_string(), Value::String(message)),
+                    ("speakerId".to_string(), Value::String(actor_id)),
+                    (
+                        "sourceFunction".to_string(),
+                        Value::String(name.to_string()),
+                    ),
+                ]);
+                if let Some(seconds) = named.get("秒数") {
+                    if let Some(seconds) = daihon_value_to_json(seconds).as_f64() {
+                        let duration_ms = (seconds.max(0.0) * 1_000.0).round() as u64;
+                        command
+                            .payload
+                            .insert("durationMs".to_string(), Value::Number(duration_ms.into()));
+                    }
+                }
+                self.commands.lock().await.push(command);
+            }
             "歩く" | "walk" => {
                 let Some(destination) =
                     positional
@@ -1722,6 +1890,15 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         ("movedDistance", "移動距離"),
         ("actorLocation", "場所"),
         ("actorPresence", "在席"),
+        ("actorActivity", "活動"),
+        ("actorActivityId", "活動ID"),
+        ("actorActivityPhase", "活動段階"),
+        ("actorActivityFocus", "活動関心"),
+        ("actorActivityStartedAt", "活動開始時刻"),
+        ("actorActivityInterruptible", "活動中断可能"),
+        ("actorActivityInterrupted", "活動中断中"),
+        ("actorActivityInterruptionReason", "活動中断理由"),
+        ("actorActivityContinuesWhileAway", "活動画面外継続"),
         ("aiConnected", "AI接続"),
     ] {
         if let Some(value) = event
@@ -1733,6 +1910,32 @@ fn event_inputs(event: &RuntimeEvent) -> Vec<(String, DaihonValue)> {
         }
     }
     inputs
+}
+
+fn event_run_now(event: &RuntimeEvent) -> Option<DateTime<FixedOffset>> {
+    let timestamp = DateTime::parse_from_rfc3339(&event.timestamp).ok()?;
+    let mut local = timestamp.with_timezone(&Local);
+
+    if let Some(hour) = event
+        .payload
+        .get("localHour")
+        .and_then(Value::as_u64)
+        .and_then(|hour| u32::try_from(hour).ok())
+        .filter(|hour| *hour < 24)
+    {
+        local = local.with_hour(hour)?;
+    }
+    if let Some(minute) = event
+        .payload
+        .get("localMinute")
+        .and_then(Value::as_u64)
+        .and_then(|minute| u32::try_from(minute).ok())
+        .filter(|minute| *minute < 60)
+    {
+        local = local.with_minute(minute)?;
+    }
+
+    Some(local.fixed_offset())
 }
 
 fn json_to_daihon_value(value: &Value) -> Option<DaihonValue> {
@@ -1907,6 +2110,136 @@ fn yuukei_function_registry() -> FunctionRegistry {
                 required: false,
             },
         )]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "活動開始".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([
+            (
+                "種類".to_string(),
+                ParamSpec {
+                    name: Some("種類".to_string()),
+                    ty: ParamType::String,
+                    required: true,
+                },
+            ),
+            (
+                "段階".to_string(),
+                ParamSpec {
+                    name: Some("段階".to_string()),
+                    ty: ParamType::String,
+                    required: false,
+                },
+            ),
+            (
+                "関心".to_string(),
+                ParamSpec {
+                    name: Some("関心".to_string()),
+                    ty: ParamType::String,
+                    required: false,
+                },
+            ),
+            (
+                "画面外継続".to_string(),
+                ParamSpec {
+                    name: Some("画面外継続".to_string()),
+                    ty: ParamType::Boolean,
+                    required: false,
+                },
+            ),
+            (
+                "中断可能".to_string(),
+                ParamSpec {
+                    name: Some("中断可能".to_string()),
+                    ty: ParamType::Boolean,
+                    required: false,
+                },
+            ),
+        ]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "活動段階".to_string(),
+        positional: vec![ParamSpec {
+            name: Some("段階".to_string()),
+            ty: ParamType::String,
+            required: false,
+        }],
+        named: BTreeMap::from([
+            (
+                "段階".to_string(),
+                ParamSpec {
+                    name: Some("段階".to_string()),
+                    ty: ParamType::String,
+                    required: false,
+                },
+            ),
+            (
+                "関心".to_string(),
+                ParamSpec {
+                    name: Some("関心".to_string()),
+                    ty: ParamType::String,
+                    required: false,
+                },
+            ),
+        ]),
+        return_type: None,
+    });
+    registry.register(FunctionSpec {
+        name: "活動中断".to_string(),
+        positional: vec![ParamSpec {
+            name: Some("理由".to_string()),
+            ty: ParamType::String,
+            required: false,
+        }],
+        named: BTreeMap::from([(
+            "理由".to_string(),
+            ParamSpec {
+                name: Some("理由".to_string()),
+                ty: ParamType::String,
+                required: false,
+            },
+        )]),
+        return_type: None,
+    });
+    for name in ["活動再開", "活動終了"] {
+        registry.register(FunctionSpec {
+            name: name.to_string(),
+            positional: Vec::new(),
+            named: BTreeMap::new(),
+            return_type: None,
+        });
+    }
+    registry.register(FunctionSpec {
+        name: "ごまかし画面".to_string(),
+        positional: Vec::new(),
+        named: BTreeMap::from([
+            (
+                "題".to_string(),
+                ParamSpec {
+                    name: Some("題".to_string()),
+                    ty: ParamType::String,
+                    required: true,
+                },
+            ),
+            (
+                "本文".to_string(),
+                ParamSpec {
+                    name: Some("本文".to_string()),
+                    ty: ParamType::String,
+                    required: true,
+                },
+            ),
+            (
+                "秒数".to_string(),
+                ParamSpec {
+                    name: Some("秒数".to_string()),
+                    ty: ParamType::Number,
+                    required: false,
+                },
+            ),
+        ]),
         return_type: None,
     });
     for name in ["歩く", "walk"] {
@@ -2107,6 +2440,7 @@ impl WorldPack {
         for actor in &self.actors {
             require_non_empty("actor.id", &actor.id)?;
             require_non_empty("actor.displayName", &actor.display_name)?;
+            require_non_empty("actor.initialLocation", &actor.initial_location)?;
             if !actor_ids.insert(actor.id.clone()) {
                 return Err(WorldError::Validation(format!(
                     "duplicate actor id: {}",
@@ -2342,6 +2676,8 @@ mod tests {
             actors: vec![ActorDefinition {
                 id: "yuukei".to_string(),
                 display_name: "Yuukei".to_string(),
+                initial_presence: ActorPresence::Present,
+                initial_location: "desktop".to_string(),
                 speaker_aliases: Vec::new(),
                 profile: JsonMap::new(),
                 renderer: None,
@@ -2460,6 +2796,73 @@ mod tests {
     }
 
     #[test]
+    fn actor_initial_state_defaults_when_manifest_fields_are_omitted() -> Result<()> {
+        let dir = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        let mut manifest = serde_json::to_value(pack())?;
+        let actor = manifest["actors"][0]
+            .as_object_mut()
+            .expect("actor manifest object");
+        actor.remove("initialPresence");
+        actor.remove("initialLocation");
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&manifest)?,
+        )?;
+
+        let loaded = WorldPack::load_from_dir(dir.path())?;
+
+        assert_eq!(loaded.actors[0].initial_presence, ActorPresence::Present);
+        assert_eq!(loaded.actors[0].initial_location, "desktop");
+        Ok(())
+    }
+
+    #[test]
+    fn world_load_rejects_invalid_actor_initial_presence() -> Result<()> {
+        let dir = tempdir()?;
+        let mut manifest = serde_json::to_value(pack())?;
+        manifest["actors"][0]["initialPresence"] = json!("sleeping");
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&manifest)?,
+        )?;
+
+        let error = WorldPack::load_from_dir(dir.path())
+            .expect_err("unknown initialPresence should fail during manifest load");
+
+        assert!(matches!(error, WorldError::Json(_)));
+        assert!(error.to_string().contains("sleeping"));
+        Ok(())
+    }
+
+    #[test]
+    fn world_load_rejects_empty_actor_initial_location() -> Result<()> {
+        let dir = tempdir()?;
+        fs::create_dir_all(dir.path().join("scripts"))?;
+        fs::write(
+            dir.path().join("scripts").join("reactions.daihon"),
+            &pack().daihon.loaded_scripts[0].source,
+        )?;
+        let mut invalid = pack();
+        invalid.actors[0].initial_location = " \t".to_string();
+        fs::write(
+            dir.path().join("pack.json"),
+            serde_json::to_string(&invalid)?,
+        )?;
+
+        let error = WorldPack::load_from_dir(dir.path())
+            .expect_err("empty initialLocation should fail during validation");
+
+        assert!(matches!(error, WorldError::Validation(_)));
+        assert!(error.to_string().contains("actor.initialLocation"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_empty_speaker_alias() {
         let mut world = pack();
         world.actors[0].speaker_aliases = vec![" ".to_string()];
@@ -2473,6 +2876,8 @@ mod tests {
         world.actors.push(ActorDefinition {
             id: "partner".to_string(),
             display_name: "Partner".to_string(),
+            initial_presence: ActorPresence::Present,
+            initial_location: "desktop".to_string(),
             speaker_aliases: Vec::new(),
             profile: JsonMap::new(),
             renderer: None,
@@ -2490,6 +2895,8 @@ mod tests {
         world.actors.push(ActorDefinition {
             id: "partner".to_string(),
             display_name: "Partner".to_string(),
+            initial_presence: ActorPresence::Present,
+            initial_location: "desktop".to_string(),
             speaker_aliases: vec!["ゆ".to_string()],
             profile: JsonMap::new(),
             renderer: None,
@@ -3093,6 +3500,65 @@ mod tests {
         assert_eq!(inputs["在席"], DaihonValue::String("away".to_string()));
     }
 
+    #[test]
+    fn event_inputs_include_actor_activity_friendly_names() {
+        let mut event = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        event
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        event
+            .payload
+            .insert("actorActivityId".to_string(), json!("activity-1"));
+        event
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("observing"));
+        event
+            .payload
+            .insert("actorActivityFocus".to_string(), json!("focused-window"));
+        event.payload.insert(
+            "actorActivityStartedAt".to_string(),
+            json!("2026-07-30T12:00:00Z"),
+        );
+        event
+            .payload
+            .insert("actorActivityInterruptible".to_string(), json!(true));
+        event
+            .payload
+            .insert("actorActivityInterrupted".to_string(), json!(false));
+        event
+            .payload
+            .insert("actorActivityInterruptionReason".to_string(), json!(""));
+        event
+            .payload
+            .insert("actorActivityContinuesWhileAway".to_string(), json!(true));
+
+        let inputs = event_inputs(&event).into_iter().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            inputs["活動"],
+            DaihonValue::String("window-watching".to_string())
+        );
+        assert_eq!(
+            inputs["活動ID"],
+            DaihonValue::String("activity-1".to_string())
+        );
+        assert_eq!(
+            inputs["活動段階"],
+            DaihonValue::String("observing".to_string())
+        );
+        assert_eq!(
+            inputs["活動関心"],
+            DaihonValue::String("focused-window".to_string())
+        );
+        assert_eq!(
+            inputs["活動開始時刻"],
+            DaihonValue::String("2026-07-30T12:00:00Z".to_string())
+        );
+        assert_eq!(inputs["活動中断可能"], DaihonValue::Boolean(true));
+        assert_eq!(inputs["活動中断中"], DaihonValue::Boolean(false));
+        assert_eq!(inputs["活動画面外継続"], DaihonValue::Boolean(true));
+    }
+
     #[tokio::test]
     async fn yuukei_adapter_dispatches_stage_perch_functions() -> Result<()> {
         let mut world = pack();
@@ -3198,6 +3664,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn yuukei_adapter_dispatches_constrained_owned_overlay_function() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.settings.opened".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.settings.opened
+### hide settings
+話者: yuukei
+＜ごまかし画面 題=「エラー」 本文=「ここは見られません」 秒数=8＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.settings.opened", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 1);
+        let command = &result.commands[0];
+        assert_eq!(command.kind, "stage.owned-overlay.show");
+        assert_eq!(command.payload["style"], "error");
+        assert_eq!(command.payload["title"], "エラー");
+        assert_eq!(command.payload["message"], "ここは見られません");
+        assert_eq!(command.payload["durationMs"], 8_000);
+        assert_eq!(command.payload["sourceFunction"], "ごまかし画面");
+        assert!(!command.payload.contains_key("html"));
+        assert!(!command.payload.contains_key("url"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn yuukei_adapter_dispatches_actor_location_exit_and_enter_functions() -> Result<()> {
         let mut world = pack();
         world.signals.allow = vec!["app.startup".to_string()];
@@ -3228,6 +3724,66 @@ mod tests {
         assert!(!result.commands[2].payload.contains_key("location"));
         assert_eq!(result.commands[3].kind, "actor.enter");
         assert_eq!(result.commands[3].payload["location"], "desktop");
+        assert!(result.commands.iter().all(|command| {
+            command
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref())
+                == Some("yuukei")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn yuukei_adapter_dispatches_actor_activity_functions() -> Result<()> {
+        let mut world = pack();
+        world.signals.allow = vec!["app.startup".to_string()];
+        world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### watch a window
+話者: yuukei
+＜活動開始 種類=「window-watching」 段階=「approaching」 関心=「focused-window」 画面外継続=いいえ 中断可能=はい＞
+＜活動段階 「observing」 関心=「window-category」＞
+＜活動段階 関心=「」＞
+＜活動中断 理由=「user-interaction」＞
+＜活動再開＞
+＜活動終了＞
+"#
+        .to_string();
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+        let event = RuntimeEvent::new("app.startup", "device", "resident-default");
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.commands.len(), 6);
+        let start = &result.commands[0];
+        assert_eq!(start.kind, "actor.activity.start");
+        assert_eq!(start.payload["activity"], "window-watching");
+        assert_eq!(start.payload["phase"], "approaching");
+        assert_eq!(start.payload["focus"], "focused-window");
+        assert_eq!(start.payload["continuesWhileAway"], false);
+        assert_eq!(start.payload["interruptible"], true);
+        assert_eq!(start.payload["speakerId"], "yuukei");
+        assert_eq!(start.payload["sourceFunction"], "活動開始");
+
+        let phase = &result.commands[1];
+        assert_eq!(phase.kind, "actor.activity.phase.set");
+        assert_eq!(phase.payload["phase"], "observing");
+        assert_eq!(phase.payload["focus"], "window-category");
+        assert_eq!(phase.payload["sourceFunction"], "活動段階");
+
+        let clear_focus = &result.commands[2];
+        assert_eq!(clear_focus.kind, "actor.activity.phase.set");
+        assert_eq!(clear_focus.payload["focus"], "");
+        assert!(!clear_focus.payload.contains_key("phase"));
+
+        let interrupt = &result.commands[3];
+        assert_eq!(interrupt.kind, "actor.activity.interrupt");
+        assert_eq!(interrupt.payload["reason"], "user-interaction");
+        assert_eq!(interrupt.payload["sourceFunction"], "活動中断");
+        assert_eq!(result.commands[4].kind, "actor.activity.resume");
+        assert_eq!(result.commands[5].kind, "actor.activity.end");
         assert!(result.commands.iter().all(|command| {
             command
                 .target
@@ -3405,6 +3961,8 @@ mod tests {
         world.actors.push(ActorDefinition {
             id: "partner".to_string(),
             display_name: "Partner".to_string(),
+            initial_presence: ActorPresence::Present,
+            initial_location: "desktop".to_string(),
             speaker_aliases: vec!["パ".to_string()],
             profile: JsonMap::new(),
             renderer: None,
@@ -3487,7 +4045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_pack_sample_dispatches_pat_dialogue_from_other_actor() -> Result<()> {
+    async fn default_pack_pat_yuukei_does_not_summon_the_away_partner() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
         let world = WorldPack::load_from_dir(root)?;
         assert!(world.allows_signal("avatar.gesture.pat"));
@@ -3509,31 +4067,6 @@ mod tests {
             .commands
             .iter()
             .find(|command| command.kind == "dialogue.say")
-            .expect("partner dialogue");
-        assert_eq!(dialogue.payload["speakerId"], "partner");
-        assert_eq!(
-            dialogue
-                .target
-                .as_ref()
-                .and_then(|target| target.actor_id.as_deref()),
-            Some("partner")
-        );
-
-        let mut partner_pat =
-            RuntimeEvent::new("avatar.gesture.pat", "surface", "resident-default");
-        partner_pat.id = "evt_pat_partner".to_string();
-        partner_pat.actor_id = Some("partner".to_string());
-        partner_pat
-            .payload
-            .insert("hitZoneId".to_string(), json!("head"));
-        partner_pat
-            .payload
-            .insert("hitSurface".to_string(), json!("skin"));
-        let result = adapter.dispatch(&partner_pat, &world).await?;
-        let dialogue = result
-            .commands
-            .iter()
-            .find(|command| command.kind == "dialogue.say")
             .expect("yuukei dialogue");
         assert_eq!(dialogue.payload["speakerId"], "yuukei");
         assert_eq!(
@@ -3543,11 +4076,18 @@ mod tests {
                 .and_then(|target| target.actor_id.as_deref()),
             Some("yuukei")
         );
+        assert!(result.commands.iter().all(|command| {
+            command
+                .target
+                .as_ref()
+                .and_then(|target| target.actor_id.as_deref())
+                == Some("yuukei")
+        }));
         Ok(())
     }
 
     #[tokio::test]
-    async fn default_pack_first_life_tick_starts_an_authored_walk() -> Result<()> {
+    async fn default_pack_first_life_tick_begins_silent_physical_patrol() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
         let world = WorldPack::load_from_dir(root)?;
         assert!(world.allows_signal("presence.life_tick"));
@@ -3564,20 +4104,1223 @@ mod tests {
         event
             .payload
             .insert("actorPresence".to_string(), json!("present"));
+        event.payload.insert("actorActivity".to_string(), json!(""));
 
         let result = adapter.dispatch(&event, &world).await?;
 
         assert_eq!(result.executed_scenes[0].scene_name, "最初の見回り");
+        let patrol_start = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.activity.start")
+            .expect("authored patrol activity");
+        assert_eq!(patrol_start.payload["activity"], "room-patrol");
+        assert_eq!(patrol_start.payload["phase"], "preparing");
         let walk = result
             .commands
             .iter()
             .find(|command| command.kind == "stage.walk")
             .expect("authored first walk");
         assert_eq!(walk.payload["destination"], "right-edge");
+        let look_around = result
+            .commands
+            .iter()
+            .find(|command| {
+                command.kind == "avatar.motion" && command.payload["motion"] == "idle_look_around"
+            })
+            .expect("authored look-around before the patrol");
+        assert_eq!(look_around.payload["loop"], false);
         assert!(result
             .commands
             .iter()
-            .any(|command| command.kind == "dialogue.say"));
+            .all(|command| command.kind != "dialogue.say"));
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_first_life_tick_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        let observed = adapter.dispatch(&arrived, &world).await?;
+        let patrol_phase = observed
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.activity.phase.set")
+            .expect("patrol observation phase");
+        assert_eq!(patrol_phase.payload["phase"], "observing");
+
+        let mut next_tick = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        next_tick.id = "evt_next_life_tick".to_string();
+        next_tick
+            .payload
+            .insert("actorLocation".to_string(), json!("desktop"));
+        next_tick
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        next_tick
+            .payload
+            .insert("actorActivity".to_string(), json!("room-patrol"));
+        let next_activity = adapter.dispatch(&next_tick, &world).await?;
+        assert!(next_activity
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_deep_night_life_tick_does_not_replace_resting_activities() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        for activity in ["sleeping", "napping"] {
+            let mut event = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+            event.id = format!("evt_resting_life_tick_{activity}");
+            event.timestamp = "2026-07-30T16:30:00Z".to_string();
+            event
+                .payload
+                .insert("actorLocation".to_string(), json!("desktop"));
+            event
+                .payload
+                .insert("actorPresence".to_string(), json!("present"));
+            event
+                .payload
+                .insert("actorActivity".to_string(), json!(activity));
+            event.payload.insert("localHour".to_string(), json!(1));
+            event.payload.insert("localMinute".to_string(), json!(30));
+            event
+                .payload
+                .insert("timePeriod".to_string(), json!("深夜"));
+
+            let result = adapter.dispatch(&event, &world).await?;
+
+            assert!(
+                result.commands.is_empty(),
+                "{activity} must not be replaced by the periodic life tick"
+            );
+            assert!(result.executed_scenes.is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_deep_night_sleep_wakes_into_dawn_activity_at_three() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_deep_night_sleep_sequence".to_string();
+        startup.timestamp = "2026-07-30T23:45:00+09:00".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("深夜"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let sleeping = adapter.dispatch(&startup, &world).await?;
+        assert!(sleeping.commands.iter().any(|command| {
+            command.kind == "actor.activity.start" && command.payload["activity"] == "sleeping"
+        }));
+        assert!(sleeping.commands.iter().any(|command| {
+            command.kind == "avatar.motion" && command.payload["returnMotion"] == "sleep_loop"
+        }));
+
+        let mut dawn = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        dawn.id = "evt_three_thirty_wake_sequence".to_string();
+        dawn.timestamp = "2026-07-30T18:30:00Z".to_string();
+        dawn.payload
+            .insert("actorLocation".to_string(), json!("desktop"));
+        dawn.payload
+            .insert("actorPresence".to_string(), json!("present"));
+        dawn.payload
+            .insert("actorActivity".to_string(), json!("sleeping"));
+        dawn.payload
+            .insert("actorActivityPhase".to_string(), json!("resting"));
+        dawn.payload
+            .insert("actorActivityContinuesWhileAway".to_string(), json!(true));
+        dawn.payload.insert("localHour".to_string(), json!(3));
+        dawn.payload.insert("localMinute".to_string(), json!(30));
+        dawn.payload.insert("timePeriod".to_string(), json!("深夜"));
+        let waking = adapter.dispatch(&dawn, &world).await?;
+
+        assert_eq!(waking.executed_scenes[0].scene_name, "明け方に目を覚ます");
+        assert!(waking.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "wake_up"
+                && command.payload["returnMotion"] == "idle_breathe"
+        }));
+        assert!(waking
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(waking.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "dawn-watch"
+                && command.payload["phase"] == "waking"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_startup_finds_the_resident_asleep_without_a_greeting() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut event = RuntimeEvent::new("app.startup", "device", "resident-default");
+        event.id = "evt_late_night_startup".to_string();
+        event
+            .payload
+            .insert("timePeriod".to_string(), json!("深夜"));
+        event.payload.insert("actorActivity".to_string(), json!(""));
+        event
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+
+        let result = adapter.dispatch(&event, &world).await?;
+
+        assert_eq!(result.executed_scenes[0].scene_name, "深夜の居眠り");
+        let sleep = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "avatar.motion")
+            .expect("authored sleeping activity");
+        assert_eq!(sleep.payload["motion"], "sleep_enter");
+        assert_eq!(sleep.payload["returnMotion"], "sleep_loop");
+        let activity = result
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.activity.start")
+            .expect("persistent startup activity");
+        assert_eq!(activity.payload["activity"], "sleeping");
+        assert_eq!(activity.payload["phase"], "resting");
+        assert!(result
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_morning_restart_wakes_a_sleep_saved_at_two() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut before_restart = RuntimeEvent::new("app.startup", "device", "resident-default");
+        before_restart.id = "evt_two_am_sleep_saved".to_string();
+        before_restart.timestamp = "2026-07-31T02:00:00+09:00".to_string();
+        before_restart
+            .payload
+            .insert("timePeriod".to_string(), json!("深夜"));
+        before_restart
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        before_restart
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let sleeping = adapter.dispatch(&before_restart, &world).await?;
+        assert!(sleeping.commands.iter().any(|command| {
+            command.kind == "actor.activity.start" && command.payload["activity"] == "sleeping"
+        }));
+
+        let mut restart = RuntimeEvent::new("app.startup", "device", "resident-default");
+        restart.id = "evt_seven_am_restart".to_string();
+        restart.timestamp = "2026-07-31T07:00:00+09:00".to_string();
+        restart
+            .payload
+            .insert("timePeriod".to_string(), json!("朝"));
+        restart
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        restart
+            .payload
+            .insert("actorActivity".to_string(), json!("sleeping"));
+        restart
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("resting"));
+        restart
+            .payload
+            .insert("actorActivityContinuesWhileAway".to_string(), json!(true));
+        let waking = adapter.dispatch(&restart, &world).await?;
+
+        assert_eq!(waking.executed_scenes[0].scene_name, "朝に眠りを片づける");
+        assert!(waking
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(waking.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "waking-up"
+                && command.payload["phase"] == "stirring"
+        }));
+        assert!(waking.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "wake_up"
+                && command.payload["returnMotion"] == "idle_breathe"
+        }));
+        assert!(waking
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_startup_preserves_a_restored_away_activity() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_restored_activity_startup".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("昼"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("away"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!("exploring-downloads"));
+        startup
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("exploring"));
+        startup
+            .payload
+            .insert("actorActivityFocus".to_string(), json!("downloads"));
+        let preserved = adapter.dispatch(&startup, &world).await?;
+        assert!(preserved.commands.is_empty());
+
+        let mut found = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        found.id = "evt_restored_downloads_encounter".to_string();
+        found
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        found
+            .payload
+            .insert("recentDownloadFileName".to_string(), json!("restored.png"));
+        found
+            .payload
+            .insert("recentDownloadCategory".to_string(), json!("image"));
+        found
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        found
+            .payload
+            .insert("actorPresence".to_string(), json!("away"));
+        found
+            .payload
+            .insert("actorActivity".to_string(), json!("exploring-downloads"));
+        found
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("exploring"));
+        found
+            .payload
+            .insert("actorActivityFocus".to_string(), json!("downloads"));
+        let encounter = adapter.dispatch(&found, &world).await?;
+        let examining = encounter
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.activity.phase.set")
+            .expect("restored activity advances at the folder encounter");
+        assert_eq!(examining.payload["phase"], "examining");
+        assert_eq!(examining.payload["focus"], "latest-download");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_startup_safely_returns_a_present_actor_from_downloads() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_present_downloads_activity_startup".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("昼"));
+        startup
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!("exploring-downloads"));
+        startup
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("exploring"));
+        startup
+            .payload
+            .insert("actorActivityFocus".to_string(), json!("downloads"));
+        startup
+            .payload
+            .insert("actorActivityContinuesWhileAway".to_string(), json!(true));
+
+        let recovered = adapter.dispatch(&startup, &world).await?;
+
+        assert_eq!(
+            recovered.executed_scenes[0].scene_name,
+            "Downloads探索から安全に帰る"
+        );
+        assert!(recovered.commands.iter().any(|command| {
+            command.kind == "actor.enter" && command.payload["location"] == "desktop"
+        }));
+        assert!(recovered
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(recovered
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_startup_recovers_a_stale_window_activity() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_stale_window_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-stale"));
+        adapter.dispatch(&appeared, &world).await?;
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_stale_window_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        adapter.dispatch(&arrived, &world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_stale_window_restart".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("昼"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        startup
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("perched"));
+        startup
+            .payload
+            .insert("actorActivityFocus".to_string(), json!("window-frame"));
+        let recovered = adapter.dispatch(&startup, &world).await?;
+
+        assert_eq!(
+            recovered.executed_scenes[0].scene_name,
+            "前回の窓辺を片づける"
+        );
+        assert!(recovered
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(recovered
+            .commands
+            .iter()
+            .all(|command| command.kind != "actor.activity.start"));
+        assert!(recovered
+            .variable_patches
+            .iter()
+            .any(|patch| { patch["path"] == "全体#座っている窓" && patch["value"] == "" }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_startup_clears_a_transient_activity_without_a_restorable_body_state(
+    ) -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_transient_activity_restart".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("昼"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!("room-patrol"));
+        startup
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("walking"));
+        startup
+            .payload
+            .insert("actorActivityContinuesWhileAway".to_string(), json!(false));
+        let recovered = adapter.dispatch(&startup, &world).await?;
+
+        assert_eq!(
+            recovered.executed_scenes[0].scene_name,
+            "前回の一時活動を片づける"
+        );
+        assert!(recovered
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(recovered.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "idle_look_around"
+                && command.payload["returnMotion"] == "idle_breathe"
+        }));
+        assert!(recovered
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_guards_settings_then_cleans_up_after_overlay_dismissal() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut opened = RuntimeEvent::new("app.settings.opened", "device", "resident-default");
+        opened.id = "evt_settings_opened".to_string();
+        opened
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        opened
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let guard = adapter.dispatch(&opened, &world).await?;
+
+        assert_eq!(
+            guard.executed_scenes[0].scene_name,
+            "何もしていないとき設定を隠す"
+        );
+        assert!(guard.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "guarding-secrets"
+                && command.payload["phase"] == "noticing"
+        }));
+        assert!(guard.commands.iter().any(|command| {
+            command.kind == "actor.activity.phase.set" && command.payload["phase"] == "concealing"
+        }));
+        let overlay = guard
+            .commands
+            .iter()
+            .find(|command| command.kind == "stage.owned-overlay.show")
+            .expect("owned overlay command");
+        assert_eq!(overlay.payload["style"], "error");
+        assert!(!overlay.payload.contains_key("html"));
+        assert!(!overlay.payload.contains_key("url"));
+        assert!(guard
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+
+        let mut dismissed = RuntimeEvent::new(
+            "stage.owned-overlay.dismissed",
+            "surface",
+            "resident-default",
+        );
+        dismissed.id = "evt_settings_overlay_dismissed".to_string();
+        dismissed.actor_id = Some("yuukei".to_string());
+        dismissed
+            .payload
+            .insert("reason".to_string(), json!("user-dismissed"));
+        dismissed
+            .payload
+            .insert("actorActivity".to_string(), json!("guarding-secrets"));
+        let cleanup = adapter.dispatch(&dismissed, &world).await?;
+
+        assert_eq!(
+            cleanup.executed_scenes[0].scene_name,
+            "見つかった画面を片づける"
+        );
+        let phases = cleanup
+            .commands
+            .iter()
+            .filter(|command| command.kind == "actor.activity.phase.set")
+            .map(|command| command.payload["phase"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(phases, vec!["caught", "tidying-up"]);
+        assert!(cleanup
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(cleanup
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_settings_focus_preserves_a_window_perch() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_guard_window_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-guarded"));
+        adapter.dispatch(&appeared, &world).await?;
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_guard_window_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        adapter.dispatch(&arrived, &world).await?;
+
+        let mut opened = RuntimeEvent::new("app.settings.opened", "device", "resident-default");
+        opened.id = "evt_settings_while_perched".to_string();
+        opened
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        opened
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        opened
+            .payload
+            .insert("actorActivityInterruptible".to_string(), json!(true));
+        let ignored = adapter.dispatch(&opened, &world).await?;
+        assert!(ignored.executed_scenes.is_empty());
+        assert!(ignored.commands.is_empty());
+
+        let mut disturbed =
+            RuntimeEvent::new("stage.perch.disturbed", "device", "resident-default");
+        disturbed.id = "evt_guard_window_disturbed".to_string();
+        disturbed.actor_id = Some("yuukei".to_string());
+        disturbed
+            .payload
+            .insert("windowKey".to_string(), json!("window-guarded"));
+        disturbed
+            .payload
+            .insert("reason".to_string(), json!("window-moved"));
+        let still_perched = adapter.dispatch(&disturbed, &world).await?;
+        assert_eq!(
+            still_perched.executed_scenes[0].scene_name,
+            "動いた窓の上で踏ん張る"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_settings_focus_preserves_an_active_room_patrol_walk() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut life_tick = RuntimeEvent::new("presence.life_tick", "device", "resident-default");
+        life_tick.id = "evt_guard_patrol_start".to_string();
+        life_tick
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        life_tick
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        adapter.dispatch(&life_tick, &world).await?;
+
+        let mut opened = RuntimeEvent::new("app.settings.opened", "device", "resident-default");
+        opened.id = "evt_settings_during_patrol".to_string();
+        opened
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        opened
+            .payload
+            .insert("actorActivity".to_string(), json!("room-patrol"));
+        opened
+            .payload
+            .insert("actorActivityPhase".to_string(), json!("walking"));
+        opened
+            .payload
+            .insert("actorActivityInterruptible".to_string(), json!(true));
+        let ignored = adapter.dispatch(&opened, &world).await?;
+        assert!(ignored.executed_scenes.is_empty());
+        assert!(ignored.commands.is_empty());
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_guard_patrol_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        let still_patrolling = adapter.dispatch(&arrived, &world).await?;
+        assert!(still_patrolling
+            .executed_scenes
+            .iter()
+            .any(|scene| scene.scene_name == "散歩の余韻"));
+        assert!(still_patrolling.commands.iter().any(|command| {
+            command.kind == "actor.activity.phase.set" && command.payload["phase"] == "observing"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_settings_focus_safely_replaces_a_passive_startup_activity() -> Result<()>
+    {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut startup = RuntimeEvent::new("app.startup", "device", "resident-default");
+        startup.id = "evt_guard_passive_startup".to_string();
+        startup
+            .payload
+            .insert("timePeriod".to_string(), json!("昼"));
+        startup
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        startup
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let passive = adapter.dispatch(&startup, &world).await?;
+        assert!(passive.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "watching-the-room"
+        }));
+
+        let mut opened = RuntimeEvent::new("app.settings.opened", "device", "resident-default");
+        opened.id = "evt_settings_after_passive_startup".to_string();
+        opened
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        opened
+            .payload
+            .insert("actorActivity".to_string(), json!("watching-the-room"));
+        opened
+            .payload
+            .insert("actorActivityInterruptible".to_string(), json!(true));
+        let guarded = adapter.dispatch(&opened, &world).await?;
+        assert_eq!(
+            guarded.executed_scenes[0].scene_name,
+            "安全な室内活動を置いて設定を隠す"
+        );
+        assert_eq!(guarded.commands[0].kind, "actor.activity.end");
+        assert!(guarded.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "guarding-secrets"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_walks_to_a_new_window_perches_then_lands_when_it_closes() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_window_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-golden"));
+        appeared
+            .payload
+            .insert("app".to_string(), json!("Explorer"));
+        let approach = adapter.dispatch(&appeared, &world).await?;
+        assert_eq!(approach.executed_scenes[0].scene_name, "新しい窓へ近づく");
+        assert!(approach.commands.iter().any(|command| {
+            command.kind == "actor.activity.start"
+                && command.payload["activity"] == "window-watching"
+                && command.payload["phase"] == "approaching"
+                && command.payload["focus"] == "target-window"
+        }));
+        assert!(approach
+            .commands
+            .iter()
+            .any(|command| command.kind == "stage.walk"));
+        assert!(approach
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_window_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        let perch = adapter.dispatch(&arrived, &world).await?;
+        assert!(perch.commands.iter().any(|command| {
+            command.kind == "actor.activity.phase.set"
+                && command.payload["phase"] == "perched"
+                && command.payload["focus"] == "window-frame"
+        }));
+        assert!(perch.commands.iter().any(|command| {
+            command.kind == "stage.perch" && command.payload["windowKey"] == "window-golden"
+        }));
+        assert!(perch.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "perch_sit_down"
+                && command.payload["returnMotion"] == "perch_idle"
+        }));
+
+        let mut disturbed =
+            RuntimeEvent::new("stage.perch.disturbed", "device", "resident-default");
+        disturbed.id = "evt_window_disturbed".to_string();
+        disturbed.actor_id = Some("yuukei".to_string());
+        disturbed
+            .payload
+            .insert("windowKey".to_string(), json!("window-golden"));
+        disturbed
+            .payload
+            .insert("reason".to_string(), json!("window-moved"));
+        let balance = adapter.dispatch(&disturbed, &world).await?;
+        assert_eq!(
+            balance.executed_scenes[0].scene_name,
+            "動いた窓の上で踏ん張る"
+        );
+        assert!(balance.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "idle_weight_shift"
+                && command.payload["returnMotion"] == "perch_idle"
+        }));
+        let disturbance_phases = balance
+            .commands
+            .iter()
+            .filter(|command| command.kind == "actor.activity.phase.set")
+            .map(|command| command.payload["phase"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(disturbance_phases, vec!["bracing", "recovering", "perched"]);
+        assert!(balance
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+
+        let mut perch_ended = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+        perch_ended.id = "evt_window_perch_ended".to_string();
+        perch_ended.actor_id = Some("yuukei".to_string());
+        perch_ended
+            .payload
+            .insert("windowKey".to_string(), json!("window-golden"));
+        perch_ended
+            .payload
+            .insert("reason".to_string(), json!("window-closed"));
+        perch_ended
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        let landing = adapter.dispatch(&perch_ended, &world).await?;
+        assert_eq!(
+            landing.executed_scenes[0].scene_name,
+            "閉じた窓から着地する"
+        );
+        assert!(landing.commands.iter().any(|command| {
+            command.kind == "avatar.motion" && command.payload["motion"] == "drop_land"
+        }));
+        assert!(landing
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(landing
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+
+        let mut closed = RuntimeEvent::new("desktop.window.closed", "device", "resident-default");
+        closed.id = "evt_window_closed".to_string();
+        closed
+            .payload
+            .insert("windowKey".to_string(), json!("window-golden"));
+        let after_close = adapter.dispatch(&closed, &world).await?;
+        assert!(after_close.commands.iter().all(|command| {
+            command.kind != "avatar.motion" || command.payload["motion"] != "drop_land"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_ends_window_watching_when_the_perch_is_released() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_perch_release_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-release"));
+        adapter.dispatch(&appeared, &world).await?;
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_perch_release_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        adapter.dispatch(&arrived, &world).await?;
+
+        let mut released = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+        released.id = "evt_perch_released".to_string();
+        released.actor_id = Some("yuukei".to_string());
+        released
+            .payload
+            .insert("windowKey".to_string(), json!("window-release"));
+        released
+            .payload
+            .insert("reason".to_string(), json!("user-drag"));
+        released
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        let ended = adapter.dispatch(&released, &world).await?;
+
+        assert_eq!(ended.executed_scenes[0].scene_name, "窓枠から降りた");
+        assert!(ended
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_observation_disable_lands_an_already_perched_actor() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_observation_disable_perched_appeared".to_string();
+        appeared.payload.insert(
+            "windowKey".to_string(),
+            json!("window-observation-disabled"),
+        );
+        adapter.dispatch(&appeared, &world).await?;
+
+        let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        arrived.id = "evt_observation_disable_perched_arrived".to_string();
+        arrived.actor_id = Some("yuukei".to_string());
+        arrived
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        let perched = adapter.dispatch(&arrived, &world).await?;
+        assert!(perched.commands.iter().any(|command| {
+            command.kind == "avatar.motion" && command.payload["returnMotion"] == "perch_idle"
+        }));
+
+        let mut ended = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+        ended.id = "evt_observation_disable_perched_ended".to_string();
+        ended.actor_id = Some("yuukei".to_string());
+        ended.payload.insert(
+            "windowKey".to_string(),
+            json!("window-observation-disabled"),
+        );
+        ended
+            .payload
+            .insert("reason".to_string(), json!("observation-disabled"));
+        ended
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        let recovered = adapter.dispatch(&ended, &world).await?;
+
+        assert_eq!(
+            recovered.executed_scenes[0].scene_name,
+            "観測を止めた窓からデスクトップへ戻る"
+        );
+        assert!(recovered
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(recovered.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "drop_recover"
+                && command.payload["returnMotion"] == "idle_breathe"
+        }));
+        assert!(recovered
+            .variable_patches
+            .iter()
+            .any(|patch| { patch["path"] == "全体#座っている窓" && patch["value"] == "" }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_observation_disable_cancels_an_in_flight_perch_approach() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_observation_disable_in_flight_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-in-flight"));
+        adapter.dispatch(&appeared, &world).await?;
+
+        let mut ended = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+        ended.id = "evt_observation_disable_in_flight_ended".to_string();
+        ended.actor_id = Some("yuukei".to_string());
+        ended
+            .payload
+            .insert("windowKey".to_string(), json!("window-in-flight"));
+        ended
+            .payload
+            .insert("reason".to_string(), json!("observation-disabled"));
+        ended
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        let recovered = adapter.dispatch(&ended, &world).await?;
+        assert!(recovered
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(recovered.commands.iter().any(|command| {
+            command.kind == "avatar.motion"
+                && command.payload["motion"] == "drop_recover"
+                && command.payload["returnMotion"] == "idle_breathe"
+        }));
+        assert!(recovered
+            .variable_patches
+            .iter()
+            .any(|patch| { patch["path"] == "全体#目標の窓" && patch["value"] == "" }));
+        assert!(recovered
+            .variable_patches
+            .iter()
+            .any(|patch| { patch["path"] == "全体#窓へ移動中" && patch["value"] == false }));
+
+        let mut late_arrival = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        late_arrival.id = "evt_observation_disable_late_arrival".to_string();
+        late_arrival.actor_id = Some("yuukei".to_string());
+        late_arrival
+            .payload
+            .insert("reason".to_string(), json!("arrived"));
+        late_arrival
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let ignored = adapter.dispatch(&late_arrival, &world).await?;
+        assert!(ignored.commands.iter().all(|command| {
+            command.kind != "stage.perch"
+                && (command.kind != "avatar.motion"
+                    || command.payload["returnMotion"] != "perch_idle")
+                && command.kind != "actor.activity.start"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_grab_cancels_window_approach_without_resuming_on_drop() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut appeared =
+            RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+        appeared.id = "evt_grab_window_appeared".to_string();
+        appeared
+            .payload
+            .insert("windowKey".to_string(), json!("window-grab"));
+        let approach = adapter.dispatch(&appeared, &world).await?;
+        assert!(approach
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.start"));
+
+        let mut grabbed = RuntimeEvent::new("avatar.gesture.grab", "surface", "resident-default");
+        grabbed.id = "evt_grab_cancels_activity".to_string();
+        grabbed.actor_id = Some("yuukei".to_string());
+        grabbed
+            .payload
+            .insert("actorActivity".to_string(), json!("window-watching"));
+        let cancelled = adapter.dispatch(&grabbed, &world).await?;
+        assert!(cancelled
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        for path in ["全体#窓へ移動中", "全体#目標の窓"] {
+            assert!(cancelled.variable_patches.iter().any(|patch| {
+                patch["path"] == path && (patch["value"] == "" || patch["value"] == false)
+            }));
+        }
+
+        let mut walk_ended = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+        walk_ended.id = "evt_grab_walk_ended".to_string();
+        walk_ended.actor_id = Some("yuukei".to_string());
+        walk_ended
+            .payload
+            .insert("reason".to_string(), json!("user-drag"));
+        walk_ended
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let interrupted = adapter.dispatch(&walk_ended, &world).await?;
+        assert!(interrupted
+            .commands
+            .iter()
+            .all(|command| command.kind != "actor.activity.start"
+                && command.kind != "actor.activity.resume"
+                && command.kind != "stage.perch"));
+
+        let mut dropped = RuntimeEvent::new("avatar.gesture.drop", "surface", "resident-default");
+        dropped.id = "evt_drop_after_activity_cancel".to_string();
+        dropped.actor_id = Some("yuukei".to_string());
+        dropped
+            .payload
+            .insert("movedDistance".to_string(), json!(80));
+        dropped
+            .payload
+            .insert("actorActivity".to_string(), json!(""));
+        let after_drop = adapter.dispatch(&dropped, &world).await?;
+        assert!(after_drop
+            .commands
+            .iter()
+            .all(|command| command.kind != "actor.activity.start"
+                && command.kind != "actor.activity.resume"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_folder_encounter_returns_with_the_previous_activity_intact() -> Result<()>
+    {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut found = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        found.id = "evt_found_in_downloads".to_string();
+        found
+            .payload
+            .insert("category".to_string(), json!("downloads"));
+        found
+            .payload
+            .insert("recentDownloadFileName".to_string(), json!("sketch.png"));
+        found
+            .payload
+            .insert("recentDownloadCategory".to_string(), json!("image"));
+        found
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        found
+            .payload
+            .insert("actorPresence".to_string(), json!("away"));
+        let encounter = adapter.dispatch(&found, &world).await?;
+        assert_eq!(
+            encounter.executed_scenes[0].scene_name,
+            "Downloadsの探検中に見つかる"
+        );
+        assert!(encounter
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.enter"));
+        assert!(encounter.commands.iter().any(|command| {
+            command.kind == "actor.activity.phase.set"
+                && command.payload["phase"] == "examining"
+                && command.payload["focus"] == "latest-download"
+        }));
+
+        let mut desktop = RuntimeEvent::new("desktop.folder.opened", "device", "resident-default");
+        desktop.id = "evt_return_to_desktop".to_string();
+        desktop
+            .payload
+            .insert("category".to_string(), json!("desktop"));
+        desktop
+            .payload
+            .insert("actorLocation".to_string(), json!("downloads"));
+        desktop
+            .payload
+            .insert("actorPresence".to_string(), json!("present"));
+        let returned = adapter.dispatch(&desktop, &world).await?;
+        let enter = returned
+            .commands
+            .iter()
+            .find(|command| command.kind == "actor.enter")
+            .expect("return to desktop");
+        assert_eq!(enter.payload["location"], "desktop");
+        assert!(returned.commands.iter().any(|command| {
+            command.kind == "dialogue.say"
+                && command.payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("届きものの置き場所を見ていた"))
+        }));
+        assert!(returned
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_pack_resumes_the_activity_selected_during_user_absence() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+        let world = WorldPack::load_from_dir(root)?;
+        let adapter = YuukeiDaihonAdapter::default();
+        adapter.load_world(&world).await?;
+
+        let mut away = RuntimeEvent::new("presence.idle.start", "device", "resident-default");
+        away.id = "evt_user_away".to_string();
+        let started = adapter.dispatch(&away, &world).await?;
+        let started_scene = started.executed_scenes[0].scene_name.as_str();
+        assert!(started
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
+        assert!(started
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.start"));
+
+        let expected_return_scene = match started_scene {
+            "窓辺で留守番" => "窓辺から振り向く",
+            "机の端で居眠り" => "居眠りから遅れて気づく",
+            "静かな見回り" => "見回りの途中で戻る",
+            other => panic!("unexpected away activity: {other}"),
+        };
+
+        let mut returned = RuntimeEvent::new("presence.idle.end", "device", "resident-default");
+        returned.id = "evt_user_returned".to_string();
+        returned
+            .payload
+            .insert("idleMinutes".to_string(), json!(12));
+        let resumed = adapter.dispatch(&returned, &world).await?;
+        assert_eq!(resumed.executed_scenes[0].scene_name, expected_return_scene);
+        assert!(resumed
+            .commands
+            .iter()
+            .any(|command| command.kind == "avatar.motion"));
+        assert!(resumed
+            .commands
+            .iter()
+            .any(|command| command.kind == "actor.activity.end"));
+        assert!(resumed
+            .commands
+            .iter()
+            .all(|command| command.kind != "dialogue.say"));
         Ok(())
     }
 

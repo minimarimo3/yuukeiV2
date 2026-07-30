@@ -11,8 +11,8 @@
         "ゆ"
       ],
       "profile": {
-        "role": "UI resident",
-        "speechStyle": "short and present"
+        "role": "independent desktop resident",
+        "speechStyle": "quiet, observant, and never waiting for instructions"
       },
       "renderer": {
         "kind": "vrm",
@@ -59,6 +59,8 @@
     {
       "id": "partner",
       "displayName": "Partner",
+      "initialPresence": "away",
+      "initialLocation": "desktop",
       "speakerAliases": [
         "パ"
       ],
@@ -112,6 +114,7 @@
   "signals": {
     "allow": [
       "app.startup",
+      "app.settings.opened",
       "presence.life_tick",
       "presence.talk_impulse",
       "presence.time_period",
@@ -123,6 +126,9 @@
       "avatar.gesture.grab",
       "avatar.gesture.drop",
       "stage.walk.ended",
+      "stage.perch.ended",
+      "stage.perch.disturbed",
+      "stage.owned-overlay.dismissed",
       "presence.idle.start",
       "presence.idle.end",
       "desktop.window.appeared",
@@ -151,19 +157,28 @@
       "scripts/presence_return.daihon",
       "scripts/folder_encounters.daihon",
       "scripts/downloads.daihon",
-      "scripts/window_perch.daihon"
+      "scripts/window_perch.daihon",
+      "scripts/settings_guard.daihon"
     ]
   },
   "initialVariables": {
     "全体#暮らし開始済み": false,
+    "全体#生活中の活動": "",
     "全体#散歩回数": 0,
     "全体#外出回数": 0,
+    "全体#外出中の活動": "",
+    "全体#外出先で遭遇": false,
+    "全体#留守番中の活動": "",
     "全体#最後の届きもの": "",
     "全体#届きもの未確認": false,
     "全体#届きものを見た": false,
     "全体#留守番回数": 0,
     "全体#留守番あと話": false,
-    "全体#AI雑談回数": 0
+    "全体#AI雑談回数": 0,
+    "全体#窓へ移動中": false,
+    "全体#目標の窓": "",
+    "全体#座っている窓": "",
+    "全体#窓辺回数": 0
   },
   "uiSpace": {
     "desktop": "shared-room"

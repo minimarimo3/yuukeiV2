@@ -1,12 +1,113 @@
 ## 窓_出現
 
-### 新しい窓に座ってみる
+### 新しい窓へ近づく
 合図: ＠窓_出現
-頻度: 30分に1回
+条件:（全体#窓へ移動中 = いいえ かつ 全体#目標の窓 = 「」 かつ 全体#座っている窓 = 「」 かつ 全体#生活中の活動 = 「」）
+頻度: 10分に1回
 話者: ゆ
-＜枠に座る (入力#窓ID)＞
+＜活動終了＞
+＜活動開始 種類=「window-watching」 段階=「approaching」 関心=「target-window」 画面外継続=いいえ 中断可能=はい＞
+全体#目標の窓 = 入力#窓ID
+全体#窓へ移動中 = はい
+＜動作 idle_look_around 繰り返し=いいえ 終了後=idle_breathe＞
+＜歩く 右端 速さ=185＞
+
+## 住人_歩き終わり
+
+### 窓まで歩いて腰かける
+合図: ＠住人_歩き終わり
+条件:（入力#actorId = 「yuukei」 かつ 入力#理由 = 「到着」 かつ 全体#窓へ移動中 = はい かつ 全体#目標の窓 != 「」）
+話者: ゆ
+＜活動段階 「perched」 関心=「window-frame」＞
+＜枠に座る (全体#目標の窓)＞
 ＜動作 perch_sit_down 繰り返し=いいえ 終了後=perch_idle＞
-「新しい屋根ですね。……ちょっと座ってみます。」
+全体#座っている窓 = 全体#目標の窓
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+全体#窓辺回数 = 全体#窓辺回数 + 1
+
+### 窓へ向かう途中で止められる
+合図: ＠住人_歩き終わり
+条件:（入力#actorId = 「yuukei」 かつ 入力#理由 = 「中断」 かつ 全体#窓へ移動中 = はい）
+話者: ゆ
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+＜活動中断 理由=「approach-interrupted」＞
+＜活動終了＞
+＜動作 drop_recover 繰り返し=いいえ 終了後=idle_breathe＞
+
+## 窓_消滅
+
+### 座っていた窓が閉じる
+合図: ＠窓_消滅
+条件:（全体#座っている窓 = 入力#窓ID かつ 全体#座っている窓 != 「」）
+話者: ゆ
+全体#座っている窓 = 「」
+＜活動終了＞
+＜表情 驚き＞
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 向かっていた窓が閉じる
+合図: ＠窓_消滅
+条件:（全体#目標の窓 = 入力#窓ID かつ 全体#窓へ移動中 = はい）
+話者: ゆ
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+＜活動終了＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=idle_breathe＞
+
+## stage.perch.disturbed
+
+### 動いた窓の上で踏ん張る
+合図: ＠stage.perch.disturbed
+条件:（入力#actorId = 「yuukei」 かつ 入力#reason = 「window-moved」 かつ 全体#座っている窓 = 入力#windowKey）
+話者: ゆ
+＜活動段階 「bracing」 関心=「window-frame」＞
+＜表情 驚き＞
+＜動作 idle_weight_shift 繰り返し=いいえ 終了後=perch_idle＞
+＜活動段階 「recovering」 関心=「window-frame」＞
+＜活動段階 「perched」 関心=「window-frame」＞
+
+### 大きさが変わった窓に座り直す
+合図: ＠stage.perch.disturbed
+条件:（入力#actorId = 「yuukei」 かつ 入力#reason = 「window-resized」 かつ 全体#座っている窓 = 入力#windowKey）
+話者: ゆ
+＜活動段階 「bracing」 関心=「window-frame」＞
+＜動作 perch_sit_down 繰り返し=いいえ 終了後=perch_idle＞
+＜活動段階 「recovering」 関心=「window-frame」＞
+＜活動段階 「perched」 関心=「window-frame」＞
+
+## stage.perch.ended
+
+### 閉じた窓から着地する
+合図: ＠stage.perch.ended
+条件:（入力#actorId = 「yuukei」 かつ 入力#活動 = 「window-watching」 かつ 入力#reason = 「window-closed」）
+話者: ゆ
+全体#座っている窓 = 「」
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+＜活動終了＞
+＜表情 驚き＞
+＜動作 drop_land 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 観測を止めた窓からデスクトップへ戻る
+合図: ＠stage.perch.ended
+条件:（入力#actorId = 「yuukei」 かつ 入力#活動 = 「window-watching」 かつ 入力#reason = 「observation-disabled」）
+話者: ゆ
+全体#座っている窓 = 「」
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+＜活動終了＞
+＜動作 drop_recover 繰り返し=いいえ 終了後=idle_breathe＞
+
+### 窓枠から降りた
+合図: ＠stage.perch.ended
+条件:（入力#actorId = 「yuukei」 かつ 入力#活動 = 「window-watching」 かつ 入力#reason != 「window-closed」 かつ 入力#reason != 「observation-disabled」）
+話者: ゆ
+全体#座っている窓 = 「」
+全体#目標の窓 = 「」
+全体#窓へ移動中 = いいえ
+＜活動終了＞
 
 ## 窓_注目
 
@@ -14,5 +115,5 @@
 合図: ＠窓_注目
 条件:（入力#AI接続 = はい かつ 入力#アプリ != 「」）
 頻度: 2時間に1回
-話者: パ
-＜生成 (「いま前面にあるアプリ名は 」 + 入力#アプリ + 「。外の街へ通じる窓として眺めるUI内生活者の短い一言。用途を断定しすぎず、質問せず、1文だけ」) (「前面に来た 」 + 入力#アプリ + 「 の窓から、外の気配が少し変わりましたね。」)＞
+話者: ゆ
+＜生成 (「いま前面にあるアプリ名は 」 + 入力#アプリ + 「。その窓枠に腰かけて外の街を眺めるデスクトップ内の住人として、用途を断定せず、質問せず、一文だけ」) (「前面に来た 」 + 入力#アプリ + 「 の窓から、外の気配が少し変わりましたね。」)＞

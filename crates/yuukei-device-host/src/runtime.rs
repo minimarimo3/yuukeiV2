@@ -856,6 +856,29 @@ impl LocalYuukeiRuntime {
             .await
     }
 
+    pub async fn emit_settings_opened(&self) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event("app.settings.opened", current_presence_payload())
+            .await
+    }
+
+    pub async fn emit_owned_overlay_dismissed(
+        &self,
+        actor_id: &str,
+        overlay_id: &str,
+        reason: &str,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            "stage.owned-overlay.dismissed",
+            JsonMap::from([
+                ("overlayId".to_string(), json!(overlay_id)),
+                ("reason".to_string(), json!(reason)),
+            ]),
+            None,
+            Some(actor_id.to_string()),
+        )
+        .await
+    }
+
     pub async fn emit_desktop_window_transition(
         &self,
         transition: DesktopWindowTransition,
@@ -907,7 +930,34 @@ impl LocalYuukeiRuntime {
                 ("windowKey".to_string(), json!(window_key)),
                 ("reason".to_string(), json!(reason)),
             ]),
-            None,
+            Some(desktop_observation_privacy()),
+            Some(actor_id.to_string()),
+        )
+        .await
+    }
+
+    pub async fn emit_stage_perch_disturbed(
+        &self,
+        actor_id: &str,
+        window_key: &str,
+        reason: &str,
+        movement_distance_px: u64,
+        width_change_px: u64,
+        height_change_px: u64,
+    ) -> Result<Vec<RuntimeCommand>> {
+        self.emit_runtime_event_with_options(
+            "stage.perch.disturbed",
+            JsonMap::from([
+                ("windowKey".to_string(), json!(window_key)),
+                ("reason".to_string(), json!(reason)),
+                (
+                    "movementDistancePx".to_string(),
+                    json!(movement_distance_px),
+                ),
+                ("widthChangePx".to_string(), json!(width_change_px)),
+                ("heightChangePx".to_string(), json!(height_change_px)),
+            ]),
+            Some(desktop_observation_privacy()),
             Some(actor_id.to_string()),
         )
         .await

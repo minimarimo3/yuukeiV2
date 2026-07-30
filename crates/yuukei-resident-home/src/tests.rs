@@ -36,6 +36,8 @@ fn world_pack() -> WorldPack {
         actors: vec![ActorDefinition {
             id: "yuukei".to_string(),
             display_name: "Yuukei".to_string(),
+            initial_presence: ActorPresence::Present,
+            initial_location: "desktop".to_string(),
             speaker_aliases: Vec::new(),
             profile: JsonMap::new(),
             renderer: None,
@@ -582,6 +584,8 @@ fn conversation_ai_connected_world() -> WorldPack {
     world.actors.push(ActorDefinition {
         id: "partner".to_string(),
         display_name: "Partner".to_string(),
+        initial_presence: ActorPresence::Present,
+        initial_location: "desktop".to_string(),
         speaker_aliases: vec!["パ".to_string()],
         profile: JsonMap::new(),
         renderer: None,
@@ -926,6 +930,141 @@ async fn actor_location_exit_and_enter_commands_update_snapshot_atomically() -> 
 }
 
 #[tokio::test]
+async fn actor_snapshot_starts_from_world_pack_initial_state() -> Result<()> {
+    let mut world = world_pack();
+    world.actors[0].initial_presence = ActorPresence::Away;
+    world.actors[0].initial_location = "downloads".to_string();
+
+    let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+    let actor = &home.snapshot()?.actors["yuukei"];
+
+    assert_eq!(actor.location, "downloads");
+    assert_eq!(actor.presence, ActorPresence::Away);
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_repo_pack_initial_snapshot_focuses_on_yuukei_alone() -> Result<()> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+    let world = WorldPack::load_from_dir(root)?;
+    let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+    let snapshot = home.snapshot()?;
+
+    assert_eq!(snapshot.actors["yuukei"].presence, ActorPresence::Present);
+    assert_eq!(snapshot.actors["yuukei"].location, "desktop");
+    assert_eq!(snapshot.actors["partner"].presence, ActorPresence::Away);
+    assert_eq!(snapshot.actors["partner"].location, "desktop");
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_repo_pack_observation_disable_cleans_up_perched_and_approaching_states(
+) -> Result<()> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/default-yuukei");
+    let world = WorldPack::load_from_dir(&root)?;
+    let perched_home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+
+    let mut appeared = RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+    appeared
+        .payload
+        .insert("windowKey".to_string(), json!("window-perched"));
+    perched_home.ingest_event(appeared).await?;
+    let mut arrived = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+    arrived.actor_id = Some("yuukei".to_string());
+    arrived
+        .payload
+        .insert("reason".to_string(), json!("arrived"));
+    perched_home.ingest_event(arrived).await?;
+    let perched = perched_home.snapshot()?;
+    assert_eq!(
+        perched.actors["yuukei"]
+            .activity
+            .as_ref()
+            .map(|activity| activity.phase.as_str()),
+        Some("perched")
+    );
+    assert_eq!(perched.actors["yuukei"].motion, "perch_idle");
+
+    let mut disabled = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+    disabled.actor_id = Some("yuukei".to_string());
+    disabled
+        .payload
+        .insert("windowKey".to_string(), json!("window-perched"));
+    disabled
+        .payload
+        .insert("reason".to_string(), json!("observation-disabled"));
+    perched_home.ingest_event(disabled).await?;
+    let recovered = perched_home.snapshot()?;
+    assert!(recovered.actors["yuukei"].activity.is_none());
+    assert_eq!(recovered.actors["yuukei"].motion, "idle_breathe");
+
+    let world = WorldPack::load_from_dir(root)?;
+    let approaching_home =
+        ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+    let mut appeared = RuntimeEvent::new("desktop.window.appeared", "device", "resident-default");
+    appeared
+        .payload
+        .insert("windowKey".to_string(), json!("window-approaching"));
+    approaching_home.ingest_event(appeared).await?;
+    assert_eq!(
+        approaching_home.snapshot()?.actors["yuukei"]
+            .activity
+            .as_ref()
+            .map(|activity| activity.phase.as_str()),
+        Some("approaching")
+    );
+
+    let mut rejected = RuntimeEvent::new("stage.perch.ended", "device", "resident-default");
+    rejected.actor_id = Some("yuukei".to_string());
+    rejected
+        .payload
+        .insert("windowKey".to_string(), json!("window-approaching"));
+    rejected
+        .payload
+        .insert("reason".to_string(), json!("observation-disabled"));
+    approaching_home.ingest_event(rejected).await?;
+    let recovered = approaching_home.snapshot()?;
+    assert!(recovered.actors["yuukei"].activity.is_none());
+    assert_eq!(recovered.actors["yuukei"].motion, "idle_breathe");
+
+    let mut late_arrival = RuntimeEvent::new("stage.walk.ended", "device", "resident-default");
+    late_arrival.actor_id = Some("yuukei".to_string());
+    late_arrival
+        .payload
+        .insert("reason".to_string(), json!("arrived"));
+    approaching_home.ingest_event(late_arrival).await?;
+    let after_late_arrival = approaching_home.snapshot()?;
+    assert!(after_late_arrival.actors["yuukei"].activity.is_none());
+    assert_ne!(after_late_arrival.actors["yuukei"].motion, "perch_idle");
+    Ok(())
+}
+
+#[tokio::test]
+async fn restored_actor_state_overrides_world_pack_initial_state() -> Result<()> {
+    let mut world = world_pack();
+    world.actors[0].initial_presence = ActorPresence::Away;
+    world.actors[0].initial_location = "downloads".to_string();
+    let event_log = EventLog::in_memory()?;
+    let mut entered = RuntimeCommand::new("actor.enter", "daihon", "resident-default");
+    entered.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    entered
+        .payload
+        .insert("location".to_string(), json!("desktop"));
+    event_log.append(NewEventLogRecord::from(entered))?;
+
+    let home = ResidentHome::new("resident-default", world, event_log).await?;
+    let actor = &home.snapshot()?.actors["yuukei"];
+
+    assert_eq!(actor.location, "desktop");
+    assert_eq!(actor.presence, ActorPresence::Present);
+    Ok(())
+}
+
+#[tokio::test]
 async fn actor_location_and_presence_restore_from_canonical_event_log() -> Result<()> {
     let event_log = EventLog::in_memory()?;
     let home = ResidentHome::new("resident-default", world_pack(), event_log.clone()).await?;
@@ -945,6 +1084,433 @@ async fn actor_location_and_presence_restore_from_canonical_event_log() -> Resul
     let snapshot = reopened.snapshot()?;
     assert_eq!(snapshot.actors["yuukei"].location, "downloads");
     assert_eq!(snapshot.actors["yuukei"].presence, ActorPresence::Away);
+    Ok(())
+}
+
+fn activity_command(
+    kind: &str,
+    activity_id: Option<&str>,
+    activity: Option<&str>,
+) -> RuntimeCommand {
+    let mut command = RuntimeCommand::new(kind, "resident-home", "resident-default");
+    command.target = Some(CommandTarget {
+        device_id: None,
+        surface_id: None,
+        actor_id: Some("yuukei".to_string()),
+    });
+    if let Some(activity_id) = activity_id {
+        command
+            .payload
+            .insert("activityId".to_string(), json!(activity_id));
+    }
+    if let Some(activity) = activity {
+        command
+            .payload
+            .insert("activity".to_string(), json!(activity));
+    }
+    command
+}
+
+#[tokio::test]
+async fn activity_commands_track_a_continuous_interruptible_activity() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-window-watch"),
+        Some("window-watching"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("continuesWhileAway".to_string(), json!(false));
+    start
+        .payload
+        .insert("phase".to_string(), json!("approaching"));
+    start
+        .payload
+        .insert("focus".to_string(), json!("focused-window"));
+    home.emit_internal_command_without_extensions(start)?;
+
+    let started = home.snapshot()?.actors["yuukei"]
+        .activity
+        .clone()
+        .expect("activity");
+    assert_eq!(started.kind, "window-watching");
+    assert_eq!(started.activity_id, "activity-window-watch");
+    assert_eq!(started.phase, "approaching");
+    assert_eq!(started.focus.as_deref(), Some("focused-window"));
+    assert_eq!(started.started_at, "2026-07-30T12:00:00Z");
+    assert!(started.interruptible);
+    assert!(!started.continues_while_away);
+    assert!(started.interrupted_at.is_none());
+
+    let mut phase = activity_command(
+        "actor.activity.phase.set",
+        Some("activity-window-watch"),
+        None,
+    );
+    phase
+        .payload
+        .insert("phase".to_string(), json!("observing"));
+    phase
+        .payload
+        .insert("focus".to_string(), json!("window-title-category"));
+    home.emit_internal_command_without_extensions(phase)?;
+    let phased = home.snapshot()?.actors["yuukei"]
+        .activity
+        .clone()
+        .expect("phased activity");
+    assert_eq!(phased.phase, "observing");
+    assert_eq!(phased.focus.as_deref(), Some("window-title-category"));
+
+    let mut interrupt = activity_command(
+        "actor.activity.interrupt",
+        Some("activity-window-watch"),
+        None,
+    );
+    interrupt.timestamp = "2026-07-30T12:03:00Z".to_string();
+    interrupt
+        .payload
+        .insert("reason".to_string(), json!("user-interaction"));
+    home.emit_internal_command_without_extensions(interrupt)?;
+    let interrupted = home.snapshot()?.actors["yuukei"]
+        .activity
+        .clone()
+        .expect("interrupted activity");
+    assert_eq!(
+        interrupted.interrupted_at.as_deref(),
+        Some("2026-07-30T12:03:00Z")
+    );
+    assert_eq!(
+        interrupted.interruption_reason.as_deref(),
+        Some("user-interaction")
+    );
+
+    home.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.resume",
+        Some("activity-window-watch"),
+        None,
+    ))?;
+    let resumed = home.snapshot()?.actors["yuukei"]
+        .activity
+        .clone()
+        .expect("resumed activity");
+    assert_eq!(resumed.started_at, "2026-07-30T12:00:00Z");
+    assert!(resumed.interrupted_at.is_none());
+
+    home.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.end",
+        Some("stale-activity"),
+        None,
+    ))?;
+    assert!(home.snapshot()?.actors["yuukei"].activity.is_some());
+    home.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.end",
+        Some("activity-window-watch"),
+        None,
+    ))?;
+    assert!(home.snapshot()?.actors["yuukei"].activity.is_none());
+
+    let mut focused = activity_command(
+        "actor.activity.start",
+        Some("activity-focused-work"),
+        Some("focused-work"),
+    );
+    focused
+        .payload
+        .insert("interruptible".to_string(), json!(false));
+    home.emit_internal_command_without_extensions(focused)?;
+    home.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.interrupt",
+        Some("activity-focused-work"),
+        None,
+    ))?;
+    home.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.start",
+        Some("replacement"),
+        Some("replacement"),
+    ))?;
+    let uninterrupted = home.snapshot()?.actors["yuukei"]
+        .activity
+        .clone()
+        .expect("non-interruptible activity");
+    assert_eq!(uninterrupted.activity_id, "activity-focused-work");
+    assert!(!uninterrupted.interruptible);
+    assert!(uninterrupted.interrupted_at.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn actor_exit_pauses_visible_activity_and_enter_resumes_original_run() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-window-watch"),
+        Some("window-watching"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("continuesWhileAway".to_string(), json!(false));
+    home.emit_internal_command_without_extensions(start)?;
+
+    let mut exit = activity_command("actor.exit", None, None);
+    exit.timestamp = "2026-07-30T12:10:00Z".to_string();
+    exit.payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(exit)?;
+    let away = home.snapshot()?;
+    assert_eq!(away.actors["yuukei"].presence, ActorPresence::Away);
+    let interrupted = away.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("activity remains while away");
+    assert_eq!(
+        interrupted.interruption_reason.as_deref(),
+        Some("actor-away")
+    );
+    assert_eq!(
+        interrupted.interrupted_at.as_deref(),
+        Some("2026-07-30T12:10:00Z")
+    );
+
+    home.emit_internal_command_without_extensions(activity_command("actor.enter", None, None))?;
+    let returned = home.snapshot()?;
+    let resumed = returned.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("activity resumes");
+    assert_eq!(returned.actors["yuukei"].presence, ActorPresence::Present);
+    assert_eq!(resumed.started_at, "2026-07-30T12:00:00Z");
+    assert!(resumed.interrupted_at.is_none());
+    assert!(resumed.interruption_reason.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn actor_exit_suspends_non_interruptible_activity_that_cannot_continue_away() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-focused-work"),
+        Some("focused-work"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("interruptible".to_string(), json!(false));
+    start
+        .payload
+        .insert("continuesWhileAway".to_string(), json!(false));
+    home.emit_internal_command_without_extensions(start)?;
+
+    let mut exit = activity_command("actor.exit", None, None);
+    exit.timestamp = "2026-07-30T12:10:00Z".to_string();
+    exit.payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(exit)?;
+
+    let away = home.snapshot()?;
+    let activity = away.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("activity remains available for return");
+    assert_eq!(away.actors["yuukei"].presence, ActorPresence::Away);
+    assert!(!activity.interruptible);
+    assert_eq!(
+        activity.interrupted_at.as_deref(),
+        Some("2026-07-30T12:10:00Z")
+    );
+    assert_eq!(activity.interruption_reason.as_deref(), Some("actor-away"));
+
+    home.emit_internal_command_without_extensions(activity_command("actor.enter", None, None))?;
+    let returned = home.snapshot()?;
+    let resumed = returned.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("activity resumes on return");
+    assert_eq!(returned.actors["yuukei"].presence, ActorPresence::Present);
+    assert_eq!(resumed.started_at, "2026-07-30T12:00:00Z");
+    assert!(resumed.interrupted_at.is_none());
+    assert!(resumed.interruption_reason.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn forced_away_interruption_of_non_interruptible_activity_restores() -> Result<()> {
+    let event_log = EventLog::in_memory()?;
+    let home = ResidentHome::new("resident-default", world_pack(), event_log.clone()).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-focused-work"),
+        Some("focused-work"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("interruptible".to_string(), json!(false));
+    start
+        .payload
+        .insert("continuesWhileAway".to_string(), json!(false));
+    home.emit_internal_command_without_extensions(start)?;
+    let mut exit = activity_command("actor.exit", None, None);
+    exit.timestamp = "2026-07-30T12:10:00Z".to_string();
+    exit.payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(exit)?;
+    drop(home);
+
+    let reopened = ResidentHome::new("resident-default", world_pack(), event_log).await?;
+    let restored = reopened.snapshot()?;
+    let activity = restored.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("restored interrupted activity");
+    assert_eq!(restored.actors["yuukei"].presence, ActorPresence::Away);
+    assert!(!activity.interruptible);
+    assert!(!activity.continues_while_away);
+    assert_eq!(activity.started_at, "2026-07-30T12:00:00Z");
+    assert_eq!(
+        activity.interrupted_at.as_deref(),
+        Some("2026-07-30T12:10:00Z")
+    );
+    assert_eq!(activity.interruption_reason.as_deref(), Some("actor-away"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ongoing_away_activity_restores_from_the_canonical_event_log() -> Result<()> {
+    let event_log = EventLog::in_memory()?;
+    let home = ResidentHome::new("resident-default", world_pack(), event_log.clone()).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-downloads"),
+        Some("exploring-downloads"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("continuesWhileAway".to_string(), json!(true));
+    start.payload.insert("phase".to_string(), json!("sorting"));
+    start
+        .payload
+        .insert("focus".to_string(), json!("latest-image"));
+    home.emit_internal_command_without_extensions(start)?;
+    let mut exit = activity_command("actor.exit", None, None);
+    exit.timestamp = "2026-07-30T12:01:00Z".to_string();
+    exit.payload
+        .insert("location".to_string(), json!("downloads"));
+    home.emit_internal_command_without_extensions(exit)?;
+    let mut phase = activity_command("actor.activity.phase.set", Some("activity-downloads"), None);
+    phase
+        .payload
+        .insert("phase".to_string(), json!("examining"));
+    phase
+        .payload
+        .insert("focus".to_string(), json!("latest-image-preview"));
+    home.emit_internal_command_without_extensions(phase)?;
+    drop(home);
+
+    let reopened = ResidentHome::new("resident-default", world_pack(), event_log.clone()).await?;
+    let restored = reopened.snapshot()?;
+    assert_eq!(restored.actors["yuukei"].presence, ActorPresence::Away);
+    assert_eq!(restored.actors["yuukei"].location, "downloads");
+    let activity = restored.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("restored activity");
+    assert_eq!(activity.kind, "exploring-downloads");
+    assert_eq!(activity.activity_id, "activity-downloads");
+    assert_eq!(activity.phase, "examining");
+    assert_eq!(activity.focus.as_deref(), Some("latest-image-preview"));
+    assert_eq!(activity.started_at, "2026-07-30T12:00:00Z");
+    assert!(activity.continues_while_away);
+    assert!(activity.interrupted_at.is_none());
+
+    reopened.emit_internal_command_without_extensions(activity_command(
+        "actor.activity.end",
+        Some("activity-downloads"),
+        None,
+    ))?;
+    drop(reopened);
+    let ended = ResidentHome::new("resident-default", world_pack(), event_log).await?;
+    assert!(ended.snapshot()?.actors["yuukei"].activity.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn daihon_dispatch_context_includes_current_activity() -> Result<()> {
+    let home = ResidentHome::new("resident-default", world_pack(), EventLog::in_memory()?).await?;
+    let mut start = activity_command(
+        "actor.activity.start",
+        Some("activity-window-watch"),
+        Some("window-watching"),
+    );
+    start.timestamp = "2026-07-30T12:00:00Z".to_string();
+    start
+        .payload
+        .insert("interruptible".to_string(), json!(true));
+    start
+        .payload
+        .insert("phase".to_string(), json!("observing"));
+    start
+        .payload
+        .insert("focus".to_string(), json!("focused-window"));
+    home.emit_internal_command_without_extensions(start)?;
+
+    let event = RuntimeEvent::new("desktop.window.focused", "device", "resident-default");
+    let enriched = home.enrich_event_for_daihon_dispatch(event)?;
+
+    assert_eq!(enriched.payload["actorActivity"], "window-watching");
+    assert_eq!(enriched.payload["actorActivityId"], "activity-window-watch");
+    assert_eq!(enriched.payload["actorActivityPhase"], "observing");
+    assert_eq!(enriched.payload["actorActivityFocus"], "focused-window");
+    assert_eq!(
+        enriched.payload["actorActivityStartedAt"],
+        "2026-07-30T12:00:00Z"
+    );
+    assert_eq!(enriched.payload["actorActivityInterruptible"], true);
+    assert_eq!(enriched.payload["actorActivityInterrupted"], false);
+    assert_eq!(enriched.payload["actorActivityContinuesWhileAway"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn daihon_activity_functions_update_the_resident_snapshot_end_to_end() -> Result<()> {
+    let mut world = world_pack();
+    world.signals.allow = vec!["app.startup".to_string()];
+    world.daihon.loaded_scripts[0].source = r#"
+## app.startup
+### watch a window
+話者: yuukei
+＜活動開始 種類=「window-watching」 段階=「approaching」 関心=「focused-window」 画面外継続=いいえ 中断可能=はい＞
+＜活動段階 「observing」 関心=「window-category」＞
+"#
+    .to_string();
+    let home = ResidentHome::new("resident-default", world, EventLog::in_memory()?).await?;
+
+    let commands = home
+        .ingest_event(RuntimeEvent::new(
+            "app.startup",
+            "device",
+            "resident-default",
+        ))
+        .await?;
+
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].kind, "actor.activity.start");
+    assert_eq!(commands[1].kind, "actor.activity.phase.set");
+    let snapshot = home.snapshot()?;
+    let activity = snapshot.actors["yuukei"]
+        .activity
+        .as_ref()
+        .expect("Daihon started activity");
+    assert_eq!(activity.activity_id, commands[0].id);
+    assert_eq!(activity.kind, "window-watching");
+    assert_eq!(activity.phase, "observing");
+    assert_eq!(activity.focus.as_deref(), Some("window-category"));
+    assert!(!activity.continues_while_away);
+    assert!(activity.interruptible);
     Ok(())
 }
 
@@ -1663,6 +2229,8 @@ async fn speaker_alias_dialogue_updates_canonical_actor_snapshot() -> Result<()>
     world.actors.push(ActorDefinition {
         id: "partner".to_string(),
         display_name: "Partner".to_string(),
+        initial_presence: ActorPresence::Present,
+        initial_location: "desktop".to_string(),
         speaker_aliases: vec!["パ".to_string()],
         profile: JsonMap::new(),
         renderer: None,

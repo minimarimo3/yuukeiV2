@@ -4,12 +4,13 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::RwLock,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewWindow};
 use yuukei_device_host::{
     DesktopWindowFrame, DesktopWindowObservation, StageFootAnchor, DEFAULT_ACTOR_SCALE_PERCENT,
 };
-use yuukei_protocol::{ActorPresence, ResidentSnapshot, RuntimeCommand};
+use yuukei_protocol::{ActorPresence, ActorSnapshot, ResidentSnapshot, RuntimeCommand};
 
 mod drag;
 mod geometry;
@@ -48,9 +49,19 @@ const ACTOR_COLLISION_PADDING: f64 = 16.0;
 const MIN_BUBBLE_DURATION_MS: u64 = 2_500;
 const MAX_READING_BUBBLE_DURATION_MS: u64 = 9_000;
 const MAX_BUBBLE_DURATION_MS: u64 = 30_000;
+const MIN_OWNED_OVERLAY_DURATION_MS: u64 = 4_000;
+const MAX_OWNED_OVERLAY_DURATION_MS: u64 = 15_000;
+const DEFAULT_OWNED_OVERLAY_DURATION_MS: u64 = 8_000;
+const MAX_OWNED_OVERLAY_TITLE_CHARS: usize = 48;
+const MAX_OWNED_OVERLAY_MESSAGE_CHARS: usize = 240;
 const SPEECH_FALLBACK_GRACE_MS: u64 = 5_000;
 const AUDIO_LINGER_MS: u64 = 1_500;
 const STAGE_STATE_EVENT: &str = "yuukei-stage-state";
+// Window terrain is sampled once per second. These thresholds deliberately ignore
+// ordinary frame jitter, while the per-perch cooldown prevents drag/resize floods.
+const PERCH_DISTURBANCE_COOLDOWN: Duration = Duration::from_secs(4);
+const PERCH_MOVE_DISTURBANCE_THRESHOLD: f64 = 72.0;
+const PERCH_RESIZE_DISTURBANCE_THRESHOLD: f64 = 96.0;
 
 #[derive(Debug, Default)]
 pub struct DesktopStageManager {
@@ -62,6 +73,8 @@ struct DesktopStageState {
     monitors: Vec<StageMonitor>,
     actors: BTreeMap<String, StageActor>,
     bubbles: BTreeMap<String, StageBubble>,
+    owned_overlays: BTreeMap<String, StageOwnedOverlay>,
+    owned_overlay_dismissals: BTreeSet<String>,
     bubble_queues: BTreeMap<String, VecDeque<QueuedStageBubble>>,
     bubble_scene_keys: BTreeMap<String, Option<String>>,
     perches: BTreeMap<String, StagePerch>,
@@ -80,6 +93,8 @@ impl Default for DesktopStageState {
             monitors: Vec::new(),
             actors: BTreeMap::new(),
             bubbles: BTreeMap::new(),
+            owned_overlays: BTreeMap::new(),
+            owned_overlay_dismissals: BTreeSet::new(),
             bubble_queues: BTreeMap::new(),
             bubble_scene_keys: BTreeMap::new(),
             perches: BTreeMap::new(),
@@ -179,6 +194,26 @@ pub struct DesktopStageSnapshot {
     pub monitors: Vec<StageMonitor>,
     pub actors: Vec<StageActor>,
     pub bubbles: Vec<StageBubble>,
+    pub owned_overlays: Vec<StageOwnedOverlay>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageOwnedOverlay {
+    pub overlay_id: String,
+    pub actor_id: String,
+    pub style: String,
+    pub title: String,
+    pub message: String,
+    pub created_at_ms: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum OwnedOverlayDismissReservation {
+    Reserved(StageOwnedOverlay),
+    Busy,
+    Missing,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +221,37 @@ pub struct StagePerchEnded {
     pub actor_id: String,
     pub window_key: String,
     pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StagePerchDisturbed {
+    pub actor_id: String,
+    pub window_key: String,
+    pub reason: &'static str,
+    pub movement_distance_px: u64,
+    pub width_change_px: u64,
+    pub height_change_px: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PerchDisturbanceSummary {
+    reason: &'static str,
+    movement_distance_px: u64,
+    width_change_px: u64,
+    height_change_px: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StageWindowTerrainEvents {
+    pub perch_ended: Vec<StagePerchEnded>,
+    pub perch_disturbed: Vec<StagePerchDisturbed>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StagePerchApplyOutcome {
+    Applied,
+    RejectedObservationDisabled,
+    IgnoredMissingActor,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -205,6 +271,8 @@ pub struct ActorWindowDragStarted {
 #[derive(Clone, Debug, PartialEq)]
 struct StagePerch {
     window_key: String,
+    disturbance_baseline: Option<DesktopWindowFrame>,
+    last_disturbed_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,6 +359,8 @@ impl DesktopStageManager {
             &monitors,
             actor_size,
         );
+        let window_visibility =
+            actor_window_visibility(&reconcile.desired_specs, &resident_snapshot.actors);
         let away_actors = resident_snapshot
             .actors
             .iter()
@@ -303,7 +373,10 @@ impl DesktopStageManager {
                 .get(&spec.actor_id)
                 .cloned()
                 .unwrap_or_else(|| place_actor_window(spec.index, &monitors, &[], actor_size));
-            let should_be_visible = !away_actors.contains(&spec.actor_id);
+            let should_be_visible = window_visibility
+                .get(&spec.actor_id)
+                .copied()
+                .unwrap_or(true);
             if let Some(window) = app.get_webview_window(&spec.label) {
                 apply_actor_window_bounds(&window, &bounds)?;
                 if should_be_visible {
@@ -567,43 +640,62 @@ impl DesktopStageManager {
         self.emit_state(app)
     }
 
-    pub fn set_window_observation_enabled(&self, enabled: bool) -> Result<(), String> {
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-        state.window_observation_enabled = enabled;
-        if !enabled {
-            state.perches.clear();
-            state.terrain_windows.clear();
-        }
-        Ok(())
-    }
-
-    pub fn apply_window_terrain(
+    pub fn set_window_observation_enabled(
         &self,
         app: &AppHandle,
-        observations: &[DesktopWindowObservation],
+        enabled: bool,
     ) -> Result<Vec<StagePerchEnded>, String> {
         let (apply_bounds, ended) = {
             let mut state = self
                 .state
                 .write()
                 .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-            if !state.window_observation_enabled {
-                return Ok(Vec::new());
+            set_window_observation_enabled_in_state(&mut state, enabled)
+        };
+        for (label, bounds) in apply_bounds {
+            if let Some(window) = app.get_webview_window(&label) {
+                if let Err(error) = apply_actor_window_bounds(&window, &bounds) {
+                    eprintln!(
+                        "Yuukei actor restore after observation revoke failed for {label}: {error}"
+                    );
+                }
             }
-            apply_window_terrain_to_state(&mut state, observations)
+        }
+        if !ended.is_empty() {
+            if let Err(error) = self.emit_state(app) {
+                eprintln!("Yuukei stage state emit after observation revoke failed: {error}");
+            }
+        }
+        Ok(ended)
+    }
+
+    pub fn apply_window_terrain(
+        &self,
+        app: &AppHandle,
+        observations: &[DesktopWindowObservation],
+    ) -> Result<StageWindowTerrainEvents, String> {
+        let (apply_bounds, events) = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            if !state.window_observation_enabled {
+                return Ok(StageWindowTerrainEvents::default());
+            }
+            apply_window_terrain_to_state(&mut state, observations, Instant::now())
         };
         for (label, bounds) in apply_bounds {
             if let Some(window) = app.get_webview_window(&label) {
                 apply_actor_window_bounds(&window, &bounds)?;
             }
         }
-        if !ended.is_empty() || !observations.is_empty() {
+        if !events.perch_ended.is_empty()
+            || !events.perch_disturbed.is_empty()
+            || !observations.is_empty()
+        {
             self.emit_state(app)?;
         }
-        Ok(ended)
+        Ok(events)
     }
 
     pub fn set_actor_window_visible(
@@ -685,11 +777,77 @@ impl DesktopStageManager {
         self.emit_state(app)
     }
 
+    pub fn reserve_owned_overlay_dismissal(
+        &self,
+        overlay_id: &str,
+    ) -> Result<OwnedOverlayDismissReservation, String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        Ok(reserve_owned_overlay_dismissal_in_state(
+            &mut state, overlay_id,
+        ))
+    }
+
+    pub fn cancel_owned_overlay_dismissal(&self, overlay_id: &str) -> Result<(), String> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+        cancel_owned_overlay_dismissal_in_state(&mut state, overlay_id);
+        Ok(())
+    }
+
+    pub fn finish_owned_overlay_dismissal(
+        &self,
+        app: &AppHandle,
+        overlay_id: &str,
+    ) -> Result<bool, String> {
+        let dismissed = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            finish_owned_overlay_dismissal_in_state(&mut state, overlay_id)
+        };
+        if dismissed.is_some() {
+            self.emit_state(app)?;
+        }
+        Ok(dismissed.is_some())
+    }
+
+    pub fn reconcile_owned_overlay_snapshot(&self, app: &AppHandle) -> Result<(), String> {
+        self.emit_state(app)
+    }
+
+    pub fn handle_owned_overlay_command(
+        &self,
+        app: &AppHandle,
+        command: &RuntimeCommand,
+    ) -> Result<Option<StageOwnedOverlay>, String> {
+        let accepted = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            apply_owned_overlay_to_state(&mut state, command, now_ms())
+        };
+        if accepted.is_some() {
+            self.emit_state(app)?;
+        }
+        Ok(accepted)
+    }
+
     pub fn handle_runtime_command(
         &self,
         app: &AppHandle,
         command: &RuntimeCommand,
     ) -> Result<(), String> {
+        if command.kind == "stage.owned-overlay.show" {
+            self.handle_owned_overlay_command(app, command)?;
+            return Ok(());
+        }
         if command.kind == "audio.play" {
             let handled = {
                 let mut state = self
@@ -742,29 +900,10 @@ impl DesktopStageManager {
             return self.emit_state(app);
         }
         if command.kind == "stage.perch" {
-            let Some(window_key) = command.payload.get("windowKey").and_then(Value::as_str) else {
-                return Ok(());
-            };
-            {
-                let mut state = self
-                    .state
-                    .write()
-                    .map_err(|_| "desktop stage lock is poisoned".to_string())?;
-                if !state.window_observation_enabled {
-                    eprintln!("Yuukei stage.perch ignored: window observation is disabled");
-                    return Ok(());
-                }
-                if !state.actors.contains_key(&actor_id) {
-                    return Ok(());
-                }
-                state.perches.insert(
-                    actor_id,
-                    StagePerch {
-                        window_key: window_key.to_string(),
-                    },
-                );
+            if let Some(ended) = self.handle_stage_perch_command(app, command)? {
+                return Err(format!("stage.perch rejected: {}", ended.reason));
             }
-            return self.emit_state(app);
+            return Ok(());
         }
         if command.kind == "stage.perch.release" {
             let apply_bounds = {
@@ -951,6 +1090,38 @@ impl DesktopStageManager {
         Ok(())
     }
 
+    pub fn handle_stage_perch_command(
+        &self,
+        app: &AppHandle,
+        command: &RuntimeCommand,
+    ) -> Result<Option<StagePerchEnded>, String> {
+        let Some(actor_id) = command_actor_id(command) else {
+            return Ok(None);
+        };
+        let Some(window_key) = command.payload.get("windowKey").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let outcome = {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "desktop stage lock is poisoned".to_string())?;
+            apply_stage_perch_to_state(&mut state, &actor_id, window_key)
+        };
+        match outcome {
+            StagePerchApplyOutcome::Applied => {
+                self.emit_state(app)?;
+                Ok(None)
+            }
+            StagePerchApplyOutcome::RejectedObservationDisabled => Ok(Some(StagePerchEnded {
+                actor_id,
+                window_key: window_key.to_string(),
+                reason: "observation-disabled",
+            })),
+            StagePerchApplyOutcome::IgnoredMissingActor => Ok(None),
+        }
+    }
+
     fn sync_bubble_surface_windows(
         &self,
         app: &AppHandle,
@@ -993,6 +1164,21 @@ impl DesktopStageManager {
         }
         Ok(())
     }
+}
+
+fn actor_window_visibility(
+    specs: &[ActorWindowSpec],
+    actor_snapshots: &BTreeMap<String, ActorSnapshot>,
+) -> BTreeMap<String, bool> {
+    specs
+        .iter()
+        .map(|spec| {
+            let visible = actor_snapshots
+                .get(&spec.actor_id)
+                .is_none_or(|actor| actor.presence == ActorPresence::Present);
+            (spec.actor_id.clone(), visible)
+        })
+        .collect()
 }
 
 fn apply_dialogue_say_to_state(
@@ -1069,6 +1255,118 @@ fn apply_dialogue_say_to_state(
     state.bubble_queues.remove(&actor_id);
     show_queued_bubble(state, actor_id, queued, created_at_ms);
     true
+}
+
+fn apply_owned_overlay_to_state(
+    state: &mut DesktopStageState,
+    command: &RuntimeCommand,
+    created_at_ms: u64,
+) -> Option<StageOwnedOverlay> {
+    let actor_id = command_actor_id(command)?;
+    if !state.actors.contains_key(&actor_id) || state.away_actors.contains(&actor_id) {
+        return None;
+    }
+    let style = command
+        .payload
+        .get("style")
+        .and_then(Value::as_str)
+        .unwrap_or("error");
+    if style != "error" {
+        return None;
+    }
+    let title = command
+        .payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(|value| bounded_plain_text(value, MAX_OWNED_OVERLAY_TITLE_CHARS))
+        .filter(|value| !value.is_empty())?;
+    let message = command
+        .payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(|value| bounded_plain_text(value, MAX_OWNED_OVERLAY_MESSAGE_CHARS))
+        .filter(|value| !value.is_empty())?;
+    let duration_ms = command
+        .payload
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_OWNED_OVERLAY_DURATION_MS)
+        .clamp(MIN_OWNED_OVERLAY_DURATION_MS, MAX_OWNED_OVERLAY_DURATION_MS);
+    let replaced_ids = state
+        .owned_overlays
+        .iter()
+        .filter(|(_, overlay)| overlay.actor_id == actor_id)
+        .map(|(overlay_id, _)| overlay_id.clone())
+        .collect::<Vec<_>>();
+    for overlay_id in replaced_ids {
+        state.owned_overlays.remove(&overlay_id);
+        state.owned_overlay_dismissals.remove(&overlay_id);
+    }
+    let overlay = StageOwnedOverlay {
+        overlay_id: command.id.clone(),
+        actor_id,
+        style: style.to_string(),
+        title,
+        message,
+        created_at_ms,
+        duration_ms,
+    };
+    state
+        .owned_overlays
+        .insert(command.id.clone(), overlay.clone());
+    Some(overlay)
+}
+
+fn reserve_owned_overlay_dismissal_in_state(
+    state: &mut DesktopStageState,
+    overlay_id: &str,
+) -> OwnedOverlayDismissReservation {
+    let Some(overlay) = state.owned_overlays.get(overlay_id).cloned() else {
+        return OwnedOverlayDismissReservation::Missing;
+    };
+    if state.owned_overlay_dismissals.contains(overlay_id) {
+        return OwnedOverlayDismissReservation::Busy;
+    }
+    state
+        .owned_overlay_dismissals
+        .insert(overlay_id.to_string());
+    OwnedOverlayDismissReservation::Reserved(overlay)
+}
+
+fn cancel_owned_overlay_dismissal_in_state(state: &mut DesktopStageState, overlay_id: &str) {
+    state.owned_overlay_dismissals.remove(overlay_id);
+}
+
+fn finish_owned_overlay_dismissal_in_state(
+    state: &mut DesktopStageState,
+    overlay_id: &str,
+) -> Option<StageOwnedOverlay> {
+    if !state.owned_overlay_dismissals.remove(overlay_id) {
+        return None;
+    }
+    state.owned_overlays.remove(overlay_id)
+}
+
+pub(crate) fn owned_overlay_expiration_delay(overlay: &StageOwnedOverlay) -> Duration {
+    owned_overlay_expiration_delay_at(overlay, now_ms())
+}
+
+fn owned_overlay_expiration_delay_at(
+    overlay: &StageOwnedOverlay,
+    current_time_ms: u64,
+) -> Duration {
+    let deadline_ms = overlay.created_at_ms.saturating_add(overlay.duration_ms);
+    Duration::from_millis(deadline_ms.saturating_sub(current_time_ms))
+}
+
+fn bounded_plain_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn apply_dialogue_choices_to_state(
@@ -1220,6 +1518,17 @@ fn retain_stage_state_for_actors(state: &mut DesktopStageState, actor_ids: &BTre
         .bubble_scene_keys
         .retain(|actor_id, _| actor_ids.contains(actor_id));
     state
+        .owned_overlays
+        .retain(|_, overlay| actor_ids.contains(&overlay.actor_id));
+    let live_overlay_ids = state
+        .owned_overlays
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    state
+        .owned_overlay_dismissals
+        .retain(|overlay_id| live_overlay_ids.contains(overlay_id));
+    state
         .perches
         .retain(|actor_id, _| actor_ids.contains(actor_id));
     state
@@ -1242,6 +1551,16 @@ fn clear_actor_presentation(state: &mut DesktopStageState, actor_id: &str) {
         .retain(|_, bubble| bubble.actor_id != actor_id);
     state.bubble_queues.remove(actor_id);
     state.bubble_scene_keys.remove(actor_id);
+    let removed_overlay_ids = state
+        .owned_overlays
+        .iter()
+        .filter(|(_, overlay)| overlay.actor_id == actor_id)
+        .map(|(overlay_id, _)| overlay_id.clone())
+        .collect::<Vec<_>>();
+    for overlay_id in removed_overlay_ids {
+        state.owned_overlays.remove(&overlay_id);
+        state.owned_overlay_dismissals.remove(&overlay_id);
+    }
     state.perches.remove(actor_id);
     state.active_drags.remove(actor_id);
     state.active_walks.remove(actor_id);
@@ -1296,6 +1615,7 @@ impl DesktopStageState {
             monitors: self.monitors.clone(),
             actors: self.actors.values().cloned().collect(),
             bubbles: self.bubbles.values().cloned().collect(),
+            owned_overlays: self.owned_overlays.values().cloned().collect(),
         }
     }
 }

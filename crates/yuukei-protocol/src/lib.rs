@@ -32,6 +32,11 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         display_label: "アプリ起動",
     },
     StandardSignalDefinition {
+        canonical_id: "app.settings.opened",
+        daihon_alias: "設定_開いた",
+        display_label: "設定を開いた",
+    },
+    StandardSignalDefinition {
         canonical_id: "presence.life_tick",
         daihon_alias: "生活_定期",
         display_label: "生活定期",
@@ -90,6 +95,11 @@ const STANDARD_SIGNAL_DEFINITIONS: &[StandardSignalDefinition] = &[
         canonical_id: "stage.walk.ended",
         daihon_alias: "住人_歩き終わり",
         display_label: "住人歩き終わり",
+    },
+    StandardSignalDefinition {
+        canonical_id: "stage.owned-overlay.dismissed",
+        daihon_alias: "ごまかし画面_閉じた",
+        display_label: "ごまかし画面を閉じた",
     },
     StandardSignalDefinition {
         canonical_id: "desktop.window.appeared",
@@ -1054,6 +1064,30 @@ pub enum ActorPresence {
     Away,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
+pub struct ActorActivity {
+    /// Stable activity name supplied by the World Pack (for example `window-watching`).
+    pub kind: String,
+    /// Identifies this particular run so a delayed end command cannot stop a newer activity.
+    pub activity_id: String,
+    /// Current authored step such as `approaching`, `observing`, or `returning`.
+    pub phase: String,
+    /// A privacy-safe semantic label, never raw observed window text or a filesystem path.
+    #[ts(optional)]
+    pub focus: Option<String>,
+    /// The original start time is retained across interruptions and Resident Home restarts.
+    pub started_at: String,
+    pub interruptible: bool,
+    /// Activities such as exploring Downloads can keep progressing while the actor is away.
+    pub continues_while_away: bool,
+    #[ts(optional)]
+    pub interrupted_at: Option<String>,
+    #[ts(optional)]
+    pub interruption_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../packages/yuukei-protocol/src/generated/")]
@@ -1068,6 +1102,9 @@ pub struct ActorSnapshot {
     pub speaking: Option<bool>,
     #[ts(optional)]
     pub bubble: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub activity: Option<ActorActivity>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -1201,10 +1238,25 @@ mod tests {
             presence: ActorPresence::Present,
             speaking: None,
             bubble: None,
+            activity: Some(ActorActivity {
+                kind: "window-watching".to_string(),
+                activity_id: "activity-1".to_string(),
+                phase: "observing".to_string(),
+                focus: Some("focused-window".to_string()),
+                started_at: "2026-07-30T12:00:00Z".to_string(),
+                interruptible: true,
+                continues_while_away: false,
+                interrupted_at: None,
+                interruption_reason: None,
+            }),
         };
 
         let value = serde_json::to_value(actor)?;
         assert_eq!(value["heading"], "right");
+        assert_eq!(value["activity"]["kind"], "window-watching");
+        assert_eq!(value["activity"]["activityId"], "activity-1");
+        assert_eq!(value["activity"]["phase"], "observing");
+        assert_eq!(value["activity"]["focus"], "focused-window");
         Ok(())
     }
 
@@ -1212,6 +1264,7 @@ mod tests {
     fn standard_signals_resolve_daihon_aliases_to_canonical_ids() {
         assert_eq!(canonical_signal_id("会話_入力"), "conversation.text");
         assert_eq!(canonical_signal_id("生活_定期"), "presence.life_tick");
+        assert_eq!(canonical_signal_id("設定_開いた"), "app.settings.opened");
         assert_eq!(canonical_signal_id("雑談_定期"), "presence.talk_impulse");
         assert_eq!(canonical_signal_id("不在_開始"), "presence.idle.start");
         assert_eq!(canonical_signal_id("復帰"), "presence.idle.end");
@@ -1221,6 +1274,10 @@ mod tests {
         assert_eq!(canonical_signal_id("住人_つまむ"), "avatar.gesture.grab");
         assert_eq!(canonical_signal_id("住人_おろす"), "avatar.gesture.drop");
         assert_eq!(canonical_signal_id("住人_歩き終わり"), "stage.walk.ended");
+        assert_eq!(
+            canonical_signal_id("ごまかし画面_閉じた"),
+            "stage.owned-overlay.dismissed"
+        );
         assert_eq!(canonical_signal_id("窓_出現"), "desktop.window.appeared");
         assert_eq!(canonical_signal_id("窓_消滅"), "desktop.window.closed");
         assert_eq!(canonical_signal_id("窓_注目"), "desktop.window.focused");

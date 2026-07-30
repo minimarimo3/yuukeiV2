@@ -17,6 +17,7 @@ import {
 import { MemorySettingsPanel } from "./MemorySettingsPanel";
 import { ObservationToggle } from "./ObservationToggle";
 import { OnboardingFlow } from "./OnboardingFlow";
+import { OwnedOverlay } from "./OwnedOverlay";
 import {
   type AppSettingsState,
   type CapabilityUsageState,
@@ -32,6 +33,7 @@ import {
   type ResidentMemoryState,
   type RuntimeSettingsState,
   type SceneHistoryState,
+  type StageOwnedOverlay,
   tauriYuukeiClient,
   type WorldPackSelectionState,
   type YuukeiClient,
@@ -113,6 +115,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [changingExtensions, setChangingExtensions] = useState(false);
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
     useState(false);
+  const [ownedOverlay, setOwnedOverlay] = useState<StageOwnedOverlay | null>(
+    null,
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: loadMemories/loadEventLogは毎レンダー再生成されるため依存に含めない(client変更時のみ再接続する意図)
   useEffect(() => {
@@ -144,6 +149,13 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             }
           }),
         );
+        unlisteners.push(
+          await client.onStageState((stage) => {
+            if (!disposed) {
+              setOwnedOverlay(latestOwnedOverlay(stage.ownedOverlays ?? []));
+            }
+          }),
+        );
         await refreshSettings();
         await loadMemories();
         await loadEventLog();
@@ -169,6 +181,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         nextOnboardingState,
         nextExtensionState,
         nextCapabilityUsage,
+        nextStage,
       ] = await Promise.all([
         client.getWorldPackStatus(),
         client.getAppSettings(),
@@ -180,6 +193,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         client.getOnboardingState(),
         client.getExtensionSettings(),
         client.getCapabilityUsage(),
+        client.getDesktopStageState(),
       ]);
       if (!disposed) {
         setWorldPackStatus(nextWorldPackStatus);
@@ -192,6 +206,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         setOnboardingState(nextOnboardingState);
         setExtensionState(nextExtensionState);
         setCapabilityUsage(nextCapabilityUsage);
+        setOwnedOverlay(latestOwnedOverlay(nextStage.ownedOverlays ?? []));
       }
     }
 
@@ -1309,7 +1324,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   return (
     <main className="surface-shell settings-shell" data-status={status}>
-      <section className="settings-workspace" aria-label="Settings">
+      <section
+        aria-hidden={ownedOverlay ? true : undefined}
+        aria-label="Settings"
+        className="settings-workspace"
+        inert={ownedOverlay ? true : undefined}
+      >
         <aside className="settings-sidebar">
           <div className="settings-sidebar-head">
             <h2>設定</h2>
@@ -1360,6 +1380,30 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           </section>
         </div>
       </section>
+      {ownedOverlay ? (
+        <OwnedOverlay
+          key={ownedOverlay.overlayId}
+          overlay={ownedOverlay}
+          onDismiss={async (reason) => {
+            try {
+              await client.dismissOwnedOverlay(ownedOverlay.overlayId, reason);
+            } catch (error) {
+              console.warn("Failed to dismiss Yuukei-owned overlay", error);
+              throw error;
+            }
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function latestOwnedOverlay(
+  overlays: StageOwnedOverlay[],
+): StageOwnedOverlay | null {
+  return (
+    [...overlays].sort(
+      (left, right) => right.createdAtMs - left.createdAtMs,
+    )[0] ?? null
   );
 }

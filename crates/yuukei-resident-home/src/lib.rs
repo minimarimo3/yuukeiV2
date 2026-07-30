@@ -31,8 +31,8 @@ use yuukei_extension::{
     ProcessFailureReport, YuukeiExtension,
 };
 use yuukei_protocol::{
-    new_id, ActorPresence, ActorSnapshot, CapabilityInvocation, Causality, CommandTarget,
-    DialogueExtractInput, DialogueExtractOutput, DialogueGenerateConstraints,
+    new_id, ActorActivity, ActorPresence, ActorSnapshot, CapabilityInvocation, Causality,
+    CommandTarget, DialogueExtractInput, DialogueExtractOutput, DialogueGenerateConstraints,
     DialogueGenerateEvent, DialogueGenerateInput, DialogueGenerateOutput, DialogueGeneratePersona,
     DialogueGenerateRecentContext, DialogueInterpretInput, DialogueInterpretOutput,
     DialogueInterpretTextInput, EventLogRecord, ExtensionHookPoint, JsonMap, MemoryEntryKind,
@@ -291,15 +291,16 @@ impl ResidentHome {
                         expression: "neutral".to_string(),
                         motion: "idle".to_string(),
                         heading: String::new(),
-                        location: "desktop".to_string(),
-                        presence: ActorPresence::Present,
+                        location: actor.initial_location.clone(),
+                        presence: actor.initial_presence.clone(),
                         speaking: Some(false),
                         bubble: None,
+                        activity: None,
                     },
                 )
             })
             .collect();
-        restore_actor_presence_state(&event_log, &resident_id, &mut actors)?;
+        restore_actor_state(&event_log, &resident_id, &mut actors)?;
         let recent_event_cursor = event_log
             .read(EventLogQuery {
                 resident_id: Some(resident_id.clone()),
@@ -476,13 +477,22 @@ impl ResidentHome {
     }
 }
 
-fn restore_actor_presence_state(
+fn restore_actor_state(
     event_log: &EventLog,
     resident_id: &str,
     actors: &mut BTreeMap<String, ActorSnapshot>,
 ) -> Result<()> {
     let mut records = Vec::new();
-    for kind in ["actor.location.set", "actor.exit", "actor.enter"] {
+    for kind in [
+        "actor.location.set",
+        "actor.exit",
+        "actor.enter",
+        "actor.activity.start",
+        "actor.activity.phase.set",
+        "actor.activity.interrupt",
+        "actor.activity.resume",
+        "actor.activity.end",
+    ] {
         records.extend(
             event_log
                 .read(EventLogQuery {
@@ -503,6 +513,13 @@ fn restore_actor_presence_state(
             continue;
         };
         apply_actor_presence_command(actor, &record.kind, &record.payload);
+        apply_actor_activity_command(
+            actor,
+            &record.kind,
+            &record.id,
+            &record.timestamp,
+            &record.payload,
+        );
     }
     Ok(())
 }
@@ -529,6 +546,155 @@ pub(crate) fn apply_actor_presence_command(
             actor.bubble = None;
         }
         "actor.enter" => actor.presence = ActorPresence::Present,
+        _ => {}
+    }
+}
+
+pub(crate) fn apply_actor_activity_command(
+    actor: &mut ActorSnapshot,
+    kind: &str,
+    command_id: &str,
+    timestamp: &str,
+    payload: &JsonMap,
+) {
+    let requested_activity_id = payload
+        .get("activityId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let targets_current_activity = |activity: &ActorActivity| {
+        requested_activity_id.is_none_or(|activity_id| activity.activity_id == activity_id)
+    };
+
+    match kind {
+        "actor.activity.start" => {
+            let Some(activity_kind) = payload
+                .get("activity")
+                .or_else(|| payload.get("kind"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return;
+            };
+            if actor
+                .activity
+                .as_ref()
+                .is_some_and(|activity| !activity.interruptible)
+            {
+                return;
+            }
+            let continues_while_away = payload
+                .get("continuesWhileAway")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let interrupted_for_absence =
+                actor.presence == ActorPresence::Away && !continues_while_away;
+            actor.activity = Some(ActorActivity {
+                kind: activity_kind.to_string(),
+                activity_id: requested_activity_id.unwrap_or(command_id).to_string(),
+                phase: payload
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("active")
+                    .to_string(),
+                focus: payload
+                    .get("focus")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+                started_at: timestamp.to_string(),
+                interruptible: payload
+                    .get("interruptible")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                continues_while_away,
+                interrupted_at: interrupted_for_absence.then(|| timestamp.to_string()),
+                interruption_reason: interrupted_for_absence.then(|| "actor-away".to_string()),
+            });
+        }
+        "actor.activity.phase.set" => {
+            let Some(activity) = actor.activity.as_mut() else {
+                return;
+            };
+            if !targets_current_activity(activity) {
+                return;
+            }
+            if let Some(phase) = payload
+                .get("phase")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                activity.phase = phase.to_string();
+            }
+            if let Some(focus) = payload.get("focus") {
+                activity.focus = focus
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
+            }
+        }
+        "actor.activity.interrupt" => {
+            let Some(activity) = actor.activity.as_mut() else {
+                return;
+            };
+            if activity.interruptible
+                && activity.interrupted_at.is_none()
+                && targets_current_activity(activity)
+            {
+                activity.interrupted_at = Some(timestamp.to_string());
+                activity.interruption_reason = Some(
+                    payload
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("interrupted")
+                        .to_string(),
+                );
+            }
+        }
+        "actor.activity.resume" => {
+            let Some(activity) = actor.activity.as_mut() else {
+                return;
+            };
+            if targets_current_activity(activity) {
+                activity.interrupted_at = None;
+                activity.interruption_reason = None;
+            }
+        }
+        "actor.activity.end" => {
+            if actor
+                .activity
+                .as_ref()
+                .is_some_and(targets_current_activity)
+            {
+                actor.activity = None;
+            }
+        }
+        "actor.exit" => {
+            let Some(activity) = actor.activity.as_mut() else {
+                return;
+            };
+            if !activity.continues_while_away && activity.interrupted_at.is_none() {
+                activity.interrupted_at = Some(timestamp.to_string());
+                activity.interruption_reason = Some("actor-away".to_string());
+            }
+        }
+        "actor.enter" => {
+            let Some(activity) = actor.activity.as_mut() else {
+                return;
+            };
+            if activity.interruption_reason.as_deref() == Some("actor-away") {
+                activity.interrupted_at = None;
+                activity.interruption_reason = None;
+            }
+        }
         _ => {}
     }
 }

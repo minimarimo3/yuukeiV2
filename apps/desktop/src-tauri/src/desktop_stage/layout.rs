@@ -172,7 +172,8 @@ pub(super) fn perch_actor_bounds(
 pub(super) fn apply_window_terrain_to_state(
     state: &mut DesktopStageState,
     observations: &[DesktopWindowObservation],
-) -> (Vec<(String, StageRect)>, Vec<StagePerchEnded>) {
+    now: Instant,
+) -> (Vec<(String, StageRect)>, StageWindowTerrainEvents) {
     state.terrain_windows = observations
         .iter()
         .map(|window| (window.window_key.clone(), window.frame.clone()))
@@ -182,13 +183,42 @@ pub(super) fn apply_window_terrain_to_state(
         .map(|window| (window.window_key.as_str(), &window.frame))
         .collect::<BTreeMap<_, _>>();
     let mut apply_bounds = Vec::new();
-    let mut ended = Vec::new();
+    let mut events = StageWindowTerrainEvents::default();
     let actor_ids = state.perches.keys().cloned().collect::<Vec<_>>();
     for actor_id in actor_ids {
         let Some(perch) = state.perches.get(&actor_id).cloned() else {
             continue;
         };
         if let Some(target) = windows.get(perch.window_key.as_str()) {
+            if !state.actors.contains_key(&actor_id) {
+                state.perches.remove(&actor_id);
+                continue;
+            }
+            if let Some(baseline) = perch.disturbance_baseline.as_ref() {
+                if let Some(summary) = perch_disturbance_between(baseline, target).filter(|_| {
+                    perch
+                        .last_disturbed_at
+                        .map(|last| {
+                            now.saturating_duration_since(last) >= PERCH_DISTURBANCE_COOLDOWN
+                        })
+                        .unwrap_or(true)
+                }) {
+                    if let Some(active_perch) = state.perches.get_mut(&actor_id) {
+                        active_perch.disturbance_baseline = Some((*target).clone());
+                        active_perch.last_disturbed_at = Some(now);
+                    }
+                    events.perch_disturbed.push(StagePerchDisturbed {
+                        actor_id: actor_id.clone(),
+                        window_key: perch.window_key.clone(),
+                        reason: summary.reason,
+                        movement_distance_px: summary.movement_distance_px,
+                        width_change_px: summary.width_change_px,
+                        height_change_px: summary.height_change_px,
+                    });
+                }
+            } else if let Some(active_perch) = state.perches.get_mut(&actor_id) {
+                active_perch.disturbance_baseline = Some((*target).clone());
+            }
             let monitors = state.monitors.clone();
             let Some(actor) = state.actors.get_mut(&actor_id) else {
                 state.perches.remove(&actor_id);
@@ -203,14 +233,106 @@ pub(super) fn apply_window_terrain_to_state(
             if let Some((label, bounds)) = restore_actor_to_desktop(state, &actor_id) {
                 apply_bounds.push((label, bounds));
             }
-            ended.push(StagePerchEnded {
+            events.perch_ended.push(StagePerchEnded {
                 actor_id,
                 window_key: perch.window_key,
                 reason: "window-closed",
             });
         }
     }
+    (apply_bounds, events)
+}
+
+pub(super) fn set_window_observation_enabled_in_state(
+    state: &mut DesktopStageState,
+    enabled: bool,
+) -> (Vec<(String, StageRect)>, Vec<StagePerchEnded>) {
+    state.window_observation_enabled = enabled;
+    if enabled {
+        return (Vec::new(), Vec::new());
+    }
+
+    let actor_ids = state.perches.keys().cloned().collect::<Vec<_>>();
+    let mut apply_bounds = Vec::new();
+    let mut ended = Vec::new();
+    for actor_id in actor_ids {
+        let Some(perch) = state.perches.remove(&actor_id) else {
+            continue;
+        };
+        if let Some(restored) = restore_actor_to_desktop(state, &actor_id) {
+            apply_bounds.push(restored);
+        }
+        ended.push(StagePerchEnded {
+            actor_id,
+            window_key: perch.window_key,
+            reason: "observation-disabled",
+        });
+    }
+    state.terrain_windows.clear();
     (apply_bounds, ended)
+}
+
+pub(super) fn apply_stage_perch_to_state(
+    state: &mut DesktopStageState,
+    actor_id: &str,
+    window_key: &str,
+) -> StagePerchApplyOutcome {
+    if !state.window_observation_enabled {
+        return StagePerchApplyOutcome::RejectedObservationDisabled;
+    }
+    if !state.actors.contains_key(actor_id) {
+        return StagePerchApplyOutcome::IgnoredMissingActor;
+    }
+    let disturbance_baseline = state.terrain_windows.get(window_key).cloned();
+    state.perches.insert(
+        actor_id.to_string(),
+        StagePerch {
+            window_key: window_key.to_string(),
+            disturbance_baseline,
+            last_disturbed_at: None,
+        },
+    );
+    StagePerchApplyOutcome::Applied
+}
+
+pub(super) fn perch_disturbance_between(
+    previous: &DesktopWindowFrame,
+    current: &DesktopWindowFrame,
+) -> Option<PerchDisturbanceSummary> {
+    let dx = current.x - previous.x;
+    let dy = current.y - previous.y;
+    let width_change = (current.width - previous.width).abs();
+    let height_change = (current.height - previous.height).abs();
+    let movement_distance = dx.hypot(dy);
+    if !movement_distance.is_finite() || !width_change.is_finite() || !height_change.is_finite() {
+        return None;
+    }
+
+    let resize_magnitude = width_change.max(height_change);
+    let moved = movement_distance >= PERCH_MOVE_DISTURBANCE_THRESHOLD;
+    let resized = resize_magnitude >= PERCH_RESIZE_DISTURBANCE_THRESHOLD;
+    if !moved && !resized {
+        return None;
+    }
+
+    Some(PerchDisturbanceSummary {
+        reason: if resized && (!moved || resize_magnitude >= movement_distance) {
+            "window-resized"
+        } else {
+            "window-moved"
+        },
+        movement_distance_px: privacy_safe_distance_summary(movement_distance),
+        width_change_px: privacy_safe_distance_summary(width_change),
+        height_change_px: privacy_safe_distance_summary(height_change),
+    })
+}
+
+fn privacy_safe_distance_summary(value: f64) -> u64 {
+    // Coarsening strips exact geometry and the cap avoids leaking monitor-scale
+    // details while preserving enough magnitude for authored reactions.
+    const SUMMARY_STEP_PX: f64 = 16.0;
+    const SUMMARY_MAX_PX: f64 = 4_096.0;
+    ((value / SUMMARY_STEP_PX).round() * SUMMARY_STEP_PX).clamp(0.0, SUMMARY_MAX_PX) as u64
 }
 
 pub(super) fn apply_actor_scale_to_state(
