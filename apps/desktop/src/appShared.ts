@@ -107,7 +107,14 @@ export type ExtensionPermissionRow = {
 };
 
 export function extensionPermissionRows(
-  extension: InstalledExtension,
+  extension: Pick<
+    InstalledExtension,
+    | "permissions"
+    | "hooks"
+    | "eventSubscriptions"
+    | "capabilities"
+    | "emittedEvents"
+  >,
 ): ExtensionPermissionRow[] {
   const rows: ExtensionPermissionRow[] = [];
   const broadEventSubscription =
@@ -123,11 +130,38 @@ export function extensionPermissionRows(
       warning: true,
     });
   }
+  if (extension.eventSubscriptions.length > 0) {
+    rows.push({
+      label: "イベント購読",
+      value: extension.eventSubscriptions
+        .flatMap((subscription) => subscription.eventTypes)
+        .filter(
+          (eventType, index, values) => values.indexOf(eventType) === index,
+        )
+        .join(", "),
+      warning: broadEventSubscription,
+    });
+  }
+  if (extension.hooks.length > 0) {
+    rows.push({
+      label: "コマンド加工",
+      value: extension.hooks
+        .map((hook) => `${hook.hookPoint}: ${joinOrAll(hook.commandTypes)}`)
+        .join(" / "),
+    });
+  }
   if (extension.permissions.eventLogRead) {
     const permission = extension.permissions.eventLogRead;
     rows.push({
       label: "event log読み出し",
-      value: `${joinOrAll(permission.eventTypes)} / max ${permission.maxRecords}`,
+      value: [
+        `events: ${joinOrAll(permission.eventTypes)}`,
+        `privacy: ${joinOrAll(permission.privacyCategories)}`,
+        `payload: ${permission.allowPayloads ? "可" : "不可"}`,
+        `references: ${permission.allowReferences ? "可" : "不可"}`,
+        `max: ${permission.maxRecords}`,
+        `目的: ${permission.purpose}`,
+      ].join(" / "),
     });
   }
   if (extension.capabilities.length > 0) {

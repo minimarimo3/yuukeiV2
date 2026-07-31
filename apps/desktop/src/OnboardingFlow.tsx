@@ -135,7 +135,7 @@ export function OnboardingFlow({
             <div className="settings-copy observation-settings">
               <h2>観測とプライバシー</h2>
               <p className="settings-title">
-                ONにした観測だけを記録します。どれもあとから設定で変えられます。
+                Yuukei本体が生活の地形として使う観測です。ONにしたものだけを記録し、通常設定には表示しません。
               </p>
               {observationSettingsError ? (
                 <p className="settings-error">{observationSettingsError}</p>

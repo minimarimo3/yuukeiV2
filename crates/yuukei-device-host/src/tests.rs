@@ -898,7 +898,7 @@ async fn extension_install_copies_folder_and_persists_settings() -> Result<()> {
     write_extension_source(&source, "nya-process", "Nya Process", "にゃ")?;
     let env = test_env(workspace.path(), data.path());
 
-    let state = LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    let state = install_extension_with_consent_in(env.clone(), &source)?;
 
     let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
     let snapshot = runtime.snapshot()?;
@@ -915,6 +915,14 @@ async fn extension_install_copies_folder_and_persists_settings() -> Result<()> {
         .join("settings")
         .join("extensions.json")
         .exists());
+    let stored: Value = serde_json::from_str(&fs::read_to_string(
+        data.path().join("settings").join("extensions.json"),
+    )?)?;
+    assert!(stored["installedExtensions"][0]["approvedManifestDigest"].is_string());
+    assert_eq!(
+        stored["installedExtensions"][0]["approvedPermissions"]["broadEventSubscription"],
+        false
+    );
     assert_eq!(state.installed[0].extension_id, "nya-process");
     assert_eq!(
         state
@@ -925,6 +933,155 @@ async fn extension_install_copies_folder_and_persists_settings() -> Result<()> {
         vec!["nya-process".to_string()]
     );
     assert!(snapshot.extensions.contains_key("nya-process"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn extension_inspection_does_not_install_without_consent() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    write_pack(
+        &workspace.path().join("packs").join("default-yuukei"),
+        "default-yuukei",
+        "Default Yuukei",
+        &[],
+    )?;
+    let source = workspace.path().join("downloads").join("inspect-only");
+    write_extension_source(&source, "inspect-only", "Inspect Only", "にゃ")?;
+    let env = test_env(workspace.path(), data.path());
+
+    let inspection = LocalYuukeiRuntime::inspect_extension_directory_in(env.clone(), &source)?;
+    assert_eq!(inspection.extension_id, "inspect-only");
+    assert!(!inspection.manifest_digest.is_empty());
+    assert!(!data.path().join("extensions").join("inspect-only").exists());
+
+    let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+    assert!(runtime.extension_settings()?.installed.is_empty());
+    Ok(())
+}
+
+#[test]
+fn extension_install_rejects_manifest_changed_after_consent() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    let source = workspace.path().join("downloads").join("changed-source");
+    write_extension_source(&source, "changed-source", "Changed Source", "にゃ")?;
+    let env = test_env(workspace.path(), data.path());
+    let inspection = LocalYuukeiRuntime::inspect_extension_directory_in(env.clone(), &source)?;
+
+    let manifest_path = source.join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    manifest["displayName"] = json!("Changed After Consent");
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+    let error = LocalYuukeiRuntime::install_extension_directory_in(
+        env,
+        &source,
+        &inspection.manifest_digest,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("権限確認後に変更"));
+    assert!(!data
+        .path()
+        .join("extensions")
+        .join("changed-source")
+        .exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn installed_extension_refuses_manifest_changes_after_consent() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    write_pack(
+        &workspace.path().join("packs").join("default-yuukei"),
+        "default-yuukei",
+        "Default Yuukei",
+        &[],
+    )?;
+    let source = workspace.path().join("downloads").join("tampered");
+    write_extension_source(&source, "tampered", "Tampered", "にゃ")?;
+    let env = test_env(workspace.path(), data.path());
+    install_extension_with_consent_in(env.clone(), &source)?;
+
+    let manifest_path = data
+        .path()
+        .join("extensions")
+        .join("tampered")
+        .join("manifest.json");
+    let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    manifest["displayName"] = json!("Tampered After Install");
+    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+
+    let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+    let state = runtime.extension_settings()?;
+    assert!(state.installed[0]
+        .last_load_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("同意後に変更"));
+    assert!(!runtime.snapshot()?.extensions.contains_key("tampered"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_extension_without_consent_record_is_not_auto_approved() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    write_pack(
+        &workspace.path().join("packs").join("default-yuukei"),
+        "default-yuukei",
+        "Default Yuukei",
+        &[],
+    )?;
+    let source = workspace.path().join("downloads").join("legacy-extension");
+    write_extension_source(&source, "legacy-extension", "Legacy Extension", "にゃ")?;
+    let env = test_env(workspace.path(), data.path());
+    install_extension_with_consent_in(env.clone(), &source)?;
+
+    let settings_path = data.path().join("settings").join("extensions.json");
+    let mut stored: Value = serde_json::from_str(&fs::read_to_string(&settings_path)?)?;
+    stored["installedExtensions"][0]
+        .as_object_mut()
+        .expect("stored extension")
+        .remove("approvedManifestDigest");
+    stored["installedExtensions"][0]
+        .as_object_mut()
+        .expect("stored extension")
+        .remove("approvedPermissions");
+    fs::write(&settings_path, serde_json::to_string_pretty(&stored)?)?;
+
+    let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
+    let state = runtime.extension_settings()?;
+    assert!(state.installed[0]
+        .last_load_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("同意記録がない"));
+    assert!(!runtime
+        .snapshot()?
+        .extensions
+        .contains_key("legacy-extension"));
+    Ok(())
+}
+
+#[test]
+fn installed_extension_requires_uninstall_before_reapproval() -> Result<()> {
+    let workspace = tempdir()?;
+    let data = tempdir()?;
+    let source = workspace.path().join("downloads").join("already-installed");
+    write_extension_source(&source, "already-installed", "Already Installed", "にゃ")?;
+    let env = test_env(workspace.path(), data.path());
+    install_extension_with_consent_in(env.clone(), &source)?;
+    let inspection = LocalYuukeiRuntime::inspect_extension_directory_in(env.clone(), &source)?;
+
+    let error = LocalYuukeiRuntime::install_extension_directory_in(
+        env,
+        &source,
+        &inspection.manifest_digest,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("先に削除してから追加し直して"));
     Ok(())
 }
 
@@ -942,7 +1099,7 @@ async fn disabled_extension_is_preserved_but_not_executed() -> Result<()> {
     write_extension_source(&source, "disabled-process", "Disabled Process", "にゃ")?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    install_extension_with_consent_in(env.clone(), &source)?;
     let state =
         LocalYuukeiRuntime::set_extension_enabled_in(env.clone(), "disabled-process", false)?;
     let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
@@ -985,8 +1142,8 @@ async fn extension_hook_order_is_user_owned_and_process_cwd_is_installed_dir() -
     write_extension_source(&english_source, "english-marker", "English Marker", " EN")?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &nya_source)?;
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &english_source)?;
+    install_extension_with_consent_in(env.clone(), &nya_source)?;
+    install_extension_with_consent_in(env.clone(), &english_source)?;
     LocalYuukeiRuntime::set_extension_hook_order_in(
         env.clone(),
         ExtensionHookPoint::BeforeCommandEmit,
@@ -1025,7 +1182,7 @@ async fn extension_capability_defaults_persist_and_apply_before_home_start() -> 
     )?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    install_extension_with_consent_in(env.clone(), &source)?;
     let runtime = LocalYuukeiRuntime::open_selected_in(env.clone()).await?;
     let mut receiver = runtime.home().subscribe_commands();
     runtime
@@ -1089,7 +1246,7 @@ async fn process_extension_receives_persistent_extension_data_dir() -> Result<()
     write_extension_data_dir_probe_source(&source)?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    install_extension_with_consent_in(env.clone(), &source)?;
     let runtime = LocalYuukeiRuntime::open_selected_in(env).await?;
     let commands = runtime
         .send_conversation_text(CLI_SURFACE_ID, "環境変数は？")
@@ -1129,7 +1286,7 @@ async fn extension_setting_values_and_secrets_persist_without_exposing_secret() 
     write_settings_probe_extension_source(&source)?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    install_extension_with_consent_in(env.clone(), &source)?;
     let state = LocalYuukeiRuntime::set_extension_setting_values_in(
         env.clone(),
         "settings-probe",
@@ -1194,7 +1351,7 @@ fn extension_setting_values_reject_invalid_values() -> Result<()> {
     write_settings_probe_extension_source(&source)?;
     let env = test_env(workspace.path(), data.path());
 
-    LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source)?;
+    install_extension_with_consent_in(env.clone(), &source)?;
     let unknown = LocalYuukeiRuntime::set_extension_setting_values_in(
         env.clone(),
         "settings-probe",
@@ -1241,7 +1398,7 @@ fn extension_manifest_rejects_invalid_settings_schema() -> Result<()> {
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
     let env = test_env(workspace.path(), data.path());
     let duplicate =
-        LocalYuukeiRuntime::install_extension_directory_in(env.clone(), &source).unwrap_err();
+        LocalYuukeiRuntime::inspect_extension_directory_in(env.clone(), &source).unwrap_err();
     assert!(duplicate.to_string().contains("duplicate setting key"));
 
     write_settings_probe_extension_source(&source)?;
@@ -1249,7 +1406,7 @@ fn extension_manifest_rejects_invalid_settings_schema() -> Result<()> {
     manifest["settings"]["fields"][2]["default"] = json!("should-not-load");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
     let secret_default =
-        LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+        LocalYuukeiRuntime::inspect_extension_directory_in(env, &source).unwrap_err();
     assert!(secret_default
         .to_string()
         .contains("secret setting cannot declare default"));
@@ -1416,7 +1573,7 @@ fn process_extension_manifest_rejects_non_process_runtime() -> Result<()> {
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
     let env = test_env(workspace.path(), data.path());
-    let error = LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+    let error = LocalYuukeiRuntime::inspect_extension_directory_in(env, &source).unwrap_err();
     assert!(error.to_string().contains("runtime"));
     assert!(error.to_string().contains("process"));
     Ok(())
@@ -1437,7 +1594,7 @@ fn process_extension_manifest_rejects_cross_namespace_signal_alias() -> Result<(
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
 
     let env = test_env(workspace.path(), data.path());
-    let error = LocalYuukeiRuntime::install_extension_directory_in(env, &source).unwrap_err();
+    let error = LocalYuukeiRuntime::inspect_extension_directory_in(env, &source).unwrap_err();
     assert!(error.to_string().contains("signal alias"));
     Ok(())
 }
@@ -1449,6 +1606,14 @@ fn test_env(workspace_root: &Path, data_dir: &Path) -> LocalRuntimeEnvironment {
         data_dir: data_dir.to_path_buf(),
         device_id: "device-test".to_string(),
     }
+}
+
+fn install_extension_with_consent_in(
+    env: LocalRuntimeEnvironment,
+    source: &Path,
+) -> Result<ExtensionSettingsState> {
+    let inspection = LocalYuukeiRuntime::inspect_extension_directory_in(env.clone(), source)?;
+    LocalYuukeiRuntime::install_extension_directory_in(env, source, &inspection.manifest_digest)
 }
 
 fn write_pack(

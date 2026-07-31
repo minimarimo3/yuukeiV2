@@ -148,6 +148,62 @@ body[data-surface="bubble"] #root {
   font-weight: 500;
 }
 
+.extension-consent-layer {
+  position: fixed;
+  z-index: 1100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 32px;
+  background: rgba(23, 32, 51, 0.28);
+  backdrop-filter: blur(2px);
+}
+
+.extension-consent-dialog {
+  display: grid;
+  gap: 14px;
+  width: min(620px, 100%);
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  border: 1px solid #d0d5dd;
+  border-radius: 10px;
+  padding: 22px;
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(16, 24, 40, 0.28);
+}
+
+.extension-consent-dialog header,
+.extension-consent-dialog p {
+  margin: 0;
+}
+
+.extension-consent-dialog h2 {
+  margin: 2px 0 0;
+}
+
+.extension-consent-warning {
+  border: 1px solid #f59e0b;
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: #fffbeb;
+  color: #92400e;
+  font-weight: 650;
+  line-height: 1.55;
+}
+
+.extension-consent-permissions {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.extension-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
 .startup-error-shell {
   min-height: 100vh;
   display: grid;

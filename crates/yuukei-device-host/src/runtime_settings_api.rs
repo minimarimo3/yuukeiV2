@@ -200,17 +200,40 @@ impl LocalYuukeiRuntime {
         registry.set(settings)
     }
 
-    pub fn install_extension_directory(path: impl AsRef<Path>) -> Result<ExtensionSettingsState> {
-        Self::install_extension_directory_in(LocalRuntimeEnvironment::default_local(), path)
+    pub fn inspect_extension_directory(
+        path: impl AsRef<Path>,
+    ) -> Result<ExtensionInstallInspection> {
+        Self::inspect_extension_directory_in(LocalRuntimeEnvironment::default_local(), path)
+    }
+
+    pub fn inspect_extension_directory_in(
+        env: LocalRuntimeEnvironment,
+        path: impl AsRef<Path>,
+    ) -> Result<ExtensionInstallInspection> {
+        let config = extension_config_for_env(env);
+        let registry = config.extension_settings_registry()?;
+        registry.inspect_directory(path)
+    }
+
+    pub fn install_extension_directory(
+        path: impl AsRef<Path>,
+        approved_manifest_digest: &str,
+    ) -> Result<ExtensionSettingsState> {
+        Self::install_extension_directory_in(
+            LocalRuntimeEnvironment::default_local(),
+            path,
+            approved_manifest_digest,
+        )
     }
 
     pub fn install_extension_directory_in(
         env: LocalRuntimeEnvironment,
         path: impl AsRef<Path>,
+        approved_manifest_digest: &str,
     ) -> Result<ExtensionSettingsState> {
         let config = extension_config_for_env(env);
         let mut registry = config.extension_settings_registry()?;
-        registry.install_from_directory(path)
+        registry.install_from_directory(path, approved_manifest_digest)
     }
 
     pub fn uninstall_extension(extension_id: &str) -> Result<ExtensionSettingsState> {

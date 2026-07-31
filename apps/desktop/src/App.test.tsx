@@ -16,6 +16,7 @@ import type {
   DaihonDiagnosticEntry,
   EventLogPage,
   EventLogRecord,
+  ExtensionInstallInspection,
   ExtensionSettingsState,
   ObservationSettingsState,
   OnboardingState,
@@ -290,6 +291,30 @@ function installedExtension(
   };
 }
 
+function extensionInspection(
+  overrides: Partial<ExtensionInstallInspection> = {},
+): ExtensionInstallInspection {
+  return {
+    extensionId: "nya-suffix",
+    displayName: "Nya Suffix",
+    runtime: "process",
+    permissions: { broadEventSubscription: false, eventLogRead: null },
+    hooks: [
+      {
+        hookPoint: "beforeCommandEmit",
+        commandTypes: ["dialogue.say"],
+      },
+    ],
+    eventSubscriptions: [],
+    emittedEvents: [],
+    capabilities: [],
+    manifestDigest: "sha256-nya-suffix",
+    trustedCodeNotice:
+      "このExtensionはローカルで信頼済みコードとして実行されます。",
+    ...overrides,
+  };
+}
+
 function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
   return {
     attachSurface: vi.fn(async () => snapshot("ただいま")),
@@ -378,6 +403,7 @@ function clientFixture(overrides: Partial<YuukeiClient> = {}): YuukeiClient {
       status: worldPackStatus(),
       snapshot: snapshot("ただいま"),
     })),
+    inspectExtensionDirectory: vi.fn(async () => extensionInspection()),
     installExtensionDirectory: vi.fn(),
     uninstallExtension: vi.fn(),
     setExtensionEnabled: vi.fn(),
@@ -864,26 +890,15 @@ describe("App", () => {
     confirm.mockRestore();
   });
 
-  it("toggles observation privacy settings", async () => {
+  it("keeps observation choices out of the regular settings screen", async () => {
     const client = clientFixture();
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "観測" }));
-    expect(await screen.findByText("観測とプライバシー")).toBeInTheDocument();
-    expect(
-      screen.getByText("開いた場所の種類だけを記録します(パスは記録しません)"),
-    ).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("checkbox", { name: "フォルダ" }));
-
-    await waitFor(() => {
-      expect(client.setObservationSettings).toHaveBeenCalledWith({
-        windows: false,
-        folders: true,
-        downloads: false,
-      });
-    });
+    await screen.findByRole("tab", { name: "World Pack" });
+    expect(screen.queryByRole("tab", { name: "観測" })).not.toBeInTheDocument();
+    expect(screen.queryByText("観測とプライバシー")).not.toBeInTheDocument();
+    expect(client.setObservationSettings).not.toHaveBeenCalled();
   });
 
   it("lists event log records with payload summaries", async () => {
@@ -1119,10 +1134,12 @@ describe("App", () => {
     expect(await screen.findByText("Daihon diagnostic 1")).toBeInTheDocument();
   });
 
-  it("installs an Extension directory and refreshes extension state", async () => {
+  it("installs an Extension only after approving the inspected permissions", async () => {
     const installed = installedExtension("nya-suffix", "Nya Suffix");
+    const inspection = extensionInspection();
     const client = clientFixture({
       openExtensionDirectory: vi.fn(async () => "/Users/example/nya-suffix"),
+      inspectExtensionDirectory: vi.fn(async () => inspection),
       installExtensionDirectory: vi.fn(async () => ({
         state: extensionSettings([installed]),
         snapshot: snapshot("Extensionを読み込みました"),
@@ -1135,12 +1152,41 @@ describe("App", () => {
     await screen.findByText("0件のExtensionをインストール済み");
     await userEvent.click(screen.getByRole("button", { name: "追加" }));
 
+    expect(
+      await screen.findByRole("dialog", { name: "Nya Suffix" }),
+    ).toBeInTheDocument();
+    expect(client.inspectExtensionDirectory).toHaveBeenCalledWith(
+      "/Users/example/nya-suffix",
+    );
+    expect(client.installExtensionDirectory).not.toHaveBeenCalled();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "この内容で許可して追加" }),
+    );
     await waitFor(() => {
       expect(client.installExtensionDirectory).toHaveBeenCalledWith(
         "/Users/example/nya-suffix",
+        inspection.manifestDigest,
       );
     });
     expect(await screen.findByText("Nya Suffix")).toBeInTheDocument();
+  });
+
+  it("does not install an Extension when permission consent is denied", async () => {
+    const client = clientFixture({
+      openExtensionDirectory: vi.fn(async () => "/Users/example/nya-suffix"),
+      inspectExtensionDirectory: vi.fn(async () => extensionInspection()),
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("button", { name: "追加" }));
+    await screen.findByRole("dialog", { name: "Nya Suffix" });
+    await userEvent.click(screen.getByRole("button", { name: "許可しない" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(client.installExtensionDirectory).not.toHaveBeenCalled();
   });
 
   it("toggles, reorders, and uninstalls Extensions", async () => {
@@ -1275,7 +1321,9 @@ describe("App", () => {
     expect(screen.getByText("全イベント購読")).toBeInTheDocument();
     expect(screen.getByText("全イベントを受け取ります")).toBeInTheDocument();
     expect(screen.getByText("event log読み出し")).toBeInTheDocument();
-    expect(screen.getByText("conversation.* / max 50")).toBeInTheDocument();
+    expect(screen.getByText(/events: conversation\.\*/)).toHaveTextContent(
+      "payload: 可 / references: 不可 / max: 50 / 目的: rebuild",
+    );
     expect(screen.getByText("capability提供")).toBeInTheDocument();
     expect(screen.getByText("memory.retrieve")).toBeInTheDocument();
     expect(screen.getByText("発行イベント")).toBeInTheDocument();

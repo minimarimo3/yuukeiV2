@@ -7,6 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use yuukei_capability::{DEFAULT_SPEECH_SYNTHESIS_EXTENSION_ID, SPEECH_SYNTHESIS_CAPABILITY};
 use yuukei_extension::{
     validate_extension_summary, ProcessExtensionManifest, ProcessHookExtension,
@@ -24,6 +25,21 @@ const EXTENSION_SETTINGS_SCHEMA_VERSION: u32 = 1;
 const EXTENSION_MANIFEST_FILE: &str = "manifest.json";
 
 pub const TRUSTED_CODE_NOTICE: &str = "Extensionは信頼したローカルコードとして実行されます。Yuukeiは公開protocolへの入力と出力を検証しますが、OSレベルのファイルアクセス隔離はv1では行いません。";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionInstallInspection {
+    pub extension_id: String,
+    pub display_name: String,
+    pub runtime: ExtensionRuntimeKind,
+    pub permissions: ExtensionPermissions,
+    pub hooks: Vec<ExtensionHookSubscription>,
+    pub event_subscriptions: Vec<ExtensionEventSubscription>,
+    pub emitted_events: Vec<String>,
+    pub capabilities: Vec<ExtensionCapabilityDeclaration>,
+    pub manifest_digest: String,
+    pub trusted_code_notice: String,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +117,10 @@ struct StoredInstalledExtension {
     installed_path: PathBuf,
     installed_at: String,
     updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approved_manifest_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approved_permissions: Option<ExtensionPermissions>,
 }
 
 #[derive(Clone, Debug)]
@@ -205,9 +225,37 @@ impl ExtensionSettingsRegistry {
         }
     }
 
+    pub fn inspect_directory(
+        &self,
+        source_dir: impl AsRef<Path>,
+    ) -> Result<ExtensionInstallInspection> {
+        let source_dir = fs::canonicalize(source_dir.as_ref())?;
+        if !source_dir.is_dir() {
+            return Err(DeviceHostError::ExtensionSettings(
+                "extension install source must be a directory".to_string(),
+            ));
+        }
+        let source_manifest_path = source_dir.join(EXTENSION_MANIFEST_FILE);
+        let (manifest, manifest_digest) = read_validated_manifest(&source_manifest_path)?;
+        validate_extension_id(&manifest.id)?;
+        Ok(ExtensionInstallInspection {
+            extension_id: manifest.id,
+            display_name: manifest.display_name,
+            runtime: manifest.runtime.unwrap_or(ExtensionRuntimeKind::Process),
+            permissions: manifest.permissions,
+            hooks: manifest.hooks,
+            event_subscriptions: manifest.event_subscriptions,
+            emitted_events: manifest.emitted_events,
+            capabilities: manifest.capabilities,
+            manifest_digest,
+            trusted_code_notice: TRUSTED_CODE_NOTICE.to_string(),
+        })
+    }
+
     pub fn install_from_directory(
         &mut self,
         source_dir: impl AsRef<Path>,
+        approved_manifest_digest: &str,
     ) -> Result<ExtensionSettingsState> {
         let source_dir = fs::canonicalize(source_dir.as_ref())?;
         if !source_dir.is_dir() {
@@ -216,9 +264,26 @@ impl ExtensionSettingsRegistry {
             ));
         }
         let source_manifest_path = source_dir.join(EXTENSION_MANIFEST_FILE);
-        let manifest = read_manifest(&source_manifest_path)?;
-        validate_manifest(&manifest)?;
+        let (manifest, manifest_digest) = read_validated_manifest(&source_manifest_path)?;
         validate_extension_id(&manifest.id)?;
+        if approved_manifest_digest.trim().is_empty() || approved_manifest_digest != manifest_digest
+        {
+            return Err(DeviceHostError::ExtensionSettings(
+                "Extensionの内容が権限確認後に変更されました。もう一度内容を確認してください。"
+                    .to_string(),
+            ));
+        }
+        if self
+            .stored
+            .installed_extensions
+            .iter()
+            .any(|extension| extension.extension_id == manifest.id)
+        {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "Extension {} は既にインストールされています。権限契約を変更する場合は、先に削除してから追加し直してください。",
+                manifest.id
+            )));
+        }
 
         let install_dir = self.extension_root.join(&manifest.id);
         if install_dir.starts_with(&source_dir) && install_dir != source_dir {
@@ -236,32 +301,30 @@ impl ExtensionSettingsRegistry {
             copy_dir_recursively(&source_dir, &install_dir)?;
         }
 
+        let installed_manifest_path = install_dir.join(EXTENSION_MANIFEST_FILE);
+        let (installed_manifest, installed_manifest_digest) =
+            read_validated_manifest(&installed_manifest_path)?;
+        if installed_manifest.id != manifest.id || installed_manifest_digest != manifest_digest {
+            if !source_is_install_dir && install_dir.exists() {
+                let _ = fs::remove_dir_all(&install_dir);
+            }
+            return Err(DeviceHostError::ExtensionSettings(
+                "Extensionのコピー中にmanifestが変更されました。インストールを中止しました。"
+                    .to_string(),
+            ));
+        }
+
         let now = now_timestamp();
-        let installed_at = self
-            .stored
-            .installed_extensions
-            .iter()
-            .find(|extension| extension.extension_id == manifest.id)
-            .map(|extension| extension.installed_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let enabled = self
-            .stored
-            .installed_extensions
-            .iter()
-            .find(|extension| extension.extension_id == manifest.id)
-            .map(|extension| extension.enabled)
-            .unwrap_or(true);
-        self.stored
-            .installed_extensions
-            .retain(|extension| extension.extension_id != manifest.id);
         self.stored
             .installed_extensions
             .push(StoredInstalledExtension {
                 extension_id: manifest.id.clone(),
-                enabled,
+                enabled: true,
                 installed_path: install_dir,
-                installed_at,
+                installed_at: now.clone(),
                 updated_at: now,
+                approved_manifest_digest: Some(manifest_digest),
+                approved_permissions: Some(manifest.permissions.clone()),
             });
         self.append_manifest_hooks_to_order(&manifest);
         self.normalize();
@@ -632,7 +695,10 @@ impl ExtensionSettingsRegistry {
                 display_name: manifest.display_name,
                 enabled: stored.enabled,
                 runtime: manifest.runtime.unwrap_or(ExtensionRuntimeKind::Process),
-                permissions: manifest.permissions,
+                permissions: stored
+                    .approved_permissions
+                    .clone()
+                    .unwrap_or(manifest.permissions),
                 hooks: manifest.hooks,
                 event_subscriptions: manifest.event_subscriptions,
                 emitted_events: manifest.emitted_events,
@@ -654,7 +720,7 @@ impl ExtensionSettingsRegistry {
                 display_name: stored.extension_id.clone(),
                 enabled: stored.enabled,
                 runtime: ExtensionRuntimeKind::Process,
-                permissions: ExtensionPermissions::default(),
+                permissions: stored.approved_permissions.clone().unwrap_or_default(),
                 hooks: Vec::new(),
                 event_subscriptions: Vec::new(),
                 emitted_events: Vec::new(),
@@ -692,12 +758,32 @@ impl ExtensionSettingsRegistry {
         &self,
         stored: &StoredInstalledExtension,
     ) -> Result<ProcessExtensionManifest> {
-        let manifest = read_manifest(self.manifest_path(&stored.extension_id))?;
-        validate_manifest(&manifest)?;
+        let manifest_path = self.manifest_path(&stored.extension_id);
+        let (manifest, manifest_digest) = read_validated_manifest(&manifest_path)?;
         if manifest.id != stored.extension_id {
             return Err(DeviceHostError::ExtensionSettings(format!(
                 "manifest id {} does not match installed extension {}",
                 manifest.id, stored.extension_id
+            )));
+        }
+        let Some(approved_manifest_digest) = stored.approved_manifest_digest.as_deref() else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "Extension {} は権限への同意記録がないためロードできません。削除して追加し直してください。",
+                stored.extension_id
+            )));
+        };
+        let Some(approved_permissions) = stored.approved_permissions.as_ref() else {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "Extension {} は権限への同意記録がないためロードできません。削除して追加し直してください。",
+                stored.extension_id
+            )));
+        };
+        if approved_manifest_digest != manifest_digest
+            || approved_permissions != &manifest.permissions
+        {
+            return Err(DeviceHostError::ExtensionSettings(format!(
+                "Extension {} のmanifestまたは権限が同意後に変更されたためロードを拒否しました。削除して追加し直してください。",
+                stored.extension_id
             )));
         }
         Ok(manifest)
@@ -888,9 +974,15 @@ impl ExtensionSettingsRegistry {
     }
 }
 
-fn read_manifest(path: impl AsRef<Path>) -> Result<ProcessExtensionManifest> {
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
+fn read_validated_manifest(path: impl AsRef<Path>) -> Result<(ProcessExtensionManifest, String)> {
+    let raw = fs::read(path)?;
+    let manifest = serde_json::from_slice(&raw)?;
+    validate_manifest(&manifest)?;
+    let digest = Sha256::digest(&raw)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok((manifest, digest))
 }
 
 fn validate_manifest(manifest: &ProcessExtensionManifest) -> Result<()> {

@@ -23,11 +23,11 @@ use yuukei_device_host::{
     tauri_surface_session, ActorSurfaceHitZoneDefinition, ActorSurfaceRendererKind,
     AppSettingsState, AvatarGesturePoke, CapabilityUsageState, DesktopFolderObservationState,
     DesktopWindowObservationState, EventLogDeleteResult, EventLogPrivacyCategoryFilter,
-    ExtensionSettingsChangeResult, ExtensionSettingsState, LocalRuntimeEnvironment,
-    LocalYuukeiRuntime, ObservationSettingsState, ObservationSettingsUpdate, OnboardingState,
-    ResidentEventLogPage, RuntimeSettingsState, RuntimeSettingsUpdate, SceneHistoryState,
-    StageSettingsRegistry, WorldPackSelectionState, WorldPackSwitchResult, WorldPackZipInspection,
-    TAURI_SURFACE_ID,
+    ExtensionInstallInspection, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    LocalRuntimeEnvironment, LocalYuukeiRuntime, ObservationSettingsState,
+    ObservationSettingsUpdate, OnboardingState, ResidentEventLogPage, RuntimeSettingsState,
+    RuntimeSettingsUpdate, SceneHistoryState, StageSettingsRegistry, WorldPackSelectionState,
+    WorldPackSwitchResult, WorldPackZipInspection, TAURI_SURFACE_ID,
 };
 use yuukei_protocol::{
     ExtensionHookPoint, MemoryEntryKind, MemoryForgetEntry, MemoryForgetOutput, MemoryListOutput,
@@ -838,13 +838,26 @@ async fn reset_world_pack_to_default(
 }
 
 #[tauri::command]
+async fn inspect_extension_directory(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ExtensionInstallInspection, String> {
+    LocalYuukeiRuntime::inspect_extension_directory_in(state.env.clone(), path).map_err(to_message)
+}
+
+#[tauri::command]
 async fn install_extension_directory(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    approved_manifest_digest: String,
 ) -> Result<ExtensionSettingsChangeResult, String> {
-    LocalYuukeiRuntime::install_extension_directory_in(state.env.clone(), path)
-        .map_err(to_message)?;
+    LocalYuukeiRuntime::install_extension_directory_in(
+        state.env.clone(),
+        path,
+        &approved_manifest_digest,
+    )
+    .map_err(to_message)?;
     reload_runtime_for_extension_change(app, state).await
 }
 
@@ -1172,6 +1185,7 @@ pub fn run() {
             inspect_world_pack_zip,
             import_world_pack_zip,
             reset_world_pack_to_default,
+            inspect_extension_directory,
             install_extension_directory,
             uninstall_extension,
             set_extension_enabled,

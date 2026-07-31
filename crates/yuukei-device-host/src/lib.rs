@@ -36,10 +36,11 @@ use yuukei_world::{
 mod extension_settings;
 mod world_pack_registry;
 
-use extension_settings::{ExtensionRuntimeEntry, ExtensionSettingsRegistry};
 pub use extension_settings::{
-    ExtensionSettingsChangeResult, ExtensionSettingsState, InstalledExtension, TRUSTED_CODE_NOTICE,
+    ExtensionInstallInspection, ExtensionSettingsChangeResult, ExtensionSettingsState,
+    InstalledExtension, TRUSTED_CODE_NOTICE,
 };
+use extension_settings::{ExtensionRuntimeEntry, ExtensionSettingsRegistry};
 pub use world_pack_registry::{
     LocalRuntimeEnvironment, WorldPackInstall, WorldPackSelectionState, WorldPackSource,
     WorldPackSwitchResult, DEFAULT_WORLD_PACK_INSTALL_ID,

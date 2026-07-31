@@ -13,7 +13,8 @@ use menu::{
 use tokio::task::JoinHandle;
 use yuukei_device_host::{
     cli_surface_session, ActorSurfaceAssetCatalog, AvatarGestureInput, AvatarGesturePoke,
-    AvatarGestureScreen, LocalYuukeiRuntime, RuntimePaths, WorldPackSelectionState, CLI_SURFACE_ID,
+    AvatarGestureScreen, ExtensionInstallInspection, LocalYuukeiRuntime, RuntimePaths,
+    WorldPackSelectionState, CLI_SURFACE_ID,
 };
 use yuukei_protocol::{ResidentSnapshot, RuntimeCommand};
 
@@ -118,6 +119,7 @@ async fn run_repl() -> Result<()> {
             presence_enabled,
             &mut command_history,
             &mut output_mode,
+            &mut input,
         )
         .await
         {
@@ -159,6 +161,7 @@ async fn execute_action(
     presence_enabled: bool,
     command_history: &mut Vec<RuntimeCommand>,
     output_mode: &mut OutputMode,
+    input: &mut dyn BufRead,
 ) -> Result<bool> {
     match action {
         MenuAction::Quit => return Ok(true),
@@ -248,7 +251,20 @@ async fn execute_action(
             print_world_pack_status(&runtime.world_pack_status(), *output_mode)?;
         }
         MenuAction::InstallExtension(path) => {
-            LocalYuukeiRuntime::install_extension_directory(PathBuf::from(path))
+            let path = PathBuf::from(path);
+            let inspection = LocalYuukeiRuntime::inspect_extension_directory(&path)
+                .context("failed to inspect Extension")?;
+            print_extension_install_inspection(&inspection, *output_mode)?;
+            print!("上記の権限と信頼済みコード実行を許可しますか? [yes/NO]: ");
+            io::stdout().flush()?;
+            let mut consent = String::new();
+            if input.read_line(&mut consent)? == 0
+                || !matches!(consent.trim().to_ascii_lowercase().as_str(), "yes" | "y")
+            {
+                println!("Extensionのインストールを中止しました。");
+                return Ok(false);
+            }
+            LocalYuukeiRuntime::install_extension_directory(&path, &inspection.manifest_digest)
                 .context("failed to install Extension")?;
             replace_runtime(
                 runtime,
@@ -276,6 +292,44 @@ async fn execute_action(
         }
     }
     Ok(false)
+}
+
+fn print_extension_install_inspection(
+    inspection: &ExtensionInstallInspection,
+    output_mode: OutputMode,
+) -> Result<()> {
+    match output_mode {
+        OutputMode::Human => {
+            println!(
+                "Extension: {} ({})",
+                inspection.display_name, inspection.extension_id
+            );
+            println!("{}", inspection.trusted_code_notice);
+            println!(
+                "権限: {}",
+                serde_json::to_string_pretty(&inspection.permissions)?
+            );
+            if !inspection.event_subscriptions.is_empty() {
+                println!(
+                    "イベント購読: {}",
+                    serde_json::to_string_pretty(&inspection.event_subscriptions)?
+                );
+            }
+            if !inspection.capabilities.is_empty() {
+                println!(
+                    "提供capability: {}",
+                    inspection
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.capability.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        OutputMode::Jsonl => println!("{}", serde_json::to_string(inspection)?),
+    }
+    Ok(())
 }
 
 fn replace_runtime(

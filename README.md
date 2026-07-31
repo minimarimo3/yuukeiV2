@@ -61,18 +61,18 @@ CLI Surfaceは番号入力の状態機械REPLであり、手動確認にもパ�
 - `printf '1\n2\n1\n0\n' | cargo run -p yuukei-cli-surface`: yuukeiの頭を撫でる(`avatar.gesture.poke`。アクターとヒットゾーンの番号はID辞書順)。
 - `printf '5\n0\n' | cargo run -p yuukei-cli-surface`: `ResidentSnapshot` を出力する。
 - `printf '9\n1\ntarget/events.jsonl\n0\n' | cargo run -p yuukei-cli-surface`: canonical event logをJSONLで書き出す。
-- `printf '8\n1\npackages/yuukei-intelligence/dist/yuukei-intelligence\n0\n' | cargo run -p yuukei-cli-surface`: 配布用に生成済みのローカルIntelligence Extensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
+- `printf '8\n1\npackages/yuukei-intelligence/dist/yuukei-intelligence\nyes\n0\n' | cargo run -p yuukei-cli-surface`: 権限表示へ`yes`で同意し、配布用に生成済みのローカルIntelligence Extensionを `YUUKEI_DATA_DIR/extensions/` へインストールする。
 - `YUUKEI_CLI_OUTPUT=jsonl` を付けるとRuntimeCommandを1行1JSONで出力する。presence loop(生活時計)は既定で起動せず、`YUUKEI_CLI_PRESENCE=1` で有効化する。
 
 アプリ動作ログは `YUUKEI_DATA_DIR` が指定されていればその中、未指定ならOSの一時ディレクトリ配下の `yuukei-v2/app-activity.jsonl` に保存する。canonical event logは同じデータディレクトリの `events.sqlite3` に保存する。
 
 ## Local Extensions
 
-ローカルExtensionは、設定画面で選んだフォルダを `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーしてインストールする。manifestは `YUUKEI_DATA_DIR/extensions/<extensionId>/manifest.json` に置く。
+ローカルExtensionは、設定画面でフォルダを選ぶと、まずmanifestの権限と信頼済みコード実行に関する確認を表示する。許可しなければロードもコピーも行わない。許可した場合だけ `YUUKEI_DATA_DIR/extensions/<extensionId>/` へコピーしてインストールし、承認したmanifestのdigestと権限を保存する。以後manifestまたは権限が変わったExtensionはロードを拒否するため、変更する場合は一度削除して、内容を再確認してから追加し直す。manifestは `YUUKEI_DATA_DIR/extensions/<extensionId>/manifest.json` に置く。
 
 ユーザー所有の有効/無効状態、インストール済みID、hook pointごとの実行順は `YUUKEI_DATA_DIR/settings/extensions.json` に保存する。Device Hostは起動時にこの設定を読み、Resident HomeへExtensionとして登録する。`beforeCommandEmit` では、前のExtensionが返したcommandが次のExtensionの入力になる。設定に残っているが削除済みのIDは無視し、新規インストールしたExtensionは購読しているhook pointの末尾へ追加する。event購読、capability提供、signal alias寄贈はmanifest宣言から登録する。
 
-Extensionは信頼したローカルコードとして実行する。YuukeiはCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さず、公開protocol messageの入力/出力だけを検証する。manifestのpermissionsは「宣言とユーザー同意」のための境界であり、v1のprocess runtimeではOSレベルのファイルアクセス隔離を約束しない。将来、`runtime: "wasm"` のような軽量runtimeで権限ゼロExtensionを実際にsandbox実行できる余地は残す。
+Extensionは信頼したローカルコードとして実行する。YuukeiはCore内部状態、Tauri AppHandle、Surface実装、event logファイルを直接渡さず、公開protocol messageの入力/出力だけを検証する。manifestのpermissionsは追加時に一度だけユーザーが許可する固定契約であり、通常設定から後付けで変更できない。v1のprocess runtimeではOSレベルのファイルアクセス隔離を約束しない。将来、`runtime: "wasm"` のような軽量runtimeで権限ゼロExtensionを実際にsandbox実行できる余地は残す。
 
 最小例:
 

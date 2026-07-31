@@ -317,6 +317,7 @@ function clientFixture(stage: DesktopStageState): YuukeiClient {
     openExtensionDirectory: vi.fn(),
     selectWorldPackDirectory: vi.fn(),
     resetWorldPackToDefault: vi.fn(),
+    inspectExtensionDirectory: vi.fn(),
     installExtensionDirectory: vi.fn(),
     uninstallExtension: vi.fn(),
     setExtensionEnabled: vi.fn(),

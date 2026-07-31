@@ -119,6 +119,19 @@ export type ExtensionSettingsChangeResult = {
   snapshot: ResidentSnapshot;
 };
 
+export type ExtensionInstallInspection = {
+  extensionId: string;
+  displayName: string;
+  runtime: ExtensionRuntimeKind;
+  permissions: ExtensionPermissions;
+  hooks: ExtensionHookSubscription[];
+  eventSubscriptions: ExtensionEventSubscription[];
+  emittedEvents: string[];
+  capabilities: ExtensionCapabilityDeclaration[];
+  manifestDigest: string;
+  trustedCodeNotice: string;
+};
+
 export type AppSettingsState = {
   talkIntervalMinutes: number;
   actorScalePercent: number;
@@ -470,8 +483,10 @@ export type YuukeiClient = {
   inspectWorldPackZip(path: string): Promise<WorldPackZipInspection>;
   importWorldPackZip(path: string): Promise<WorldPackSwitchResult>;
   resetWorldPackToDefault(): Promise<WorldPackSwitchResult>;
+  inspectExtensionDirectory(path: string): Promise<ExtensionInstallInspection>;
   installExtensionDirectory(
     path: string,
+    approvedManifestDigest: string,
   ): Promise<ExtensionSettingsChangeResult>;
   uninstallExtension(
     extensionId: string,
@@ -649,9 +664,12 @@ export const tauriYuukeiClient: YuukeiClient = {
     invoke<WorldPackSwitchResult>("import_world_pack_zip", { path }),
   resetWorldPackToDefault: () =>
     invoke<WorldPackSwitchResult>("reset_world_pack_to_default"),
-  installExtensionDirectory: (path: string) =>
+  inspectExtensionDirectory: (path: string) =>
+    invoke<ExtensionInstallInspection>("inspect_extension_directory", { path }),
+  installExtensionDirectory: (path: string, approvedManifestDigest: string) =>
     invoke<ExtensionSettingsChangeResult>("install_extension_directory", {
       path,
+      approvedManifestDigest,
     }),
   uninstallExtension: (extensionId: string) =>
     invoke<ExtensionSettingsChangeResult>("uninstall_extension", {

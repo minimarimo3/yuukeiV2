@@ -10,12 +10,12 @@ import {
 } from "./appShared";
 import { DaihonDiagnosticsPanel } from "./DaihonDiagnosticsPanel";
 import { EventLogSettingsPanel } from "./EventLogSettingsPanel";
+import { ExtensionConsentDialog } from "./ExtensionConsentDialog";
 import {
   ExtensionSettingsForm,
   ExtensionUsageSection,
 } from "./ExtensionSettingsPanel";
 import { MemorySettingsPanel } from "./MemorySettingsPanel";
-import { ObservationToggle } from "./ObservationToggle";
 import { OnboardingFlow } from "./OnboardingFlow";
 import { OwnedOverlay } from "./OwnedOverlay";
 import {
@@ -24,6 +24,7 @@ import {
   type EventLogPage,
   type EventLogPrivacyCategoryFilter,
   type ExtensionSettingsChangeResult,
+  type ExtensionInstallInspection,
   type ExtensionSettingsState,
   type MemoryEntryKind,
   type MemoryForgetEntry,
@@ -47,7 +48,6 @@ type SettingsCategoryId =
   | "app"
   | "keys"
   | "worldPack"
-  | "observations"
   | "sceneHistory"
   | "eventLog"
   | "memories"
@@ -62,6 +62,11 @@ type SettingsCategory = {
   panelId: string;
   panelClassName?: string;
   content: ReactNode;
+};
+
+type PendingExtensionInstall = {
+  path: string;
+  inspection: ExtensionInstallInspection;
 };
 
 export function App({ client = tauriYuukeiClient }: AppProps) {
@@ -113,6 +118,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   const [changingObservationSettings, setChangingObservationSettings] =
     useState(false);
   const [changingExtensions, setChangingExtensions] = useState(false);
+  const [pendingExtensionInstall, setPendingExtensionInstall] =
+    useState<PendingExtensionInstall | null>(null);
   const [showAllDaihonDiagnostics, setShowAllDaihonDiagnostics] =
     useState(false);
   const [ownedOverlay, setOwnedOverlay] = useState<StageOwnedOverlay | null>(
@@ -366,12 +373,38 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       const path = await client.openExtensionDirectory();
       if (!path) return;
-      applyExtensionResult(await client.installExtensionDirectory(path));
+      const inspection = await client.inspectExtensionDirectory(path);
+      setPendingExtensionInstall({ path, inspection });
     } catch (error) {
       setExtensionError(error instanceof Error ? error.message : String(error));
     } finally {
       setChangingExtensions(false);
     }
+  }
+
+  async function approveExtensionInstall() {
+    if (!pendingExtensionInstall) return;
+    setExtensionError(null);
+    setChangingExtensions(true);
+    try {
+      applyExtensionResult(
+        await client.installExtensionDirectory(
+          pendingExtensionInstall.path,
+          pendingExtensionInstall.inspection.manifestDigest,
+        ),
+      );
+      setPendingExtensionInstall(null);
+    } catch (error) {
+      setExtensionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChangingExtensions(false);
+    }
+  }
+
+  function cancelExtensionInstall() {
+    if (changingExtensions) return;
+    setPendingExtensionInstall(null);
+    setExtensionError(null);
   }
 
   async function toggleExtension(extensionId: string, enabled: boolean) {
@@ -1004,47 +1037,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       ),
     },
     {
-      id: "observations",
-      label: "観測",
-      ariaLabel: "Observation and privacy settings",
-      panelId: "settings-observations-panel",
-      content: (
-        <div className="settings-copy observation-settings">
-          <h2>観測とプライバシー</h2>
-          <p className="settings-title">Desktop Terrain Observation</p>
-          <p className="settings-path">
-            {observationSettings?.settingsPath ?? ""}
-          </p>
-          {observationSettingsError ? (
-            <p className="settings-error">{observationSettingsError}</p>
-          ) : null}
-          <ObservationToggle
-            label="ウィンドウ"
-            description="アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
-            checked={observationSettings?.windows ?? false}
-            disabled={changingObservationSettings}
-            onChange={(checked) => toggleObservationSetting("windows", checked)}
-          />
-          <ObservationToggle
-            label="フォルダ"
-            description="開いた場所の種類だけを記録します(パスは記録しません)"
-            checked={observationSettings?.folders ?? false}
-            disabled={changingObservationSettings}
-            onChange={(checked) => toggleObservationSetting("folders", checked)}
-          />
-          <ObservationToggle
-            label="ダウンロード"
-            description="ファイル名と種類を記録します(場所は記録しません)"
-            checked={observationSettings?.downloads ?? false}
-            disabled={changingObservationSettings}
-            onChange={(checked) =>
-              toggleObservationSetting("downloads", checked)
-            }
-          />
-        </div>
-      ),
-    },
-    {
       id: "eventLog",
       label: "生活の記録",
       ariaLabel: "生活の記録 settings",
@@ -1224,6 +1216,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                       </div>
                     </div>
                     <div className="extension-main">
+                      <p className="settings-note">
+                        権限は追加時に許可したmanifestで固定されています。変更するには、このExtensionを削除して追加し直してください。
+                      </p>
                       {voicevoxCreditText(extension) ? (
                         <p className="extension-credit-note">
                           {voicevoxCreditText(extension)}
@@ -1322,13 +1317,15 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     );
   }
 
+  const settingsBlocked = Boolean(ownedOverlay || pendingExtensionInstall);
+
   return (
     <main className="surface-shell settings-shell" data-status={status}>
       <section
-        aria-hidden={ownedOverlay ? true : undefined}
+        aria-hidden={settingsBlocked ? true : undefined}
         aria-label="Settings"
         className="settings-workspace"
-        inert={ownedOverlay ? true : undefined}
+        inert={settingsBlocked ? true : undefined}
       >
         <aside className="settings-sidebar">
           <div className="settings-sidebar-head">
@@ -1392,6 +1389,14 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               throw error;
             }
           }}
+        />
+      ) : pendingExtensionInstall ? (
+        <ExtensionConsentDialog
+          busy={changingExtensions}
+          error={extensionError}
+          inspection={pendingExtensionInstall.inspection}
+          onApprove={() => void approveExtensionInstall()}
+          onCancel={cancelExtensionInstall}
         />
       ) : null}
     </main>
