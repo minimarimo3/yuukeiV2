@@ -117,7 +117,7 @@ export function EventLogSettingsPanel({
                   <dl className="event-log-meta">
                     <div>
                       <dt>できごと</dt>
-                      <dd>{eventKindLabel(record.kind)}</dd>
+                      <dd>{eventKindLabel(record.type)}</dd>
                     </div>
                     <div>
                       <dt>日時</dt>

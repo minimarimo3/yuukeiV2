@@ -256,7 +256,7 @@ export type EventLogPrivacyCategoryFilter =
 export type EventLogRecord = {
   sequence: number;
   id: string;
-  kind: string;
+  type: string;
   timestamp: string;
   residentId: string;
   source: string;

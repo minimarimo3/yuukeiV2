@@ -223,18 +223,18 @@ function residentMemories(): ResidentMemoryState {
 
 function eventLogRecord(
   sequence: number,
-  kind: string,
+  type: string,
   payload: Record<string, unknown> = { text: "こんにちは" },
 ): EventLogRecord {
   return {
     sequence,
     id: `evt_${sequence}`,
-    kind,
+    type,
     timestamp: `2026-07-0${sequence}T00:00:00.000Z`,
     residentId: "resident-default",
     source: "test",
     payload,
-    privacy: kind.startsWith("desktop.")
+    privacy: type.startsWith("desktop.")
       ? {
           category: "desktop-observation",
           retention: "short",
@@ -939,6 +939,29 @@ describe("App", () => {
     expect(screen.getByText("ダウンロードに気づいた")).toBeInTheDocument();
     expect(screen.getByText("パソコン上の変化から記録")).toBeInTheDocument();
     expect(screen.getByText("住人「おはよう」")).toBeInTheDocument();
+  });
+
+  it("keeps the event log panel visible when a record has no event type", async () => {
+    const recordWithoutType = {
+      ...eventLogRecord(1, "conversation.text"),
+      type: undefined,
+    } as unknown as EventLogRecord;
+    const client = clientFixture({
+      readEventLogPage: vi.fn(async () => eventLogPage([recordWithoutType])),
+    });
+
+    render(<App client={client} />);
+
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "生活の記録" }),
+    );
+
+    expect(
+      await screen.findByText("住人の生活に変化があった"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tabpanel", { name: "生活の記録 settings" }),
+    ).toBeInTheDocument();
   });
 
   it("confirms and deletes event log records before a timestamp", async () => {

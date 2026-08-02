@@ -83,8 +83,8 @@ export function eventLogSummary(record: EventLogRecord): string {
   const payload = record.payload ?? {};
   const text = textValue(payload.text);
   if (text) {
-    if (record.kind === "dialogue.say") return `住人「${text}」`;
-    if (record.kind === "conversation.text") return `あなた「${text}」`;
+    if (record.type === "dialogue.say") return `住人「${text}」`;
+    if (record.type === "conversation.text") return `あなた「${text}」`;
     return text;
   }
   const fileName = textValue(payload.fileName);
@@ -99,7 +99,10 @@ export function eventLogSummary(record: EventLogRecord): string {
   return "住人の生活に関するできごとです";
 }
 
-export function eventKindLabel(kind: string): string {
+export function eventKindLabel(kind: unknown): string {
+  if (typeof kind !== "string" || !kind) {
+    return "住人の生活に変化があった";
+  }
   const exact: Record<string, string> = {
     "desktop.download.completed": "ダウンロードに気づいた",
     "conversation.text": "あなたが話しかけた",
