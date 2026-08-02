@@ -45,16 +45,15 @@ export function ExtensionConsentDialog({
         role="dialog"
       >
         <header>
-          <p className="settings-eyebrow">Extensionの権限確認</p>
+          <p className="settings-eyebrow">追加機能の確認</p>
           <h2 id="extension-consent-title">{inspection.displayName}</h2>
-          <p className="settings-path">{inspection.extensionId}</p>
         </header>
 
         <p className="extension-consent-warning">
-          {inspection.trustedCodeNotice}
+          この機能はパソコン上で動作します。入手元が信頼できる場合だけ追加してください。
         </p>
         <p>
-          許可すると、このmanifestの内容を固定してExtensionをロードします。権限は後から変更できません。変更する場合はExtensionを削除し、もう一度追加してください。
+          下の情報や操作を利用できるようになります。利用できる内容が変更された場合は、安全のため自動では有効になりません。
         </p>
 
         {rows.length > 0 ? (
@@ -75,7 +74,7 @@ export function ExtensionConsentDialog({
             ))}
           </dl>
         ) : (
-          <p className="settings-note">manifest上の追加権限はありません。</p>
+          <p className="settings-note">追加の情報や操作は必要ありません。</p>
         )}
 
         {error ? <p className="settings-error">{error}</p> : null}

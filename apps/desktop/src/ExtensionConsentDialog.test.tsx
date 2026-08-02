@@ -44,9 +44,10 @@ describe("ExtensionConsentDialog", () => {
 
     expect(
       screen.getByRole("dialog", { name: "Desktop Friend" }),
-    ).toHaveTextContent("権限は後から変更できません");
-    expect(screen.getByText(inspection.trustedCodeNotice)).toBeInTheDocument();
-    expect(screen.getByText("全イベントを受け取ります")).toBeInTheDocument();
+    ).toHaveTextContent("入手元が信頼できる場合だけ追加してください");
+    expect(
+      screen.getByText("住人の生活で起きたすべてのできごとを受け取ります"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "許可しない" })).toHaveFocus();
   });
 

@@ -41,19 +41,19 @@ export function MemorySettingsPanel({
   return (
     <>
       <div className="settings-copy memory-copy">
-        <h2>記憶</h2>
-        <p className="settings-title">派生記憶</p>
+        <h2>住人の記憶</h2>
+        <p className="settings-title">住人が覚えていること</p>
         <p className="settings-note">
-          facts は編集できます。episodes は出来事の記録として削除のみできます。
+          あなたの好みなどの長く覚えていることは編集できます。思い出は内容を変えず、忘れさせることだけができます。
         </p>
         {memoryError ? <p className="settings-error">{memoryError}</p> : null}
         {!memoryError && !loading && !hasMemory ? (
           <p className="settings-note">まだ記憶がありません。</p>
         ) : null}
 
-        <section className="memory-section" aria-label="facts">
+        <section className="memory-section" aria-label="長く覚えていること">
           <div className="memory-section-head">
-            <h3>facts</h3>
+            <h3>長く覚えていること</h3>
             <span>{facts.length}</span>
           </div>
           <div className="memory-list">
@@ -63,7 +63,7 @@ export function MemorySettingsPanel({
                 <article className="memory-row" key={fact.id}>
                   {editing ? (
                     <textarea
-                      aria-label={`fact ${fact.id}`}
+                      aria-label="覚えていることを編集"
                       value={editingFactText}
                       maxLength={500}
                       onChange={(event) =>
@@ -123,9 +123,9 @@ export function MemorySettingsPanel({
           </div>
         </section>
 
-        <section className="memory-section" aria-label="episodes">
+        <section className="memory-section" aria-label="最近の思い出">
           <div className="memory-section-head">
-            <h3>episodes</h3>
+            <h3>最近の思い出</h3>
             <span>
               {episodes.length}/{episodeTotal}
             </span>

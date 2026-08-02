@@ -1,5 +1,6 @@
 import type { ExtensionSettingField } from "@yuukei/protocol";
 import { useEffect, useState } from "react";
+import { capabilityLabel } from "./appShared";
 import type {
   ExtensionCapabilityUsage,
   ExtensionSettingsChangeResult,
@@ -31,16 +32,16 @@ export function ExtensionUsageSection({ usage }: ExtensionUsageSectionProps) {
   }
 
   return (
-    <section
-      className="extension-usage"
-      aria-label={`${usage?.extensionId ?? "extension"} token usage`}
-    >
-      <h3>トークン使用量</h3>
+    <section className="extension-usage" aria-label="AIの利用状況">
+      <h3>AIの利用状況</h3>
+      <p className="settings-note">
+        AIへ何回お願いしたかと、処理した文章量の目安です。
+      </p>
       <div className="extension-usage-table">
         <div className="extension-usage-row extension-usage-head">
-          <span>capability / model</span>
-          <span>全期間</span>
-          <span>直近7日</span>
+          <span>利用した機能</span>
+          <span>これまで</span>
+          <span>最近7日間</span>
         </div>
         {rows.map((row) => (
           <div
@@ -48,10 +49,7 @@ export function ExtensionUsageSection({ usage }: ExtensionUsageSectionProps) {
             key={`${row.capability}:${row.provider}:${row.model}`}
           >
             <span>
-              <strong>{row.capability}</strong>
-              <small>
-                {row.provider} / {row.model}
-              </small>
+              <strong>{capabilityLabel(row.capability)}</strong>
             </span>
             <TokenUsageTotalsView totals={row.allTime} />
             <TokenUsageTotalsView totals={row.last7Days} />
@@ -73,9 +71,9 @@ export type TokenUsageTotalsViewProps = {
 export function TokenUsageTotalsView({ totals }: TokenUsageTotalsViewProps) {
   return (
     <span className="extension-usage-totals">
-      <span>リクエスト {formatNumber(totals.requests)}</span>
-      <span>入力 {formatNumber(totals.inputTokens)}</span>
-      <span>出力 {formatNumber(totals.outputTokens)}</span>
+      <span>{formatNumber(totals.requests)}回</span>
+      <span>読んだ文章量 {formatNumber(totals.inputTokens)}</span>
+      <span>作った文章量 {formatNumber(totals.outputTokens)}</span>
     </span>
   );
 }
@@ -146,8 +144,10 @@ export function ExtensionSettingsForm({
       setSecretDraft({});
       setDirtyKeys(new Set());
       onResult(result);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+    } catch {
+      setError(
+        "設定を保存できませんでした。入力内容を確認して、もう一度お試しください。",
+      );
     } finally {
       setSaving(false);
     }
@@ -164,8 +164,10 @@ export function ExtensionSettingsForm({
       );
       setSecretDraft((current) => ({ ...current, [key]: "" }));
       onResult(result);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : String(error));
+    } catch {
+      setError(
+        "入力済みの内容を削除できませんでした。もう一度お試しください。",
+      );
     } finally {
       setSaving(false);
     }
@@ -174,7 +176,7 @@ export function ExtensionSettingsForm({
   return (
     <section
       className="extension-settings-form"
-      aria-label={`${extension.displayName} settings`}
+      aria-label={`${extension.displayName}の設定`}
     >
       {visibleFields.map((field) => (
         <ExtensionSettingControl
@@ -291,7 +293,7 @@ export function ExtensionSettingControl({
             id={id}
             type="password"
             value={secretValue}
-            placeholder={secretSet ? "設定済み" : ""}
+            placeholder={secretSet ? "入力済み（内容は表示しません）" : ""}
             disabled={disabled}
             onChange={(event) => onSecretChange(event.currentTarget.value)}
           />
@@ -302,7 +304,7 @@ export function ExtensionSettingControl({
               disabled={disabled}
               onClick={onSecretClear}
             >
-              クリア
+              入力内容を削除
             </button>
           ) : null}
         </span>

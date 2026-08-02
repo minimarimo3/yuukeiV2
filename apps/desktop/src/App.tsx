@@ -23,8 +23,8 @@ import {
   type CapabilityUsageState,
   type EventLogPage,
   type EventLogPrivacyCategoryFilter,
-  type ExtensionSettingsChangeResult,
   type ExtensionInstallInspection,
+  type ExtensionSettingsChangeResult,
   type ExtensionSettingsState,
   type MemoryEntryKind,
   type MemoryForgetEntry,
@@ -67,6 +67,17 @@ type SettingsCategory = {
 type PendingExtensionInstall = {
   path: string;
   inspection: ExtensionInstallInspection;
+};
+
+type TalkFrequencyPreset = "quiet" | "normal" | "chatty";
+
+const TALK_FREQUENCY_PRESETS: Record<
+  TalkFrequencyPreset,
+  { low: number; high: number }
+> = {
+  quiet: { low: 45, high: 90 },
+  normal: { low: 30, high: 80 },
+  chatty: { low: 15, high: 65 },
 };
 
 export function App({ client = tauriYuukeiClient }: AppProps) {
@@ -282,7 +293,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           : next,
       );
     } catch (error) {
-      setEventLogError(error instanceof Error ? error.message : String(error));
+      setEventLogError(
+        userFacingError(
+          error,
+          "生活の記録を操作できませんでした。もう一度お試しください。",
+        ),
+      );
       if (!append) {
         setEventLogPage(null);
       }
@@ -302,7 +318,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setStatus("ready");
       void loadMemories();
     } catch (error) {
-      setWorldPackError(error instanceof Error ? error.message : String(error));
+      setWorldPackError(
+        userFacingError(
+          error,
+          "選んだ住人と世界を読み込めませんでした。必要なファイルが揃っているか確認してください。",
+        ),
+      );
       try {
         setWorldPackStatus(await client.getWorldPackStatus());
       } catch {
@@ -324,10 +345,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         inspection.licenseText?.trim() ||
         "ライセンス表記が見つかりませんでした。配布元の条件を確認してください。";
       const replaceNotice = inspection.replacesExisting
-        ? "\n\n同じpackIdのインポート済みPackがあります。続行すると置き換えます。"
+        ? "\n\n同じ住人と世界がすでに追加されています。続けると新しい内容に置き換わります。"
         : "";
       const confirmed = window.confirm(
-        `このWorld Packの配布条件\n\n${inspection.displayName} (${inspection.packId})\n${inspection.licenseSource ?? "ライセンス表記なし"}\n\n${licenseText}${replaceNotice}\n\nこのWorld Packを読み込みますか？`,
+        `配布条件の確認\n\n${inspection.displayName}\n${inspection.licenseSource ?? "配布条件の記載なし"}\n\n${licenseText}${replaceNotice}\n\nこの住人と世界を追加しますか？`,
       );
       if (!confirmed) return;
       const result = await client.importWorldPackZip(path);
@@ -335,7 +356,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setStatus("ready");
       void loadMemories();
     } catch (error) {
-      setWorldPackError(error instanceof Error ? error.message : String(error));
+      setWorldPackError(
+        userFacingError(
+          error,
+          "配布ファイルを読み込めませんでした。ファイルが壊れていないか確認してください。",
+        ),
+      );
       try {
         setWorldPackStatus(await client.getWorldPackStatus());
       } catch {
@@ -355,7 +381,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setStatus("ready");
       void loadMemories();
     } catch (error) {
-      setWorldPackError(error instanceof Error ? error.message : String(error));
+      setWorldPackError(
+        userFacingError(error, "標準の内容に戻せませんでした。"),
+      );
     } finally {
       setSwitchingPack(false);
     }
@@ -376,7 +404,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       const inspection = await client.inspectExtensionDirectory(path);
       setPendingExtensionInstall({ path, inspection });
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -395,7 +428,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       );
       setPendingExtensionInstall(null);
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -415,7 +453,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         await client.setExtensionEnabled(extensionId, enabled),
       );
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -427,7 +470,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       applyExtensionResult(await client.uninstallExtension(extensionId));
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -439,7 +487,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setExtensionState(await client.restartExtensionProcess(extensionId));
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -465,7 +518,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
         await client.setExtensionHookOrder("beforeCommandEmit", nextOrder),
       );
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -477,7 +535,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setCapabilityUsage(await client.getCapabilityUsage());
     } catch (error) {
-      setExtensionError(error instanceof Error ? error.message : String(error));
+      setExtensionError(
+        userFacingError(
+          error,
+          "追加機能を変更できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setChangingExtensions(false);
     }
@@ -526,15 +589,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       | "talkDesireHigh",
     value: number,
   ) {
-    const current =
-      runtimeSettings ??
-      ({
-        llmTimeoutMs: 30_000,
-        recentContextCount: 20,
-        talkDesireLow: 30,
-        talkDesireHigh: 80,
-        settingsPath: "",
-      } satisfies RuntimeSettingsState);
+    const current = runtimeSettings ?? defaultRuntimeSettings();
     const next = {
       llmTimeoutMs:
         key === "llmTimeoutMs"
@@ -563,10 +618,30 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     }
   }
 
+  async function saveTalkFrequency(preset: TalkFrequencyPreset) {
+    const current = runtimeSettings ?? defaultRuntimeSettings();
+    const thresholds = TALK_FREQUENCY_PRESETS[preset];
+    setAppSettingsError(null);
+    try {
+      setRuntimeSettings(
+        await client.setRuntimeSettings({
+          llmTimeoutMs: current.llmTimeoutMs,
+          recentContextCount: current.recentContextCount,
+          talkDesireLow: thresholds.low,
+          talkDesireHigh: thresholds.high,
+        }),
+      );
+    } catch (error) {
+      setAppSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   async function resetSceneHistory() {
     if (
       !window.confirm(
-        "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？",
+        "この住人の物語の進み具合を最初に戻します。この操作は取り消せません。続けますか？",
       )
     ) {
       return;
@@ -575,7 +650,9 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     try {
       setSceneHistory(await client.resetSceneHistory());
     } catch (error) {
-      setWorldPackError(error instanceof Error ? error.message : String(error));
+      setWorldPackError(
+        userFacingError(error, "物語の進み具合を元に戻せませんでした。"),
+      );
     }
   }
 
@@ -602,7 +679,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       setObservationSettings(await client.setObservationSettings(next));
     } catch (error) {
       setObservationSettingsError(
-        error instanceof Error ? error.message : String(error),
+        userFacingError(
+          error,
+          "プライバシー設定を保存できませんでした。もう一度お試しください。",
+        ),
       );
     } finally {
       setChangingObservationSettings(false);
@@ -694,11 +774,23 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     setLoadingEventLog(true);
     try {
       const count = await client.countEventLogDeleteBefore(timestamp);
-      if (!confirmEventLogDeletion(`${timestamp}より前`, count)) return;
+      if (
+        !confirmEventLogDeletion(
+          `${new Date(timestamp).toLocaleString("ja-JP")}より前の記録`,
+          count,
+        )
+      ) {
+        return;
+      }
       await client.deleteEventLogBefore(timestamp);
       await loadEventLog();
     } catch (error) {
-      setEventLogError(error instanceof Error ? error.message : String(error));
+      setEventLogError(
+        userFacingError(
+          error,
+          "生活の記録を操作できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setLoadingEventLog(false);
     }
@@ -707,19 +799,24 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
   async function deleteEventLogByKindPrefix() {
     const prefix = eventLogDeletePrefix.trim();
     if (!prefix) {
-      setEventLogError("種類の前方一致を入力してください。");
+      setEventLogError("削除するできごとを選んでください。");
       return;
     }
     setLoadingEventLog(true);
     try {
       const count = await client.countEventLogDeleteByKindPrefix(prefix);
-      if (!confirmEventLogDeletion(`種類が「${prefix}」で始まる記録`, count)) {
+      if (!confirmEventLogDeletion(eventLogGroupLabel(prefix), count)) {
         return;
       }
       await client.deleteEventLogByKindPrefix(prefix);
       await loadEventLog();
     } catch (error) {
-      setEventLogError(error instanceof Error ? error.message : String(error));
+      setEventLogError(
+        userFacingError(
+          error,
+          "生活の記録を操作できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setLoadingEventLog(false);
     }
@@ -733,7 +830,12 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
       await client.deleteEventLogAll();
       await loadEventLog();
     } catch (error) {
-      setEventLogError(error instanceof Error ? error.message : String(error));
+      setEventLogError(
+        userFacingError(
+          error,
+          "生活の記録を操作できませんでした。もう一度お試しください。",
+        ),
+      );
     } finally {
       setLoadingEventLog(false);
     }
@@ -741,23 +843,23 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
 
   function confirmEventLogDeletion(label: string, count: number) {
     return window.confirm(
-      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\n住人の記憶(要約)には残っている場合があります。記憶は『記憶』タブから個別に忘れさせられます。\n\n続けますか？`,
+      `${label}を削除します。\n\n削除予定: ${count}件\nこの操作は取り消せません。\nここで履歴を消しても、住人が別に覚えている内容は残る場合があります。『住人の記憶』から個別に忘れさせられます。\n\n続けますか？`,
     );
   }
 
   const settingsCategories: SettingsCategory[] = [
     {
       id: "app",
-      label: "App",
-      ariaLabel: "App settings",
+      label: "基本設定",
+      ariaLabel: "基本設定",
       panelId: "settings-app-panel",
       content: (
         <>
           <div className="settings-copy app-settings-copy">
-            <h2>App</h2>
-            <p className="settings-title">おしゃべりの間隔</p>
+            <h2>基本設定</h2>
+            <p className="settings-title">住人のようす</p>
             <p className="settings-note">
-              分単位で設定します。0分で話さなくなります。
+              デスクトップでの見え方や、住人から話しかける頻度を変えられます。
             </p>
             <label
               className="app-setting-field"
@@ -765,19 +867,24 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             >
               <span>
                 <strong>おしゃべりの間隔</strong>
-                <small>{appSettings?.settingsPath ?? ""}</small>
+                <small>
+                  何分おきに話しかけるかの目安です。0にすると、住人からは話しかけません。
+                </small>
               </span>
-              <input
-                id="talk-interval-minutes"
-                type="number"
-                min={0}
-                step={1}
-                value={appSettings?.talkIntervalMinutes ?? 5}
-                onChange={(event) => {
-                  const value = Number(event.currentTarget.value);
-                  void saveTalkInterval(Number.isFinite(value) ? value : 0);
-                }}
-              />
+              <span className="number-setting-control">
+                <input
+                  id="talk-interval-minutes"
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={appSettings?.talkIntervalMinutes ?? 5}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    void saveTalkInterval(Number.isFinite(value) ? value : 0);
+                  }}
+                />
+                <span aria-hidden="true">分</span>
+              </span>
             </label>
             <label className="app-setting-field" htmlFor="actor-scale-percent">
               <span>
@@ -811,10 +918,10 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 <strong>ログイン時に自動起動</strong>
                 <small>
                   {autostartCanEnable
-                    ? "このデバイスにログインしたとき、Yuukeiを起動します。"
+                    ? "このパソコンにログインしたとき、Yuukeiを起動します。"
                     : autostartEnabled
-                      ? "開発版からの新規登録はできません。OFFにしてbuild版から設定し直してください。"
-                      : "開発版では利用できません。build版から設定してください。"}
+                      ? "このバージョンでは新しく設定できませんが、現在の設定は解除できます。"
+                      : "このバージョンでは自動起動を設定できません。インストール済みのYuukeiから設定してください。"}
                 </small>
               </span>
               <input
@@ -827,35 +934,42 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 }}
               />
             </label>
-            <p className="settings-title">AI呼び出し</p>
+            <p className="settings-title">会話のしかた</p>
             <p className="settings-note">
-              台本や会話補完で使うAI待ち時間と、直近文脈の件数です。
+              返事を待つ長さと、会話をどこまで振り返るかを調整できます。迷ったときは初期値のままで大丈夫です。
             </p>
             <label className="app-setting-field" htmlFor="llm-timeout-ms">
               <span>
-                <strong>AI待ち時間</strong>
-                <small>1000〜300000ミリ秒に丸められます。</small>
+                <strong>返事を待つ時間</strong>
+                <small>
+                  時間を過ぎると、住人は会話を待たずに生活を続けます。
+                </small>
               </span>
-              <input
-                id="llm-timeout-ms"
-                type="number"
-                min={1000}
-                max={300000}
-                step={1000}
-                value={runtimeSettings?.llmTimeoutMs ?? 30000}
-                onChange={(event) => {
-                  const value = Number(event.currentTarget.value);
-                  void saveRuntimeSettings(
-                    "llmTimeoutMs",
-                    Number.isFinite(value) ? value : 30000,
-                  );
-                }}
-              />
+              <span className="number-setting-control">
+                <input
+                  id="llm-timeout-ms"
+                  type="number"
+                  min={1}
+                  max={300}
+                  step={1}
+                  value={(runtimeSettings?.llmTimeoutMs ?? 30000) / 1000}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    void saveRuntimeSettings(
+                      "llmTimeoutMs",
+                      Number.isFinite(value) ? value * 1000 : 30000,
+                    );
+                  }}
+                />
+                <span aria-hidden="true">秒</span>
+              </span>
             </label>
             <label className="app-setting-field" htmlFor="recent-context-count">
               <span>
-                <strong>直近文脈の件数</strong>
-                <small>{runtimeSettings?.settingsPath ?? ""}</small>
+                <strong>会話を振り返る長さ</strong>
+                <small>
+                  最近のやりとりを何件まで参考にするかを決めます。多いほど前の話を踏まえやすくなります。
+                </small>
               </span>
               <input
                 id="recent-context-count"
@@ -873,54 +987,32 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 }}
               />
             </label>
-            <p className="settings-title">気分の話しかけやすさ</p>
-            <p className="settings-note">
-              低い値未満では話しかけを控え、高い値以上では気分変化で話しかけます。
-            </p>
-            <label className="app-setting-field" htmlFor="talk-desire-low">
+            <label className="app-setting-field" htmlFor="talk-frequency">
               <span>
-                <strong>話したい度: 低</strong>
-                <small>0〜100。高より小さく丸められます。</small>
+                <strong>話しかける頻度</strong>
+                <small>住人が気分の変化をきっかけに話しかける頻度です。</small>
               </span>
-              <input
-                id="talk-desire-low"
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                value={runtimeSettings?.talkDesireLow ?? 30}
+              <select
+                id="talk-frequency"
+                value={talkFrequencyPreset(runtimeSettings)}
                 onChange={(event) => {
-                  const value = Number(event.currentTarget.value);
-                  void saveRuntimeSettings(
-                    "talkDesireLow",
-                    Number.isFinite(value) ? value : 30,
+                  void saveTalkFrequency(
+                    event.currentTarget.value as TalkFrequencyPreset,
                   );
                 }}
-              />
-            </label>
-            <label className="app-setting-field" htmlFor="talk-desire-high">
-              <span>
-                <strong>話したい度: 高</strong>
-                <small>0〜100。低より大きく丸められます。</small>
-              </span>
-              <input
-                id="talk-desire-high"
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                value={runtimeSettings?.talkDesireHigh ?? 80}
-                onChange={(event) => {
-                  const value = Number(event.currentTarget.value);
-                  void saveRuntimeSettings(
-                    "talkDesireHigh",
-                    Number.isFinite(value) ? value : 80,
-                  );
-                }}
-              />
+              >
+                <option value="quiet">ひかえめ</option>
+                <option value="normal">ふつう</option>
+                <option value="chatty">よく話す</option>
+              </select>
             </label>
             {appSettingsError ? (
-              <p className="settings-error">{appSettingsError}</p>
+              <p className="settings-error">
+                {userFacingError(
+                  appSettingsError,
+                  "設定を保存できませんでした。もう一度お試しください。",
+                )}
+              </p>
             ) : null}
           </div>
         </>
@@ -928,8 +1020,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     },
     {
       id: "worldPack",
-      label: "World Pack",
-      ariaLabel: "World Pack settings",
+      label: "住人と世界",
+      ariaLabel: "住人と世界の設定",
       panelId: "settings-world-pack-panel",
       panelClassName: "world-pack-panel",
       content: (
@@ -937,19 +1029,23 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <div className="settings-copy">
             <p className="settings-section-label">現在使用中</p>
             <p className="settings-title">
-              {worldPackStatus?.activeInstall.displayName ?? "loading"}
+              {worldPackStatus?.activeInstall.displayName ?? "読み込み中"}
             </p>
-            <p className="settings-path">
-              {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
+            <p className="settings-note">
+              住人の見た目、性格、台詞や暮らし方がひとまとまりになっています。
             </p>
             {worldPackStatus?.fallbackActive ? (
               <p className="settings-error">
-                保存済み Pack を読み込めませんでした:{" "}
-                {worldPackStatus.lastLoadError ?? "unknown error"}
+                前回選んだ住人と世界を読み込めなかったため、標準の内容を表示しています。もう一度選び直してください。
               </p>
             ) : null}
             {worldPackError ? (
-              <p className="settings-error">{worldPackError}</p>
+              <p className="settings-error">
+                {userFacingError(
+                  worldPackError,
+                  "住人と世界を変更できませんでした。もう一度お試しください。",
+                )}
+              </p>
             ) : null}
             <DaihonDiagnosticsPanel
               diagnostics={worldPackStatus?.daihonDiagnostics ?? []}
@@ -965,7 +1061,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               onClick={chooseWorldPack}
               disabled={switchingPack}
             >
-              フォルダを選択
+              別の住人と世界を選ぶ
             </button>
             <button
               type="button"
@@ -973,7 +1069,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               onClick={importWorldPackZip}
               disabled={switchingPack}
             >
-              zipから読み込む
+              配布ファイルから追加
             </button>
             <button
               type="button"
@@ -989,14 +1085,16 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     },
     {
       id: "sceneHistory",
-      label: "シーン履歴",
-      ariaLabel: "Scene history settings",
+      label: "物語の進み具合",
+      ariaLabel: "物語の進み具合",
       panelId: "settings-scene-history-panel",
       panelClassName: "scene-history-panel",
       content: (
         <div className="settings-copy">
-          <p className="settings-title">このWorld Packの実行履歴</p>
-          <p className="settings-path">{sceneHistory?.historyPath ?? ""}</p>
+          <p className="settings-title">これまでに進んだ場面</p>
+          <p className="settings-note">
+            一度きりの場面など、住人との物語がどこまで進んだかを確認できます。
+          </p>
           {sceneHistory?.entries.length ? (
             <section className="scene-history-list" aria-label="シーン実行履歴">
               {sceneHistory.entries.map((entry) => (
@@ -1006,7 +1104,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                 >
                   <div className="scene-history-main">
                     <strong>{entry.sceneName}</strong>
-                    <small>合図: {entry.eventName}</small>
+                    <small>最後に進んだ日時</small>
                   </div>
                   <time dateTime={entry.lastExecutedAt}>
                     {new Date(entry.lastExecutedAt).toLocaleString()}
@@ -1018,19 +1116,24 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
             <p className="settings-note">まだ記録されたシーンはありません。</p>
           )}
           {worldPackError ? (
-            <p className="settings-error">{worldPackError}</p>
+            <p className="settings-error">
+              {userFacingError(
+                worldPackError,
+                "住人と世界を変更できませんでした。もう一度お試しください。",
+              )}
+            </p>
           ) : null}
           <div className="danger-zone">
             <div>
-              <strong>履歴をリセット</strong>
-              <p>このWorld Packのシーン実行履歴をすべて削除します。</p>
+              <strong>物語を最初から始める</strong>
+              <p>ここに表示されている進み具合をすべて元に戻します。</p>
             </div>
             <button
               type="button"
               className="danger-button"
               onClick={resetSceneHistory}
             >
-              全リセット
+              最初に戻す
             </button>
           </div>
         </div>
@@ -1068,8 +1171,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     },
     {
       id: "memories",
-      label: "記憶",
-      ariaLabel: "記憶 settings",
+      label: "住人の記憶",
+      ariaLabel: "住人の記憶",
       panelId: "settings-memories-panel",
       panelClassName: "memory-panel",
       content: (
@@ -1095,8 +1198,8 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     },
     {
       id: "extensions",
-      label: "Extensions",
-      ariaLabel: "Extension settings",
+      label: "追加機能",
+      ariaLabel: "追加機能の設定",
       panelId: "settings-extensions-panel",
       panelClassName: "extension-panel",
       content: (
@@ -1104,17 +1207,19 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
           <div className="settings-copy">
             <p className="settings-title">
               {extensionState
-                ? `${extensionState.installed.length}件のExtensionをインストール済み`
+                ? `${extensionState.installed.length}件の追加機能を利用できます`
                 : "読み込み中"}
             </p>
-            <p className="settings-path">
-              {extensionState?.extensionRoot ?? ""}
-            </p>
             <p className="settings-note">
-              {extensionState?.trustedCodeNotice ?? ""}
+              声や会話などの機能を追加できます。追加元が信頼できることを確認してから利用してください。
             </p>
             {extensionError ? (
-              <p className="settings-error">{extensionError}</p>
+              <p className="settings-error">
+                {userFacingError(
+                  extensionError,
+                  "追加機能を変更できませんでした。もう一度お試しください。",
+                )}
+              </p>
             ) : null}
             <div className="extension-list">
               {orderedExtensions.map((extension) => {
@@ -1136,7 +1241,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                       <label className="extension-toggle">
                         <input
                           type="checkbox"
-                          aria-label={`${extension.displayName} ${extension.extensionId}`}
+                          aria-label={extension.displayName}
                           checked={extension.enabled}
                           disabled={changingExtensions}
                           onChange={(event) =>
@@ -1148,7 +1253,6 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                         />
                         <span>
                           <strong>{extension.displayName}</strong>
-                          <small>{extension.extensionId}</small>
                           <small
                             className={[
                               "extension-runtime-status",
@@ -1217,7 +1321,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                     </div>
                     <div className="extension-main">
                       <p className="settings-note">
-                        権限は追加時に許可したmanifestで固定されています。変更するには、このExtensionを削除して追加し直してください。
+                        この機能が利用できる情報は、追加したときに確認した内容から変わりません。変更された場合は、いったん削除して追加し直してください。
                       </p>
                       {voicevoxCreditText(extension) ? (
                         <p className="extension-credit-note">
@@ -1254,7 +1358,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
                     </div>
                     {extension.lastLoadError ? (
                       <p className="settings-error">
-                        {extension.lastLoadError}
+                        この追加機能を読み込めませんでした。いったん削除し、配布元の案内を確認してから追加し直してください。
                       </p>
                     ) : null}
                   </article>
@@ -1268,7 +1372,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
               onClick={chooseExtension}
               disabled={changingExtensions}
             >
-              追加
+              追加機能を選ぶ
             </button>
             <button
               type="button"
@@ -1323,7 +1427,7 @@ export function App({ client = tauriYuukeiClient }: AppProps) {
     <main className="surface-shell settings-shell" data-status={status}>
       <section
         aria-hidden={settingsBlocked ? true : undefined}
-        aria-label="Settings"
+        aria-label="設定"
         className="settings-workspace"
         inert={settingsBlocked ? true : undefined}
       >
@@ -1411,4 +1515,55 @@ function latestOwnedOverlay(
       (left, right) => right.createdAtMs - left.createdAtMs,
     )[0] ?? null
   );
+}
+
+function defaultRuntimeSettings(): RuntimeSettingsState {
+  return {
+    llmTimeoutMs: 30_000,
+    recentContextCount: 20,
+    talkDesireLow: 30,
+    talkDesireHigh: 80,
+    settingsPath: "",
+  };
+}
+
+function talkFrequencyPreset(
+  settings: RuntimeSettingsState | null,
+): TalkFrequencyPreset {
+  const current = settings ?? defaultRuntimeSettings();
+  return (
+    Object.entries(TALK_FREQUENCY_PRESETS) as Array<
+      [TalkFrequencyPreset, { low: number; high: number }]
+    >
+  ).reduce((closest, candidate) => {
+    const closestValues = TALK_FREQUENCY_PRESETS[closest];
+    const closestDistance =
+      Math.abs(current.talkDesireLow - closestValues.low) +
+      Math.abs(current.talkDesireHigh - closestValues.high);
+    const candidateDistance =
+      Math.abs(current.talkDesireLow - candidate[1].low) +
+      Math.abs(current.talkDesireHigh - candidate[1].high);
+    return candidateDistance < closestDistance ? candidate[0] : closest;
+  }, "normal" as TalkFrequencyPreset);
+}
+
+function eventLogGroupLabel(prefix: string): string {
+  const labels: Record<string, string> = {
+    "conversation.": "あなたからの会話の記録",
+    "dialogue.": "住人からの会話の記録",
+    "desktop.": "パソコン上で気づいたことの記録",
+    "presence.": "住人の日々のようすの記録",
+    "memory.": "記憶の変化の記録",
+    "scene.": "物語の進行の記録",
+  };
+  return labels[prefix] ?? "選んだ生活の記録";
+}
+
+function userFacingError(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const looksTechnical =
+    /(?:\.json|manifest|protocol|capability|extension|world.?pack|failed|invalid|missing|unknown|timeout|[\\/][^ ]+)/i.test(
+      message,
+    );
+  return message.trim() && !looksTechnical ? message : fallback;
 }

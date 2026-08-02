@@ -19,9 +19,9 @@ export function DaihonDiagnosticsPanel({
   const visibleDiagnostics = collapsed ? diagnostics.slice(0, 4) : diagnostics;
 
   return (
-    <section className="daihon-diagnostics" aria-label="Daihon errors">
+    <section className="daihon-diagnostics" aria-label="読み込みの問題">
       <div className="daihon-diagnostics-head">
-        <h3>Daihon エラー {diagnostics.length}件</h3>
+        <h3>読み込めなかった内容 {diagnostics.length}件</h3>
         {diagnostics.length >= 5 ? (
           <button type="button" onClick={onToggle}>
             {expanded ? "折りたたむ" : "すべて表示"}
@@ -41,21 +41,8 @@ export function DaihonDiagnosticsPanel({
               index,
             ].join(":")}
           >
-            <div className="daihon-diagnostic-meta">
-              <span>{daihonPhaseLabel(diagnostic.phase)}</span>
-              <span>{daihonLocationLabel(diagnostic)}</span>
-            </div>
-            <strong>{diagnostic.message}</strong>
-            <small>{diagnostic.code}</small>
-            {diagnostic.help ? <p>{diagnostic.help}</p> : null}
-            {diagnostic.sourceEventType ? (
-              <small>
-                {diagnostic.sourceEventType}
-                {diagnostic.sourceEventId
-                  ? ` / ${diagnostic.sourceEventId}`
-                  : ""}
-              </small>
-            ) : null}
+            <strong>{daihonPhaseLabel(diagnostic.phase)}</strong>
+            <p>配布元の案内を確認するか、別の住人と世界を選んでください。</p>
           </li>
         ))}
       </ol>
@@ -66,25 +53,14 @@ export function DaihonDiagnosticsPanel({
 function daihonPhaseLabel(phase: DaihonDiagnosticEntry["phase"]): string {
   switch (phase) {
     case "loadParse":
-      return "ロード/構文";
+      return "台詞や動きの書き方に問題があります";
     case "loadValidate":
-      return "ロード/検証";
+      return "内容を確認できませんでした";
     case "loadSpeaker":
-      return "ロード/話者";
+      return "話す住人を確認できませんでした";
     case "runtimeValidate":
-      return "実行/検証";
+      return "場面を始められませんでした";
     case "runtimeExecute":
-      return "実行";
+      return "場面の途中で問題が起きました";
   }
-}
-
-function daihonLocationLabel(diagnostic: DaihonDiagnosticEntry): string {
-  const path = diagnostic.scriptPath ?? diagnostic.packRoot ?? "unknown";
-  if (diagnostic.line && diagnostic.column) {
-    return `${path}:${diagnostic.line}:${diagnostic.column}`;
-  }
-  if (diagnostic.line) {
-    return `${path}:${diagnostic.line}`;
-  }
-  return path;
 }

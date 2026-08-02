@@ -1,4 +1,9 @@
-import { eventLogSummary, formatEventLogTimestamp } from "./appShared";
+import {
+  eventKindLabel,
+  eventLogSummary,
+  eventPrivacyLabel,
+  formatEventLogTimestamp,
+} from "./appShared";
 import type {
   EventLogPage,
   EventLogPrivacyCategoryFilter,
@@ -52,7 +57,7 @@ export function EventLogSettingsPanel({
             <div>
               <h3>生活の記録</h3>
               <p className="settings-note">
-                保存されているイベントの種類と内容を確認できます。
+                住人との会話や、住人が気づいたことを確認できます。難しいデータ形式は表示しません。
               </p>
             </div>
             <span>
@@ -64,18 +69,24 @@ export function EventLogSettingsPanel({
           {error ? <p className="settings-error">{error}</p> : null}
           <div className="event-log-filters">
             <label>
-              <span>種類</span>
-              <input
-                type="text"
+              <span>表示するできごと</span>
+              <select
                 value={kindPrefix}
-                placeholder="desktop."
                 onChange={(event) =>
                   onKindPrefixChange(event.currentTarget.value)
                 }
-              />
+              >
+                <option value="">すべて</option>
+                <option value="conversation.">あなたからの会話</option>
+                <option value="dialogue.">住人からの会話</option>
+                <option value="desktop.">パソコン上で気づいたこと</option>
+                <option value="presence.">住人の日々のようす</option>
+                <option value="memory.">記憶の変化</option>
+                <option value="scene.">物語の進行</option>
+              </select>
             </label>
             <label>
-              <span>プライバシー</span>
+              <span>記録のきっかけ</span>
               <select
                 value={privacyFilter}
                 onChange={(event) =>
@@ -85,8 +96,8 @@ export function EventLogSettingsPanel({
                 }
               >
                 <option value="all">すべて</option>
-                <option value="desktopObservation">端末の観測</option>
-                <option value="none">なし</option>
+                <option value="desktopObservation">パソコン上の変化</option>
+                <option value="none">住人とのやりとり</option>
               </select>
             </label>
             <button
@@ -105,16 +116,16 @@ export function EventLogSettingsPanel({
                   <p>{eventLogSummary(record)}</p>
                   <dl className="event-log-meta">
                     <div>
-                      <dt>種類</dt>
-                      <dd>{record.kind}</dd>
+                      <dt>できごと</dt>
+                      <dd>{eventKindLabel(record.kind)}</dd>
                     </div>
                     <div>
                       <dt>日時</dt>
                       <dd>{formatEventLogTimestamp(record.timestamp)}</dd>
                     </div>
                     <div>
-                      <dt>プライバシー</dt>
-                      <dd>{record.privacy?.category ?? "なし"}</dd>
+                      <dt>記録元</dt>
+                      <dd>{eventPrivacyLabel(record.privacy?.category)}</dd>
                     </div>
                   </dl>
                 </div>
@@ -153,17 +164,23 @@ export function EventLogSettingsPanel({
             </button>
           </label>
           <label>
-            <span>種類の前方一致</span>
-            <input
-              type="text"
+            <span>できごとを選んで削除</span>
+            <select
               value={deletePrefix}
-              placeholder="desktop."
               onChange={(event) =>
                 onDeletePrefixChange(event.currentTarget.value)
               }
-            />
+            >
+              <option value="">選択してください</option>
+              <option value="conversation.">あなたからの会話</option>
+              <option value="dialogue.">住人からの会話</option>
+              <option value="desktop.">パソコン上で気づいたこと</option>
+              <option value="presence.">住人の日々のようす</option>
+              <option value="memory.">記憶の変化</option>
+              <option value="scene.">物語の進行</option>
+            </select>
             <button type="button" disabled={loading} onClick={onDeletePrefix}>
-              種類指定で削除
+              選んだ記録を削除
             </button>
           </label>
         </section>
@@ -178,7 +195,7 @@ export function EventLogSettingsPanel({
           onClick={onDeleteAll}
           disabled={loading}
         >
-          全削除
+          すべて削除
         </button>
       </div>
     </>

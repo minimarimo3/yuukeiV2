@@ -442,7 +442,7 @@ describe("App", () => {
     render(<App client={client} />);
 
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "住人と世界" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
@@ -503,7 +503,7 @@ describe("App", () => {
       screen.getByText("この子はあなたのデバイスに住みます。"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("tab", { name: "World Pack" }),
+      screen.queryByRole("tab", { name: "住人と世界" }),
     ).not.toBeInTheDocument();
   });
 
@@ -518,11 +518,11 @@ describe("App", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "次へ" }));
     expect(
-      await screen.findByRole("heading", { name: "ローカルAI" }),
+      await screen.findByRole("heading", { name: "住人との会話" }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "モデルはyuukei-intelligenceに同梱されます。接続先やモデルの設定は不要で、常設チャットとしては動作しません。",
+        "必要なものはYuukeiに含まれているため、接続先などの難しい設定はありません。会話の内容は外部サービスへ送りません。",
       ),
     ).toBeInTheDocument();
     expect(
@@ -531,11 +531,13 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "次へ" }));
 
     expect(
-      await screen.findByRole("heading", { name: "観測とプライバシー" }),
+      await screen.findByRole("heading", {
+        name: "パソコン上の変化への気づき",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)",
+        "アプリ名と、画面を開いた・閉じたことだけを記録します。画面のタイトルや内容は記録しません。",
       ),
     ).toBeInTheDocument();
   });
@@ -559,7 +561,7 @@ describe("App", () => {
 
     await waitFor(() => expect(client.completeOnboarding).toHaveBeenCalled());
     expect(
-      await screen.findByRole("tab", { name: "World Pack" }),
+      await screen.findByRole("tab", { name: "住人と世界" }),
     ).toHaveAttribute("aria-selected", "true");
     expect(
       screen.queryByRole("heading", { name: "完了" }),
@@ -581,7 +583,7 @@ describe("App", () => {
 
     await waitFor(() => expect(client.dismissOnboarding).toHaveBeenCalled());
     expect(
-      await screen.findByRole("tab", { name: "World Pack" }),
+      await screen.findByRole("tab", { name: "住人と世界" }),
     ).toHaveAttribute("aria-selected", "true");
   });
 
@@ -600,7 +602,7 @@ describe("App", () => {
     render(<App client={client} />);
 
     expect(
-      await screen.findByRole("tab", { name: "World Pack" }),
+      await screen.findByRole("tab", { name: "住人と世界" }),
     ).toHaveAttribute("aria-selected", "true");
     expect(
       screen.queryByRole("heading", { name: "ようこそ" }),
@@ -614,23 +616,54 @@ describe("App", () => {
 
     expect(await screen.findByText("Default Yuukei")).toBeInTheDocument();
     expect(
-      screen.queryByText("0件のExtensionをインストール済み"),
+      screen.queryByText("0件の追加機能を利用できます"),
     ).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
     expect(
-      await screen.findByText("0件のExtensionをインストール済み"),
+      await screen.findByText("0件の追加機能を利用できます"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Extensions" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "追加機能" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    expect(screen.getByRole("tab", { name: "World Pack" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "住人と世界" })).toHaveAttribute(
       "aria-selected",
       "false",
     );
     expect(screen.queryByText("Default Yuukei")).not.toBeInTheDocument();
+  });
+
+  it("keeps storage formats and internal terminology out of settings", async () => {
+    const client = clientFixture();
+
+    render(<App client={client} />);
+
+    await screen.findByRole("tab", { name: "住人と世界" });
+    expect(
+      screen.queryByText("/tmp/yuukei-v2/settings/world-packs.json"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "World Pack" }),
+    ).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
+    expect(screen.queryByText("直近文脈の件数")).not.toBeInTheDocument();
+    expect(screen.queryByText(/runtime\.json/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: /話しかける頻度/ }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "生活の記録" }));
+    expect(
+      screen.queryByText("desktop.download.completed"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("desktop-observation")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
+    expect(screen.queryByText(/公開protocol/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/extensions\.json/)).not.toBeInTheDocument();
   });
 
   it("lists resident memories and saves fact edits", async () => {
@@ -638,7 +671,9 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "記憶" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "住人の記憶" }),
+    );
     const factText = await screen.findByText("唐揚げが好き。");
     const factRow = factText.closest("article");
     expect(factRow).not.toBeNull();
@@ -646,7 +681,9 @@ describe("App", () => {
     await userEvent.click(
       within(factRow as HTMLElement).getByRole("button", { name: "編集" }),
     );
-    const editor = screen.getByRole("textbox", { name: "fact fact-1" });
+    const editor = screen.getByRole("textbox", {
+      name: "覚えていることを編集",
+    });
     await userEvent.clear(editor);
     await userEvent.type(editor, "唐揚げと散歩が好き。");
     await userEvent.click(
@@ -668,7 +705,9 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "記憶" }));
+    await userEvent.click(
+      await screen.findByRole("tab", { name: "住人の記憶" }),
+    );
     const episodeText = await screen.findByText("昨日は公園へ行った。");
     const episodeRow = episodeText.closest("article");
     expect(episodeRow).not.toBeNull();
@@ -700,7 +739,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const input = await screen.findByRole("spinbutton", {
       name: /おしゃべりの間隔/,
     });
@@ -717,7 +756,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const input = await screen.findByRole("slider", {
       name: /住人の大きさ/,
     });
@@ -733,7 +772,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const toggle = await screen.findByRole("checkbox", {
       name: /ログイン時に自動起動/,
     });
@@ -758,14 +797,14 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const toggle = await screen.findByRole("checkbox", {
       name: /ログイン時に自動起動/,
     });
     expect(toggle).toBeDisabled();
     expect(
       screen.getByText(
-        "開発版では利用できません。build版から設定してください。",
+        "このバージョンでは自動起動を設定できません。インストール済みのYuukeiから設定してください。",
       ),
     ).toBeInTheDocument();
     expect(client.setAutostartEnabled).not.toHaveBeenCalled();
@@ -779,7 +818,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const toggle = await screen.findByRole("checkbox", {
       name: /ログイン時に自動起動/,
     });
@@ -796,12 +835,12 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
     const timeoutInput = await screen.findByRole("spinbutton", {
-      name: /AI待ち時間/,
+      name: /返事を待つ時間/,
     });
     await userEvent.clear(timeoutInput);
-    await userEvent.type(timeoutInput, "45000");
+    await userEvent.type(timeoutInput, "45");
 
     await waitFor(() => {
       expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
@@ -813,7 +852,7 @@ describe("App", () => {
     });
 
     const contextInput = await screen.findByRole("spinbutton", {
-      name: /直近文脈の件数/,
+      name: /会話を振り返る長さ/,
     });
     await userEvent.clear(contextInput);
     await userEvent.type(contextInput, "8");
@@ -828,39 +867,23 @@ describe("App", () => {
     });
   });
 
-  it("saves talk desire threshold settings", async () => {
+  it("saves a user-friendly talk frequency preset", async () => {
     const client = clientFixture();
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "App" }));
-    const lowInput = await screen.findByRole("spinbutton", {
-      name: /話したい度: 低/,
+    await userEvent.click(screen.getByRole("tab", { name: "基本設定" }));
+    const frequency = await screen.findByRole("combobox", {
+      name: /話しかける頻度/,
     });
-    await userEvent.clear(lowInput);
-    await userEvent.type(lowInput, "25");
+    await userEvent.selectOptions(frequency, "chatty");
 
     await waitFor(() => {
       expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
         llmTimeoutMs: 30000,
         recentContextCount: 20,
-        talkDesireLow: 25,
-        talkDesireHigh: 80,
-      });
-    });
-
-    const highInput = await screen.findByRole("spinbutton", {
-      name: /話したい度: 高/,
-    });
-    await userEvent.clear(highInput);
-    await userEvent.type(highInput, "75");
-
-    await waitFor(() => {
-      expect(client.setRuntimeSettings).toHaveBeenLastCalledWith({
-        llmTimeoutMs: 30000,
-        recentContextCount: 20,
-        talkDesireLow: 25,
-        talkDesireHigh: 75,
+        talkDesireLow: 15,
+        talkDesireHigh: 65,
       });
     });
   });
@@ -872,14 +895,14 @@ describe("App", () => {
     render(<App client={client} />);
 
     await userEvent.click(
-      await screen.findByRole("tab", { name: "シーン履歴" }),
+      await screen.findByRole("tab", { name: "物語の進み具合" }),
     );
     expect(await screen.findByText("greeting")).toBeInTheDocument();
-    expect(screen.getByText("合図: conversation.text")).toBeInTheDocument();
+    expect(screen.getByText("最後に進んだ日時")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "全リセット" }));
+    await userEvent.click(screen.getByRole("button", { name: "最初に戻す" }));
     expect(confirm).toHaveBeenCalledWith(
-      "このWorld Packのシーン実行履歴をすべてリセットします。この操作は取り消せません。続けますか？",
+      "この住人の物語の進み具合を最初に戻します。この操作は取り消せません。続けますか？",
     );
     await waitFor(() => {
       expect(client.resetSceneHistory).toHaveBeenCalledTimes(1);
@@ -895,7 +918,7 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await screen.findByRole("tab", { name: "World Pack" });
+    await screen.findByRole("tab", { name: "住人と世界" });
     expect(screen.queryByRole("tab", { name: "観測" })).not.toBeInTheDocument();
     expect(screen.queryByText("観測とプライバシー")).not.toBeInTheDocument();
     expect(client.setObservationSettings).not.toHaveBeenCalled();
@@ -910,10 +933,12 @@ describe("App", () => {
       await screen.findByRole("tab", { name: "生活の記録" }),
     );
 
-    expect(await screen.findByText("fileName: photo.png")).toBeInTheDocument();
-    expect(screen.getByText(/desktop.download.completed/)).toBeInTheDocument();
-    expect(screen.getByText("desktop-observation")).toBeInTheDocument();
-    expect(screen.getByText("text: おはよう")).toBeInTheDocument();
+    expect(
+      await screen.findByText("photo.pngについて住人が気づきました"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("ダウンロードに気づいた")).toBeInTheDocument();
+    expect(screen.getByText("パソコン上の変化から記録")).toBeInTheDocument();
+    expect(screen.getByText("住人「おはよう」")).toBeInTheDocument();
   });
 
   it("confirms and deletes event log records before a timestamp", async () => {
@@ -940,7 +965,7 @@ describe("App", () => {
       expect.stringContaining("削除予定: 2件"),
     );
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("住人の記憶(要約)には残っている場合があります。"),
+      expect.stringContaining("住人が別に覚えている内容は残る場合があります。"),
     );
     await waitFor(() =>
       expect(client.deleteEventLogBefore).toHaveBeenCalledWith(
@@ -959,7 +984,7 @@ describe("App", () => {
     await userEvent.click(
       await screen.findByRole("tab", { name: "生活の記録" }),
     );
-    await userEvent.click(screen.getByRole("button", { name: "全削除" }));
+    await userEvent.click(screen.getByRole("button", { name: "すべて削除" }));
 
     await waitFor(() =>
       expect(client.countEventLogDeleteAll).toHaveBeenCalled(),
@@ -981,7 +1006,7 @@ describe("App", () => {
 
     await screen.findByText("Default Yuukei");
     await userEvent.click(
-      screen.getByRole("button", { name: "フォルダを選択" }),
+      screen.getByRole("button", { name: "別の住人と世界を選ぶ" }),
     );
 
     await waitFor(() => {
@@ -1009,7 +1034,7 @@ describe("App", () => {
 
     await screen.findByText("Default Yuukei");
     await userEvent.click(
-      screen.getByRole("button", { name: "フォルダを選択" }),
+      screen.getByRole("button", { name: "別の住人と世界を選ぶ" }),
     );
 
     await waitFor(() => {
@@ -1042,7 +1067,7 @@ describe("App", () => {
 
     await screen.findByText("Default Yuukei");
     await userEvent.click(
-      screen.getByRole("button", { name: "zipから読み込む" }),
+      screen.getByRole("button", { name: "配布ファイルから追加" }),
     );
 
     await waitFor(() =>
@@ -1054,7 +1079,7 @@ describe("App", () => {
       expect.stringContaining("このPackの配布条件です。"),
     );
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("続行すると置き換えます。"),
+      expect.stringContaining("続けると新しい内容に置き換わります。"),
     );
     await waitFor(() =>
       expect(client.importWorldPackZip).toHaveBeenCalledWith(
@@ -1077,10 +1102,14 @@ describe("App", () => {
 
     await screen.findByText("Default Yuukei");
     await userEvent.click(
-      screen.getByRole("button", { name: "フォルダを選択" }),
+      screen.getByRole("button", { name: "別の住人と世界を選ぶ" }),
     );
 
-    expect(await screen.findByText("pack.json is missing")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "選んだ住人と世界を読み込めませんでした。必要なファイルが揃っているか確認してください。",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("Default Yuukei")).toBeInTheDocument();
   });
 
@@ -1097,14 +1126,14 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    expect(await screen.findByText("Daihon エラー 5件")).toBeInTheDocument();
-    expect(screen.getByText("Daihon diagnostic 1")).toBeInTheDocument();
-    expect(screen.getByText("Daihon diagnostic 4")).toBeInTheDocument();
-    expect(screen.queryByText("Daihon diagnostic 5")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("読み込めなかった内容 5件"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
 
     await userEvent.click(screen.getByRole("button", { name: "すべて表示" }));
 
-    expect(screen.getByText("Daihon diagnostic 5")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(5);
   });
 
   it("refreshes World Pack diagnostics after a failed selection", async () => {
@@ -1127,11 +1156,15 @@ describe("App", () => {
 
     await screen.findByText("Default Yuukei");
     await userEvent.click(
-      screen.getByRole("button", { name: "フォルダを選択" }),
+      screen.getByRole("button", { name: "別の住人と世界を選ぶ" }),
     );
 
-    expect(await screen.findByText("Daihon load failed")).toBeInTheDocument();
-    expect(await screen.findByText("Daihon diagnostic 1")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "選んだ住人と世界を読み込めませんでした。必要なファイルが揃っているか確認してください。",
+      ),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("listitem")).toBeInTheDocument();
   });
 
   it("installs an Extension only after approving the inspected permissions", async () => {
@@ -1148,9 +1181,11 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
-    await screen.findByText("0件のExtensionをインストール済み");
-    await userEvent.click(screen.getByRole("button", { name: "追加" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
+    await screen.findByText("0件の追加機能を利用できます");
+    await userEvent.click(
+      screen.getByRole("button", { name: "追加機能を選ぶ" }),
+    );
 
     expect(
       await screen.findByRole("dialog", { name: "Nya Suffix" }),
@@ -1180,8 +1215,10 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
-    await userEvent.click(screen.getByRole("button", { name: "追加" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "追加機能を選ぶ" }),
+    );
     await screen.findByRole("dialog", { name: "Nya Suffix" });
     await userEvent.click(screen.getByRole("button", { name: "許可しない" }));
 
@@ -1220,9 +1257,9 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
     await screen.findByText("Nya Suffix");
-    await userEvent.click(screen.getByLabelText("Nya Suffix nya-suffix"));
+    await userEvent.click(screen.getByLabelText("Nya Suffix"));
     await waitFor(() => {
       expect(client.setExtensionEnabled).toHaveBeenCalledWith(
         "nya-suffix",
@@ -1276,14 +1313,16 @@ describe("App", () => {
 
     render(<App client={client} />);
 
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
-    expect(await screen.findByText("状態: 休止")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
+    expect(
+      await screen.findByText("問題が続いたため停止中です"),
+    ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "再起動" }));
 
     await waitFor(() => {
       expect(client.restartExtensionProcess).toHaveBeenCalledWith("voicevox");
     });
-    expect(await screen.findByText("状態: 正常")).toBeInTheDocument();
+    expect(await screen.findByText("利用できます")).toBeInTheDocument();
   });
 
   it("shows Extension permission rows with a broad subscription warning", async () => {
@@ -1315,19 +1354,20 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
     expect(await screen.findByText("Watcher")).toBeInTheDocument();
-    expect(screen.getByText("全イベント購読")).toBeInTheDocument();
-    expect(screen.getByText("全イベントを受け取ります")).toBeInTheDocument();
-    expect(screen.getByText("event log読み出し")).toBeInTheDocument();
-    expect(screen.getByText(/events: conversation\.\*/)).toHaveTextContent(
-      "payload: 可 / references: 不可 / max: 50 / 目的: rebuild",
+    expect(screen.getByText("すべてのできごとを利用")).toBeInTheDocument();
+    expect(
+      screen.getByText("住人の生活で起きたすべてのできごとを受け取ります"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("生活の記録を読む")).toBeInTheDocument();
+    expect(screen.getByText(/目的: rebuild/)).toHaveTextContent(
+      "一度に最大50件・記録の内容を含む",
     );
-    expect(screen.getByText("capability提供")).toBeInTheDocument();
-    expect(screen.getByText("memory.retrieve")).toBeInTheDocument();
-    expect(screen.getByText("発行イベント")).toBeInTheDocument();
-    expect(screen.getByText("ext.watcher.activity")).toBeInTheDocument();
+    expect(screen.getByText("追加される機能")).toBeInTheDocument();
+    expect(screen.getByText("記憶")).toBeInTheDocument();
+    expect(screen.getByText("Yuukeiへ変化を知らせる")).toBeInTheDocument();
   });
 
   it("shows VOICEVOX credit text for the bundled speech extension", async () => {
@@ -1337,7 +1377,7 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
     expect(await screen.findByText("Yuukei VOICEVOX")).toBeInTheDocument();
     expect(
@@ -1421,25 +1461,22 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
-    expect(await screen.findByText("トークン使用量")).toBeInTheDocument();
-    const usageSection = screen.getByLabelText(
-      "yuukei-intelligence token usage",
-    );
+    expect(await screen.findByText("AIの利用状況")).toBeInTheDocument();
+    const usageSection = screen.getByLabelText("AIの利用状況");
+    expect(within(usageSection).getByText("会話")).toBeInTheDocument();
+    expect(within(usageSection).getByText("3回")).toBeInTheDocument();
     expect(
-      within(usageSection).getByText("dialogue.generate"),
+      within(usageSection).getByText("読んだ文章量 1,200"),
     ).toBeInTheDocument();
     expect(
-      within(usageSection).getByText("openai-compatible / local-model"),
+      within(usageSection).getByText("作った文章量 345"),
     ).toBeInTheDocument();
-    expect(within(usageSection).getByText("リクエスト 3")).toBeInTheDocument();
-    expect(within(usageSection).getByText("入力 1,200")).toBeInTheDocument();
-    expect(within(usageSection).getByText("出力 345")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "使用量を更新" }));
 
-    expect(await screen.findByText("リクエスト 4")).toBeInTheDocument();
+    expect(await screen.findByText("4回")).toBeInTheDocument();
     expect(client.getCapabilityUsage).toHaveBeenCalledTimes(2);
   });
 
@@ -1521,7 +1558,7 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
     expect(await screen.findByText("Yuukei Intelligence")).toBeInTheDocument();
     expect(screen.getByLabelText("OpenAI互換 Base URL")).toHaveValue(
@@ -1534,7 +1571,9 @@ describe("App", () => {
       "gemini",
     );
     expect(await screen.findByLabelText("Gemini APIキー")).toHaveValue("");
-    expect(screen.getByPlaceholderText("設定済み")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("入力済み（内容は表示しません）"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByLabelText("OpenAI互換 Base URL"),
     ).not.toBeInTheDocument();
@@ -1603,7 +1642,7 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
     await screen.findByText("Yuukei Intelligence");
 
     expect(screen.getByLabelText("タイムアウト(ms)")).toHaveValue(30000);
@@ -1657,12 +1696,16 @@ describe("App", () => {
     });
 
     render(<App client={client} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Extensions" }));
+    await userEvent.click(screen.getByRole("tab", { name: "追加機能" }));
 
     const secret = await screen.findByLabelText("Gemini APIキー");
     expect(secret).toHaveValue("");
-    expect(screen.getByPlaceholderText("設定済み")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "クリア" }));
+    expect(
+      screen.getByPlaceholderText("入力済み（内容は表示しません）"),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "入力内容を削除" }),
+    );
 
     await waitFor(() => {
       expect(client.setExtensionSecret).toHaveBeenCalledWith(

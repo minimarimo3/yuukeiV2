@@ -28,14 +28,14 @@ export function subscribesToBeforeCommandEmit(
 export function extensionRuntimeStatusLabel(
   extension: InstalledExtension,
 ): string {
-  if (!extension.enabled) return "状態: 無効";
+  if (!extension.enabled) return "オフ";
   const status = extension.runtimeStatus;
-  if (!status) return "状態: 正常";
-  if (status.suspended) return "状態: 休止";
+  if (!status) return "利用できます";
+  if (status.suspended) return "問題が続いたため停止中です";
   if (status.health === "degraded") {
-    return `状態: 注意 (${status.failureCount})`;
+    return "一時的な問題が起きています";
   }
-  return "状態: 正常";
+  return "利用できます";
 }
 
 export function voicevoxCreditText(
@@ -50,7 +50,14 @@ export function memoryErrorMessage(error: unknown): string {
   if (/memory\.|capability|extension|provider/i.test(message)) {
     return "記憶機能が無効です";
   }
-  return message;
+  if (
+    /(?:\.json|protocol|failed|invalid|missing|unknown|timeout|[\\/][^ ]+)/i.test(
+      message,
+    )
+  ) {
+    return "住人の記憶を読み込めませんでした。もう一度お試しください。";
+  }
+  return message || "住人の記憶を読み込めませんでした。";
 }
 
 export function formatMemoryTimestamp(value: string): string {
@@ -74,30 +81,48 @@ export function formatEventLogTimestamp(value: string): string {
 
 export function eventLogSummary(record: EventLogRecord): string {
   const payload = record.payload ?? {};
-  const preferredKeys = [
-    "text",
-    "fileName",
-    "choice",
-    "category",
-    "app",
-    "windowKey",
-    "reason",
-    "deleted",
-  ];
-  for (const key of preferredKeys) {
-    const value = payload[key];
-    if (typeof value === "string" && value.trim()) {
-      return `${key}: ${value}`;
-    }
-    if (typeof value === "number" || typeof value === "boolean") {
-      return `${key}: ${String(value)}`;
-    }
+  const text = textValue(payload.text);
+  if (text) {
+    if (record.kind === "dialogue.say") return `住人「${text}」`;
+    if (record.kind === "conversation.text") return `あなた「${text}」`;
+    return text;
   }
-  const json = JSON.stringify(payload);
-  if (!json || json === "{}") {
-    return "(payloadなし)";
+  const fileName = textValue(payload.fileName);
+  if (fileName) return `${fileName}について住人が気づきました`;
+  const app = textValue(payload.app);
+  if (app) return `${app}を使ったことに住人が気づきました`;
+  const choice = textValue(payload.choice);
+  if (choice) return `「${choice}」を選びました`;
+  if (typeof payload.deleted === "number") {
+    return `${payload.deleted}件の記録を削除しました`;
   }
-  return json.length > 120 ? `${json.slice(0, 117)}...` : json;
+  return "住人の生活に関するできごとです";
+}
+
+export function eventKindLabel(kind: string): string {
+  const exact: Record<string, string> = {
+    "desktop.download.completed": "ダウンロードに気づいた",
+    "conversation.text": "あなたが話しかけた",
+    "dialogue.say": "住人が話した",
+    "app.settings.opened": "設定を開いた",
+    "memory.updated": "住人の記憶が変わった",
+    "memory.forgotten": "住人が記憶を忘れた",
+  };
+  if (exact[kind]) return exact[kind];
+  if (kind.startsWith("desktop.")) return "パソコン上の変化に気づいた";
+  if (kind.startsWith("conversation.") || kind.startsWith("dialogue.")) {
+    return "住人と会話した";
+  }
+  if (kind.startsWith("memory.")) return "住人の記憶が変わった";
+  if (kind.startsWith("presence.")) return "住人が過ごした";
+  if (kind.startsWith("scene.")) return "物語が進んだ";
+  return "住人の生活に変化があった";
+}
+
+export function eventPrivacyLabel(category: string | null | undefined): string {
+  return category === "desktop-observation"
+    ? "パソコン上の変化から記録"
+    : "住人とのやりとりから記録";
 }
 
 export type ExtensionPermissionRow = {
@@ -125,61 +150,72 @@ export function extensionPermissionRows(
 
   if (broadEventSubscription) {
     rows.push({
-      label: "全イベント購読",
-      value: "全イベントを受け取ります",
+      label: "すべてのできごとを利用",
+      value: "住人の生活で起きたすべてのできごとを受け取ります",
       warning: true,
     });
   }
   if (extension.eventSubscriptions.length > 0) {
+    const eventTypeCount = new Set(
+      extension.eventSubscriptions.flatMap(
+        (subscription) => subscription.eventTypes,
+      ),
+    ).size;
     rows.push({
-      label: "イベント購読",
-      value: extension.eventSubscriptions
-        .flatMap((subscription) => subscription.eventTypes)
-        .filter(
-          (eventType, index, values) => values.indexOf(eventType) === index,
-        )
-        .join(", "),
+      label: "住人のできごとを利用",
+      value: broadEventSubscription
+        ? "すべてのできごと"
+        : `${eventTypeCount}種類のできごと`,
       warning: broadEventSubscription,
     });
   }
   if (extension.hooks.length > 0) {
     rows.push({
-      label: "コマンド加工",
-      value: extension.hooks
-        .map((hook) => `${hook.hookPoint}: ${joinOrAll(hook.commandTypes)}`)
-        .join(" / "),
+      label: "住人の動作や会話を調整",
+      value: "住人が実行する直前に内容を調整できます",
     });
   }
   if (extension.permissions.eventLogRead) {
     const permission = extension.permissions.eventLogRead;
     rows.push({
-      label: "event log読み出し",
+      label: "生活の記録を読む",
       value: [
-        `events: ${joinOrAll(permission.eventTypes)}`,
-        `privacy: ${joinOrAll(permission.privacyCategories)}`,
-        `payload: ${permission.allowPayloads ? "可" : "不可"}`,
-        `references: ${permission.allowReferences ? "可" : "不可"}`,
-        `max: ${permission.maxRecords}`,
         `目的: ${permission.purpose}`,
-      ].join(" / "),
+        `一度に最大${permission.maxRecords}件`,
+        permission.allowPayloads ? "記録の内容を含む" : "記録の種類と日時のみ",
+      ].join("・"),
     });
   }
   if (extension.capabilities.length > 0) {
     rows.push({
-      label: "capability提供",
+      label: "追加される機能",
       value: extension.capabilities
-        .map((capability) => capability.capability)
+        .map((capability) => capabilityLabel(capability.capability))
         .join(", "),
     });
   }
   if (extension.emittedEvents.length > 0) {
     rows.push({
-      label: "発行イベント",
-      value: extension.emittedEvents.join(", "),
+      label: "Yuukeiへ変化を知らせる",
+      value: `${extension.emittedEvents.length}種類の変化を住人の生活に反映します`,
     });
   }
 
   return rows;
+}
+
+export function capabilityLabel(capability: string): string {
+  if (capability.startsWith("dialogue.")) return "会話";
+  if (capability.startsWith("memory.")) return "記憶";
+  if (capability.startsWith("voice.") || capability.includes("speech")) {
+    return "音声";
+  }
+  if (capability.startsWith("mood.")) return "気分";
+  return "住人の追加機能";
+}
+
+function textValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 export function joinOrAll(values: string[]): string {

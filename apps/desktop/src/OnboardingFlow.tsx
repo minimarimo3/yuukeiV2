@@ -53,7 +53,7 @@ export function OnboardingFlow({
         className="onboarding-progress"
         aria-label="オンボーディングの進行"
       >
-        {["ようこそ", "AI", "観測", "完了"].map((label, index) => (
+        {["ようこそ", "会話", "プライバシー", "完了"].map((label, index) => (
           <span
             className={[
               "onboarding-progress-step",
@@ -76,13 +76,10 @@ export function OnboardingFlow({
                 この子はあなたのデバイスに住みます。
               </p>
               <p className="settings-note">
-                World Packが、住人の世界観や台本、暮らし方を決めます。
+                選ぶ内容によって、住人の見た目や性格、台詞、暮らし方が変わります。
               </p>
               <p className="settings-title">
                 {worldPackStatus?.activeInstall.displayName ?? "読み込み中"}
-              </p>
-              <p className="settings-path">
-                {worldPackStatus?.activeInstall.canonicalRoot ?? ""}
               </p>
               {worldPackError ? (
                 <p className="settings-error">{worldPackError}</p>
@@ -95,7 +92,7 @@ export function OnboardingFlow({
                 onClick={onChooseWorldPack}
                 disabled={switchingPack}
               >
-                別のWorld Packを選ぶ
+                別の住人と世界を選ぶ
               </button>
               <button type="button" onClick={() => onStepChange(1)}>
                 次へ
@@ -107,12 +104,12 @@ export function OnboardingFlow({
         {clampedStep === 1 ? (
           <>
             <div className="settings-copy onboarding-ai-step">
-              <h2>ローカルAI</h2>
+              <h2>住人との会話</h2>
               <p className="settings-title">
-                Daihonが指示した短いセリフの補完と、場面内入力の解釈に使います。
+                住人が自然に話したり、あなたの返事を受け取ったりするためにAIを使います。
               </p>
               <p className="settings-note">
-                モデルはyuukei-intelligenceに同梱されます。接続先やモデルの設定は不要で、常設チャットとしては動作しません。
+                必要なものはYuukeiに含まれているため、接続先などの難しい設定はありません。会話の内容は外部サービスへ送りません。
               </p>
             </div>
             <div className="settings-actions">
@@ -133,30 +130,30 @@ export function OnboardingFlow({
         {clampedStep === 2 ? (
           <>
             <div className="settings-copy observation-settings">
-              <h2>観測とプライバシー</h2>
+              <h2>パソコン上の変化への気づき</h2>
               <p className="settings-title">
-                Yuukei本体が生活の地形として使う観測です。ONにしたものだけを記録し、通常設定には表示しません。
+                許可したものだけ、住人がパソコン上の変化に気づけるようになります。あとから変更することもできます。
               </p>
               {observationSettingsError ? (
                 <p className="settings-error">{observationSettingsError}</p>
               ) : null}
               <ObservationToggle
-                label="ウィンドウ"
-                description="アプリ名とウィンドウの出現・消滅だけを記録します(タイトルは記録しません)"
+                label="使っているアプリに気づく"
+                description="アプリ名と、画面を開いた・閉じたことだけを記録します。画面のタイトルや内容は記録しません。"
                 checked={observationSettings?.windows ?? false}
                 disabled={changingObservationSettings}
                 onChange={(checked) => onToggleObservation("windows", checked)}
               />
               <ObservationToggle
-                label="フォルダ"
-                description="開いた場所の種類だけを記録します(パスは記録しません)"
+                label="開いたフォルダに気づく"
+                description="フォルダの種類だけを記録します。フォルダ名や保存場所は記録しません。"
                 checked={observationSettings?.folders ?? false}
                 disabled={changingObservationSettings}
                 onChange={(checked) => onToggleObservation("folders", checked)}
               />
               <ObservationToggle
-                label="ダウンロード"
-                description="ファイル名と種類を記録します(場所は記録しません)"
+                label="ダウンロードに気づく"
+                description="ファイル名と種類を記録します。保存場所やファイルの中身は記録しません。"
                 checked={observationSettings?.downloads ?? false}
                 disabled={changingObservationSettings}
                 onChange={(checked) =>
